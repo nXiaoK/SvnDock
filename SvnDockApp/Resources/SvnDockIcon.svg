@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title description">
+  <title id="title">SvnDock application icon</title>
+  <desc id="description">A blue and violet dock with branching version paths.</desc>
+  <defs>
+    <linearGradient id="background" x1="120" y1="80" x2="920" y2="960" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#5F64EE"/>
+      <stop offset="0.48" stop-color="#3548C6"/>
+      <stop offset="1" stop-color="#1B1B72"/>
+    </linearGradient>
+    <linearGradient id="water" x1="512" y1="544" x2="512" y2="880" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9EDCFF"/>
+      <stop offset="1" stop-color="#4C77E8"/>
+    </linearGradient>
+    <linearGradient id="dock" x1="302" y1="650" x2="718" y2="790" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FBFEFF"/>
+      <stop offset="0.45" stop-color="#CAE8FF"/>
+      <stop offset="1" stop-color="#83A6FF"/>
+    </linearGradient>
+    <linearGradient id="branch" x1="512" y1="294" x2="512" y2="640" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F5F1FF"/>
+      <stop offset="1" stop-color="#9CF3FF"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="30" stdDeviation="26" flood-color="#0B145A" flood-opacity="0.42"/>
+    </filter>
+    <filter id="glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="13" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect x="54" y="54" width="916" height="916" rx="208" fill="url(#background)"/>
+  <rect x="72" y="72" width="880" height="880" rx="192" fill="none" stroke="#C7CCFF" stroke-opacity="0.32" stroke-width="10"/>
+
+  <path d="M144 698C260 660 321 729 424 700C528 671 557 599 674 616C776 631 817 682 893 664V829C805 856 724 836 642 857C531 885 469 850 376 875C274 902 215 863 144 883Z" fill="url(#water)" opacity="0.32"/>
+  <path d="M155 780C284 738 353 805 457 777C567 747 600 695 700 713C782 727 825 764 885 751" fill="none" stroke="#C6F3FF" stroke-opacity="0.30" stroke-width="15" stroke-linecap="round"/>
+
+  <g filter="url(#shadow)">
+    <path d="M296 635C296 600 324 572 359 572H665C700 572 728 600 728 635V782C728 817 700 845 665 845H359C324 845 296 817 296 782Z" fill="url(#dock)"/>
+    <path d="M298 705H726V781C726 816 698 844 663 844H361C326 844 298 816 298 781Z" fill="#7193F3" opacity="0.46"/>
+    <path d="M352 681H672" stroke="#4F65CF" stroke-opacity="0.34" stroke-width="17" stroke-linecap="round"/>
+    <path d="M394 745H630" stroke="#EEF9FF" stroke-opacity="0.72" stroke-width="15" stroke-linecap="round"/>
+  </g>
+
+  <g fill="none" stroke="url(#branch)" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M512 635V488C512 448 481 429 438 404L337 345" stroke-width="34"/>
+    <path d="M512 635V488C512 448 543 429 586 404L687 345" stroke-width="34"/>
+    <path d="M512 635V398" stroke-width="34"/>
+  </g>
+  <g filter="url(#glow)">
+    <circle cx="337" cy="345" r="40" fill="#D7F8FF"/>
+    <circle cx="512" cy="350" r="40" fill="#E7DEFF"/>
+    <circle cx="687" cy="345" r="40" fill="#D7F8FF"/>
+    <circle cx="512" cy="635" r="28" fill="#FFFFFF"/>
+  </g>
+  <g fill="#5E67DB" opacity="0.32">
+    <circle cx="337" cy="345" r="17"/>
+    <circle cx="512" cy="350" r="17"/>
+    <circle cx="687" cy="345" r="17"/>
+  </g>
+</svg>

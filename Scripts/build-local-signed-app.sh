@@ -512,6 +512,7 @@ xcrun swiftc \
     -o "$APPEX_EXECUTABLE"
 
 cp "$ROOT_DIR/SvnDockApp/Resources/Info.plist" "$APP_STAGE/Contents/Info.plist"
+cp "$ROOT_DIR/SvnDockApp/Resources/SvnDock.icns" "$APP_STAGE/Contents/Resources/SvnDock.icns"
 plutil -replace CFBundleExecutable -string "SvnDock" "$APP_STAGE/Contents/Info.plist"
 plutil -replace CFBundleIdentifier -string "$APP_BUNDLE_ID" "$APP_STAGE/Contents/Info.plist"
 plutil -replace CFBundleName -string "SvnDock" "$APP_STAGE/Contents/Info.plist"

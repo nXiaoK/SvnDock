@@ -77,6 +77,9 @@ targets:
           - README.md
           - Resources/Info.plist
           - Resources/SvnDock.entitlements
+          - Resources/SvnDock.iconset
+          - Resources/SvnDockIcon.png
+          - Resources/SvnDockIcon.svg
     info:
       path: SvnDockApp/Resources/Info.plist
     entitlements:
