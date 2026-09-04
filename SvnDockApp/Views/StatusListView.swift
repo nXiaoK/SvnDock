@@ -335,9 +335,16 @@ private struct StatusTreeEntryRowView: View {
                     openDiffWindow()
                 }
             }
-            Button("还原…", role: .destructive) {
-                store.selectedEntryIDs = [entry.id]
-                store.requestRevertConfirmation()
+            if entry.status == .added {
+                Button("取消添加…") {
+                    store.selectedEntryIDs = [entry.id]
+                    store.requestUnscheduleAddConfirmation(for: entry)
+                }
+            } else {
+                Button("还原…", role: .destructive) {
+                    store.selectedEntryIDs = [entry.id]
+                    store.requestRevertConfirmation()
+                }
             }
         }
 

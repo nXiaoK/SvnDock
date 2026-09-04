@@ -158,6 +158,7 @@ private struct UnavailableSvnDockService: SvnDockServicing {
     func update(workingCopies: [SvnDockWorkingCopy]) async throws { throw unavailable }
     func commit(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws { throw unavailable }
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
+    func unscheduleAdd(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func resolve(relativePaths: [String], using resolution: SvnDockConflictResolution, in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func addIgnoreRules(_ rules: [SvnDockIgnoreRule], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }

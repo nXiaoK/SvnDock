@@ -99,6 +99,31 @@ actor MockSvnDockService: SvnDockServicing {
         entriesByWorkingCopyID[workingCopy.id] = entries
     }
 
+    func unscheduleAdd(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws {
+        await briefDelay()
+        guard var entries = entriesByWorkingCopyID[workingCopy.id] else { return }
+        let targets = Self.collapsingDescendantPaths(relativePaths)
+        guard !targets.isEmpty, targets.allSatisfy({ target in
+            entries.contains {
+                $0.relativePath == target && $0.status == .added
+            }
+        }) else {
+            throw SvnDockServiceError.noScheduledAdditions
+        }
+
+        for index in entries.indices where entries[index].status == .added {
+            if targets.contains(where: {
+                Self.path(entries[index].relativePath, isInside: $0)
+            }) {
+                entries[index].status = .unversioned
+            }
+        }
+        entriesByWorkingCopyID[workingCopy.id] = entries
+    }
+
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
         await briefDelay()
         entriesByWorkingCopyID[workingCopy.id]?.removeAll { relativePaths.contains($0.relativePath) }
@@ -139,6 +164,24 @@ actor MockSvnDockService: SvnDockServicing {
 
     private func operationDelay() async {
         try? await Task.sleep(nanoseconds: 450_000_000)
+    }
+
+    private static func collapsingDescendantPaths(_ paths: [String]) -> [String] {
+        let sorted = Set(paths).sorted {
+            let lhsDepth = ($0 as NSString).pathComponents.count
+            let rhsDepth = ($1 as NSString).pathComponents.count
+            return lhsDepth == rhsDepth ? $0 < $1 : lhsDepth < rhsDepth
+        }
+        return sorted.reduce(into: []) { result, path in
+            guard !result.contains(where: { Self.path(path, isInside: $0) }) else {
+                return
+            }
+            result.append(path)
+        }
+    }
+
+    private static func path(_ candidate: String, isInside root: String) -> Bool {
+        root == "." || candidate == root || candidate.hasPrefix(root + "/")
     }
 
     static func preview() -> MockSvnDockService {

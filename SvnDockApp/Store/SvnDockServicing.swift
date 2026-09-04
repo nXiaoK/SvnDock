@@ -28,6 +28,10 @@ protocol SvnDockServicing: Sendable {
         message: String
     ) async throws
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws
+    func unscheduleAdd(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws
     func resolve(
         relativePaths: [String],
@@ -47,6 +51,7 @@ enum SvnDockServiceError: LocalizedError {
     case emptyCommitMessage
     case noCommittableFiles
     case noConflictedFiles
+    case noScheduledAdditions
     case invalidIgnoreTarget(String)
     case unavailable(String)
 
@@ -62,6 +67,8 @@ enum SvnDockServiceError: LocalizedError {
             "没有可提交的文件。"
         case .noConflictedFiles:
             "所选项目已经没有可解决的冲突。"
+        case .noScheduledAdditions:
+            "所选项目已经不再处于待添加状态，请刷新后重试。"
         case .invalidIgnoreTarget(let message):
             message
         case .unavailable(let message):

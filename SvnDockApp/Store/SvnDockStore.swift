@@ -53,6 +53,7 @@ final class SvnDockStore: ObservableObject {
     @Published var presentedError: SvnDockUserFacingError?
     @Published var isPresentingCommit = false
     @Published var isPresentingDirectoryImporter = false
+    @Published var isPresentingUnscheduleAddConfirmation = false
     @Published var isPresentingRevertConfirmation = false
     @Published var isPresentingRemovalConfirmation = false
     @Published var isPresentingResolveConfirmation = false
@@ -68,6 +69,7 @@ final class SvnDockStore: ObservableObject {
     private var finalizingFinderCommandIDs: Set<UUID> = []
     private var rejectedFinderCommandIDs: Set<UUID> = []
     private var suppressedSelectionReloadID: UUID?
+    private var pendingUnscheduleAdd: PendingUnscheduleAdd?
     private var pendingRevert: PendingRevert?
     private var pendingRemoval: SvnDockWorkingCopy?
     private var pendingResolve: PendingResolve?
@@ -158,8 +160,8 @@ final class SvnDockStore: ObservableObject {
         switch kind {
         case .refreshing:
             return false
-        case .loading, .updating, .committing, .adding, .reverting, .cleaning,
-             .resolving, .ignoring:
+        case .loading, .updating, .committing, .adding, .unschedulingAdd,
+             .reverting, .cleaning, .resolving, .ignoring:
             return true
         }
     }
@@ -206,6 +208,7 @@ final class SvnDockStore: ObservableObject {
     private var hasBlockingPresentation: Bool {
         isPresentingCommit
             || isPresentingDirectoryImporter
+            || isPresentingUnscheduleAddConfirmation
             || isPresentingRevertConfirmation
             || isPresentingRemovalConfirmation
             || isPresentingResolveConfirmation
@@ -657,6 +660,116 @@ final class SvnDockStore: ObservableObject {
             allowDuringFinderRouting: allowDuringFinderRouting
         )
         return succeeded
+    }
+
+    func requestUnscheduleAddConfirmation(
+        for entry: SvnDockStatusEntry? = nil,
+        allowDuringFinderRouting: Bool = false,
+        finderClaim: FinderCommandClaim? = nil
+    ) {
+        guard allowDuringFinderRouting || !isInteractionBlocked else { return }
+        guard let workingCopy = selectedWorkingCopy else { return }
+
+        let selected: [SvnDockStatusEntry]
+        if let entry,
+           let currentEntry = statusEntry(withID: entry.id),
+           currentEntry.status == .added {
+            selected = [currentEntry]
+        } else if entry == nil {
+            selected = selectedStatusEntries { $0.status == .added }
+        } else {
+            selected = []
+        }
+        guard !selected.isEmpty else {
+            present(
+                SvnDockServiceError.noScheduledAdditions,
+                title: "无法取消添加"
+            )
+            return
+        }
+
+        pendingUnscheduleAdd = PendingUnscheduleAdd(
+            workingCopy: workingCopy,
+            relativePaths: selected.map(\.relativePath),
+            finderClaim: finderClaim
+        )
+        isPresentingUnscheduleAddConfirmation = true
+    }
+
+    func cancelUnscheduleAddConfirmation() {
+        let finderClaim = pendingUnscheduleAdd?.finderClaim
+        pendingUnscheduleAdd = nil
+        isPresentingUnscheduleAddConfirmation = false
+        finalizeAwaitingFinderClaim(finderClaim, outcome: .cancelled)
+    }
+
+    /// Captures the confirmed paths before closing the alert so Finder cannot
+    /// replace the selection while cancellation is being scheduled.
+    func confirmUnscheduleAdd() {
+        guard let request = pendingUnscheduleAdd, activeOperation == nil else {
+            cancelUnscheduleAddConfirmation()
+            return
+        }
+
+        pendingUnscheduleAdd = nil
+        activeOperation = SvnDockOperationState(
+            kind: .unschedulingAdd,
+            detail: "\(request.relativePaths.count) 个项目"
+        )
+        isPresentingUnscheduleAddConfirmation = false
+
+        Task { [weak self] in
+            await self?.executeConfirmedUnscheduleAdd(request)
+        }
+    }
+
+    private func executeConfirmedUnscheduleAdd(
+        _ request: PendingUnscheduleAdd
+    ) async {
+        let executingClaim: FinderCommandClaim?
+        do {
+            executingClaim = try await markFinderClaimExecuting(request.finderClaim)
+        } catch {
+            if let finderClaim = request.finderClaim {
+                _ = await acknowledgeFinderClaim(finderClaim, outcome: .rejected)
+            }
+            activeOperation = nil
+            present(error, title: "无法开始 Finder 取消添加")
+            await processPendingFinderCommands()
+            return
+        }
+
+        var succeeded = false
+        do {
+            try Task.checkCancellation()
+            try await service.unscheduleAdd(
+                relativePaths: request.relativePaths,
+                in: request.workingCopy
+            )
+            succeeded = true
+        } catch is CancellationError {
+            if let executingClaim {
+                await quarantineExecutedFinderClaim(executingClaim)
+            }
+        } catch {
+            if let executingClaim {
+                await quarantineExecutedFinderClaim(executingClaim)
+            }
+            present(error, title: operationFailureTitle(for: .unschedulingAdd))
+        }
+
+        if succeeded, Task.isCancelled {
+            if let executingClaim {
+                await quarantineExecutedFinderClaim(executingClaim)
+            }
+        } else if succeeded, let executingClaim {
+            _ = await acknowledgeFinderClaim(executingClaim, outcome: .completed)
+        }
+        activeOperation = nil
+        if succeeded, selectedWorkingCopyID == request.workingCopy.id {
+            await reloadSelectedWorkingCopy()
+        }
+        await processPendingFinderCommands()
     }
 
     func requestRevertConfirmation(
@@ -1887,6 +2000,7 @@ final class SvnDockStore: ObservableObject {
         case .updating: "更新失败"
         case .committing: "提交失败"
         case .adding: "添加失败"
+        case .unschedulingAdd: "取消添加失败"
         case .reverting: "还原失败"
         case .cleaning: "清理失败"
         case .resolving: "解决冲突失败"
@@ -2129,17 +2243,32 @@ final class SvnDockStore: ObservableObject {
             guard let interactiveClaim else {
                 throw SvnDockServiceError.unavailable("Finder 还原缺少交互式队列声明。")
             }
-            guard entries.contains(where: {
+            let selectedChanges = entries.filter {
                 selectedEntryIDs.contains($0.id) && $0.status.isChange
-            }) else {
+            }
+            guard !selectedChanges.isEmpty else {
                 throw SvnDockServiceError.unavailable("所选文件已经没有可还原的本地更改。")
             }
-            requestRevertConfirmation(
-                allowDuringFinderRouting: true,
-                finderClaim: interactiveClaim
-            )
-            guard isPresentingRevertConfirmation else {
-                throw FinderCommandRouteError.alreadyReported
+            if selectedChanges.allSatisfy({ $0.status == .added }) {
+                requestUnscheduleAddConfirmation(
+                    allowDuringFinderRouting: true,
+                    finderClaim: interactiveClaim
+                )
+                guard isPresentingUnscheduleAddConfirmation else {
+                    throw FinderCommandRouteError.alreadyReported
+                }
+            } else if selectedChanges.contains(where: { $0.status == .added }) {
+                throw SvnDockServiceError.unavailable(
+                    "请将待添加项目与其他本地更改分开还原，以免误操作文件内容。"
+                )
+            } else {
+                requestRevertConfirmation(
+                    allowDuringFinderRouting: true,
+                    finderClaim: interactiveClaim
+                )
+                guard isPresentingRevertConfirmation else {
+                    throw FinderCommandRouteError.alreadyReported
+                }
             }
         case .cleanup:
             let succeeded = await cleanupSelectedWorkingCopy(
@@ -2346,6 +2475,12 @@ private struct PendingCommitExecution: Sendable {
     let workingCopy: SvnDockWorkingCopy
     let relativePaths: [String]
     let message: String
+    let finderClaim: FinderCommandClaim?
+}
+
+private struct PendingUnscheduleAdd: Sendable {
+    let workingCopy: SvnDockWorkingCopy
+    let relativePaths: [String]
     let finderClaim: FinderCommandClaim?
 }
 

@@ -208,12 +208,40 @@ struct SvnDockRootView: View {
         } message: {
             Text(store.pendingIgnoreMessage)
         }
+        .modifier(UnscheduleAddPresentationModifier(store: store))
     }
 
     private func resumeFinderQueueAfterPresentation() {
         Task {
             await store.processPendingFinderCommands()
         }
+    }
+}
+
+private struct UnscheduleAddPresentationModifier: ViewModifier {
+    @ObservedObject var store: SvnDockStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: store.isPresentingUnscheduleAddConfirmation) {
+                if !store.isPresentingUnscheduleAddConfirmation {
+                    store.cancelUnscheduleAddConfirmation()
+                    Task { await store.processPendingFinderCommands() }
+                }
+            }
+            .alert(
+                "取消添加所选项目？",
+                isPresented: $store.isPresentingUnscheduleAddConfirmation
+            ) {
+                Button("取消", role: .cancel) {
+                    store.cancelUnscheduleAddConfirmation()
+                }
+                Button("取消添加") {
+                    store.confirmUnscheduleAdd()
+                }
+            } message: {
+                Text("文件和目录会保留在磁盘上，但将恢复为未纳管状态，不会包含在下次提交中。")
+            }
     }
 }
 

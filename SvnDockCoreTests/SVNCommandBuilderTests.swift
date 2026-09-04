@@ -126,6 +126,23 @@ final class SVNCommandBuilderTests: XCTestCase {
         )
     }
 
+    func testRecursiveRevertUnschedulesAddWithoutRemovingFiles() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .revert(paths: ["ImportedProject"], depth: .infinity),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "revert", "--depth", "infinity", "--non-interactive",
+                "--", "ImportedProject"
+            ]
+        )
+        XCTAssertFalse(invocation.arguments.contains("--remove-added"))
+    }
+
     func testDiffKeepsAtSignFilenameLiteral() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
         let invocation = try builder.makeInvocation(

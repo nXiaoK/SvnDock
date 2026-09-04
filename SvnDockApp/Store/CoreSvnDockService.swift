@@ -269,6 +269,74 @@ actor CoreSvnDockService: SvnDockServicing {
         )
     }
 
+    func unscheduleAdd(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws {
+        guard !relativePaths.isEmpty else {
+            throw SvnDockServiceError.noScheduledAdditions
+        }
+
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        let targets = Self.collapsingDescendantPaths(
+            relativePaths,
+            in: coreCopy
+        )
+        let executableURL = try executableLocator.locate()
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let statusInvocation = try builder.makeInvocation(
+            for: .status(SVNStatusOptions(
+                depth: .empty,
+                paths: targets
+            )),
+            in: coreCopy
+        )
+        let revertInvocation = try builder.makeInvocation(
+            for: .revert(paths: targets, depth: .infinity),
+            in: coreCopy
+        )
+        let runner = processRunner
+        let operationLock = crossProcessLock
+
+        try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                try Task.checkCancellation()
+                try Self.validateResolvedBoundary(
+                    relativePaths: targets,
+                    in: coreCopy
+                )
+
+                // The confirmation may have remained open while another SVN
+                // client changed scheduling metadata. Re-read only the exact,
+                // collapsed targets while holding both working-copy locks.
+                let statusResult = try await runner.run(statusInvocation)
+                guard statusResult.succeeded else {
+                    throw SVNProcessFailure(result: statusResult)
+                }
+                let currentEntries = try SVNXMLParser.parseStatus(
+                    statusResult.standardOutput,
+                    workingCopyURL: coreCopy.localPath,
+                    resolveNodeKinds: false
+                )
+                try Self.validateScheduledAddTargets(
+                    targets,
+                    entries: currentEntries,
+                    in: coreCopy
+                )
+
+                try Task.checkCancellation()
+                try Self.validateResolvedBoundary(
+                    relativePaths: targets,
+                    in: coreCopy
+                )
+                let revertResult = try await runner.run(revertInvocation)
+                guard revertResult.succeeded else {
+                    throw SVNProcessFailure(result: revertResult)
+                }
+            }
+        }
+    }
+
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
         let coreCopy = coreWorkingCopy(for: workingCopy)
         // Revert only the exact status rows the user confirmed. A directory
@@ -766,6 +834,53 @@ actor CoreSvnDockService: SvnDockServicing {
                 }
             }
         }
+    }
+
+    private static func validateScheduledAddTargets(
+        _ relativePaths: [String],
+        entries: [SvnDockCore.StatusEntry],
+        in workingCopy: SvnDockCore.WorkingCopy
+    ) throws {
+        for relativePath in relativePaths {
+            guard let entry = statusEntry(
+                for: relativePath,
+                entries: entries,
+                in: workingCopy
+            ), entry.status == .added else {
+                throw SvnDockServiceError.noScheduledAdditions
+            }
+        }
+    }
+
+    /// Reduces a selection to its shallowest unique paths so reverting an
+    /// added directory does not redundantly pass every scheduled descendant.
+    private static func collapsingDescendantPaths(
+        _ relativePaths: [String],
+        in workingCopy: SvnDockCore.WorkingCopy
+    ) -> [String] {
+        let candidates = relativePaths.map { relativePath in
+            (
+                relativePath: relativePath,
+                url: absoluteURL(for: relativePath, in: workingCopy)
+            )
+        }.sorted { lhs, rhs in
+            let lhsDepth = lhs.url.pathComponents.count
+            let rhsDepth = rhs.url.pathComponents.count
+            if lhsDepth != rhsDepth {
+                return lhsDepth < rhsDepth
+            }
+            return lhs.url.path < rhs.url.path
+        }
+
+        var collapsed: [(relativePath: String, url: URL)] = []
+        collapsed.reserveCapacity(candidates.count)
+        for candidate in candidates {
+            guard !collapsed.contains(where: {
+                path(candidate.url.path, isInside: $0.url.path)
+            }) else { continue }
+            collapsed.append(candidate)
+        }
+        return collapsed.map(\.relativePath)
     }
 
     private static func validateIgnoreRuleShape(_ rule: SvnDockIgnoreRule) throws {

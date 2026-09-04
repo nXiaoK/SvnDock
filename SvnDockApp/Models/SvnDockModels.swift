@@ -371,6 +371,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
     case updating
     case committing
     case adding
+    case unschedulingAdd
     case reverting
     case cleaning
     case resolving
@@ -383,6 +384,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
         case .updating: "正在更新…"
         case .committing: "正在提交…"
         case .adding: "正在添加…"
+        case .unschedulingAdd: "正在取消添加…"
         case .reverting: "正在还原…"
         case .cleaning: "正在清理…"
         case .resolving: "正在解决冲突…"

@@ -61,6 +61,25 @@ struct SvnDockCoreSmokeTestMain {
         )
         try check(pegSafe.arguments.last == "notes/user@example.txt@", "peg revision escaping")
 
+        let unscheduleAdd = try builder.makeInvocation(
+            for: .revert(
+                paths: ["ImportedProject"],
+                depth: .infinity
+            ),
+            in: workingCopy
+        )
+        try check(
+            unscheduleAdd.arguments == [
+                "revert", "--depth", "infinity", "--non-interactive",
+                "--", "ImportedProject"
+            ],
+            "recursive revert for unscheduling additions"
+        )
+        try check(
+            !unscheduleAdd.arguments.contains("--remove-added"),
+            "unscheduling additions preserves disk content"
+        )
+
         let diffLiteral = try builder.makeInvocation(
             for: .diff(paths: ["notes/user@example.txt"]),
             in: workingCopy
@@ -768,6 +787,88 @@ struct SvnDockCoreSmokeTestMain {
         try check(
             info.workingCopyRootURL?.standardizedFileURL == root.standardizedFileURL,
             "real svn wc root"
+        )
+
+        let pendingDirectory = root.appendingPathComponent(
+            "unschedule-\(UUID().uuidString)",
+            isDirectory: true
+        )
+        let pendingFile = pendingDirectory.appendingPathComponent("kept-on-disk.txt")
+        try FileManager.default.createDirectory(
+            at: pendingDirectory,
+            withIntermediateDirectories: false
+        )
+        try Data("keep this file\n".utf8).write(to: pendingFile, options: .atomic)
+
+        let addPendingResult = try await runner.run(
+            builder.makeInvocation(
+                for: .add(
+                    paths: [pendingDirectory.path],
+                    parents: false,
+                    force: true,
+                    depth: .infinity
+                ),
+                in: workingCopy
+            )
+        )
+        try check(addPendingResult.succeeded, "real svn add pending directory")
+        let pendingStatusResult = try await runner.run(
+            builder.makeInvocation(
+                for: .status(SVNStatusOptions(
+                    depth: .empty,
+                    paths: [pendingDirectory.path]
+                )),
+                in: workingCopy
+            )
+        )
+        let pendingStatus = try SVNXMLParser.parseStatus(
+            pendingStatusResult.standardOutput,
+            workingCopyURL: root
+        )
+        try check(
+            pendingStatus.contains {
+                $0.status == .added
+                    && $0.fileURL(relativeTo: workingCopy).standardizedFileURL
+                        == pendingDirectory.standardizedFileURL
+            },
+            "real svn pending directory is scheduled for addition"
+        )
+
+        let unscheduleResult = try await runner.run(
+            builder.makeInvocation(
+                for: .revert(
+                    paths: [pendingDirectory.path],
+                    depth: .infinity
+                ),
+                in: workingCopy
+            )
+        )
+        try check(unscheduleResult.succeeded, "real svn unschedule pending directory")
+        try check(
+            FileManager.default.fileExists(atPath: pendingDirectory.path)
+                && FileManager.default.fileExists(atPath: pendingFile.path),
+            "real svn unschedule preserves added files on disk"
+        )
+        let unversionedStatusResult = try await runner.run(
+            builder.makeInvocation(
+                for: .status(SVNStatusOptions(
+                    depth: .empty,
+                    paths: [pendingDirectory.path]
+                )),
+                in: workingCopy
+            )
+        )
+        let unversionedStatus = try SVNXMLParser.parseStatus(
+            unversionedStatusResult.standardOutput,
+            workingCopyURL: root
+        )
+        try check(
+            unversionedStatus.contains {
+                $0.status == .unversioned
+                    && $0.fileURL(relativeTo: workingCopy).standardizedFileURL
+                        == pendingDirectory.standardizedFileURL
+            },
+            "real svn unschedule returns directory to unversioned state"
         )
 
         let file = root.appendingPathComponent("integration@example.txt")
