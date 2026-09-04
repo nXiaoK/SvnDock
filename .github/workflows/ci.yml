@@ -28,34 +28,7 @@ jobs:
         run: swift --version
 
       - name: Run unit tests
-        shell: bash
-        run: |
-          set +e
-          swift test --disable-sandbox --xunit-output "$RUNNER_TEMP/swift-test.xml" 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
-          test_status=${PIPESTATUS[0]}
-          set -e
-          if (( test_status != 0 )); then
-            perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$RUNNER_TEMP/swift-test.log" > "$RUNNER_TEMP/swift-test-clean.log"
-            diagnostic="$(grep -E '(: error: |Fatal error|XCTAssert|Test Case .* failed|Test Suite .* failed|with [1-9][0-9]* failures?)' "$RUNNER_TEMP/swift-test-clean.log" | tail -n 30 || true)"
-            if [[ -z "$diagnostic" ]]; then
-              diagnostic="$(grep -E '<failure|<testcase' "$RUNNER_TEMP/swift-test.xml" | tail -n 20 || true)"
-            fi
-            if [[ -z "$diagnostic" ]]; then
-              diagnostic="$(tail -n 20 "$RUNNER_TEMP/swift-test-clean.log")"
-            fi
-            diagnostic=${diagnostic//'%'/'%25'}
-            diagnostic=${diagnostic//$'\r'/'%0D'}
-            diagnostic=${diagnostic//$'\n'/'%0A'}
-            echo "::error title=Swift test failed::${diagnostic}"
-            {
-              echo "### Swift test failure"
-              echo
-              echo '~~~text'
-              tail -n 200 "$RUNNER_TEMP/swift-test.log"
-              echo '~~~'
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit "$test_status"
-          fi
+        run: swift test --disable-sandbox
 
       - name: Build all products with strict Swift 6 checks
         run: |
