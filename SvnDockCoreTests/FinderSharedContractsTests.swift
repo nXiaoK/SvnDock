@@ -132,7 +132,8 @@ final class FinderSharedContractsTests: XCTestCase {
         let command = FinderCommand(
             kind: .diff,
             paths: ["/tmp/wc/file.txt"],
-            workingCopyRoot: "/tmp/wc"
+            workingCopyRoot: "/tmp/wc",
+            createdAt: Date(timeIntervalSince1970: 1_725_000_000)
         )
         _ = try await store.enqueue(command)
         try Data("not-json".utf8).write(
