@@ -187,8 +187,27 @@ struct SvnDockCoreSmokeTestMain {
     }
 
     private static func locatorCheck() throws {
-        let located = try SVNExecutableLocator().locate()
-        try check(FileManager.default.isExecutableFile(atPath: located.path), "located SVN executable")
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SvnDockLocatorSmoke-(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let executable = directory.appendingPathComponent("svn", isDirectory: false)
+        try check(
+            FileManager.default.createFile(atPath: executable.path, contents: Data()),
+            "create locator fixture"
+        )
+        try FileManager.default.setAttributes(
+            [.posixPermissions: NSNumber(value: Int16(0o755))],
+            ofItemAtPath: executable.path
+        )
+
+        let located = try SVNExecutableLocator(candidatePaths: [executable.path])
+            .locate(environment: [:])
+        try check(
+            located.standardizedFileURL == executable.standardizedFileURL,
+            "located executable"
+        )
     }
 
     private static func processRunnerCheck() async throws {
