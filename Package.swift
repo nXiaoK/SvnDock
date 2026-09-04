@@ -67,6 +67,11 @@ let package = Package(
             name: "SvnDockCoreTests",
             dependencies: ["SvnDockCore"],
             path: "SvnDockCoreTests"
+        ),
+        .testTarget(
+            name: "SvnDockFinderExtensionTests",
+            dependencies: ["SvnDockFinderExtension"],
+            path: "FinderExtensionTests"
         )
     ],
     swiftLanguageModes: [.v5]

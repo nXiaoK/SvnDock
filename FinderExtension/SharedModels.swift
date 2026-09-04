@@ -24,6 +24,24 @@ struct RegisteredRoot: Codable, Hashable, Sendable {
     }
 }
 
+enum RegisteredRootResolver {
+    /// Uses a component boundary and picks the deepest match, so `/repo-a`
+    /// never matches `/repo-ab` and nested working copies remain deterministic.
+    static func deepestRoot(
+        containing url: URL,
+        among roots: [RegisteredRoot]
+    ) -> RegisteredRoot? {
+        let path = url.standardizedFileURL.path
+        return roots
+            .filter { contains(path: path, rootPath: $0.path) }
+            .max { $0.path.count < $1.path.count }
+    }
+
+    private static func contains(path: String, rootPath: String) -> Bool {
+        path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+    }
+}
+
 struct BadgeSnapshotDocument: Codable, Sendable {
     static let currentSchemaVersion = 1
 

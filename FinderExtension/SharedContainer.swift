@@ -298,18 +298,9 @@ final class SharedStateStore {
         return badgeEntries[path]
     }
 
-    /// Uses a component boundary and picks the deepest match, so `/repo-a`
-    /// never matches `/repo-ab` and nested working copies remain deterministic.
     func root(containing url: URL) -> RegisteredRoot? {
-        let path = url.standardizedFileURL.path
         lock.lock()
         defer { lock.unlock() }
-        return roots
-            .filter { Self.contains(path: path, rootPath: $0.path) }
-            .max { $0.path.count < $1.path.count }
-    }
-
-    private static func contains(path: String, rootPath: String) -> Bool {
-        path == rootPath || path.hasPrefix(rootPath.hasSuffix("/") ? rootPath : rootPath + "/")
+        return RegisteredRootResolver.deepestRoot(containing: url, among: roots)
     }
 }

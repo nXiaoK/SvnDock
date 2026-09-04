@@ -136,7 +136,13 @@ Supported `kind` values are `openApp`, `refresh`, `update`, `commit`, `diff`, `a
 ## Runtime behavior and limitations
 
 - Finder allows multiple monitored `directoryURLs`; the extension supplies all
-  enabled roots from the registry and chooses the deepest root for nested copies.
+  enabled roots from the registry. Finder applies each root recursively, so files
+  and folders anywhere below a registered working copy receive SvnDock menus.
+  Nested copies still resolve to the deepest registered root.
+- Item menus use Finder's selected item URLs. Container and sidebar menus use
+  the targeted URL so a stale row selection cannot replace the folder or sidebar
+  item that was actually clicked. Toolbar menus use the selection when present
+  and otherwise fall back to the targeted folder.
 - A command is refused when selected items cross working-copy boundaries.
 - The contextual menu uses cached status only for its summary label. Common
   actions remain visible when the cache is stale; selecting **Refresh Status**

@@ -67,7 +67,7 @@ final class FinderSync: FIFinderSync {
         // This also picks up changes if a distributed notification was missed.
         reloadSharedState()
 
-        let selection = currentSelection()
+        let selection = currentSelection(for: menuKind)
         let menu = NSMenu(title: "SvnDock")
         guard !selection.urls.isEmpty, let root = selection.root else {
             menu.addItem(makeItem(title: "在 SvnDock 中打开", action: #selector(openMainApp(_:))))
@@ -202,12 +202,10 @@ final class FinderSync: FIFinderSync {
 
     @objc private func openMainApp(_ sender: NSMenuItem) {
         guard let payload = commandPayload(from: sender) else {
-            let selection = currentSelection()
-            guard let root = selection.root else {
-                dispatcher.openMainApp()
-                return
-            }
-            _ = dispatcher.dispatch(kind: .openApp, urls: selection.urls, expectedRoot: root)
+            // A menu item without its immutable payload may come from a
+            // rootless or unsupported Finder context. Opening the app is safe;
+            // reconstructing a command from Finder's current state is not.
+            dispatcher.openMainApp()
             return
         }
         _ = dispatcher.dispatch(kind: .openApp, urls: payload.urls, expectedRoot: payload.root)
@@ -307,6 +305,9 @@ final class FinderSync: FIFinderSync {
     private func reloadSharedState() {
         let roots = state.reload()
         let rootURLs = roots.compactMap(\.canonicalURL)
+        // Finder monitors every registered root recursively. Registering each
+        // descendant would be both redundant and prohibitively expensive for
+        // large working copies.
         if Thread.isMainThread {
             controller.directoryURLs = Set(rootURLs)
         } else {
@@ -316,12 +317,31 @@ final class FinderSync: FIFinderSync {
         }
     }
 
-    private func currentSelection() -> (urls: [URL], root: RegisteredRoot?) {
-        var urls = controller.selectedItemURLs() ?? []
-        if urls.isEmpty, let targeted = controller.targetedURL() {
-            urls = [targeted]
+    private func currentSelection(
+        for menuKind: FIMenuKind
+    ) -> (urls: [URL], root: RegisteredRoot?) {
+        let context: FinderMenuContext
+        switch menuKind {
+        case .contextualMenuForItems:
+            context = .items
+        case .contextualMenuForContainer:
+            context = .container
+        case .contextualMenuForSidebar:
+            context = .sidebar
+        case .toolbarItemMenu:
+            context = .toolbar
+        @unknown default:
+            Self.logger.error(
+                "Rejected unsupported Finder menu kind \(menuKind.rawValue, privacy: .public)"
+            )
+            context = .unsupported
         }
-        urls = urls.filter(\.isFileURL).map(\.standardizedFileURL)
+
+        let urls = FinderMenuSelectionResolver.urls(
+            for: context,
+            selectedURLs: controller.selectedItemURLs() ?? [],
+            targetedURL: controller.targetedURL()
+        )
         guard let first = urls.first, let root = state.root(containing: first) else {
             return (urls, nil)
         }

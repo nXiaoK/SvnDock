@@ -501,6 +501,7 @@ xcrun swiftc \
     -module-name SvnDockFinderExtension \
     -emit-executable \
     "$ROOT_DIR/FinderExtension/FinderCommandDispatcher.swift" \
+    "$ROOT_DIR/FinderExtension/FinderMenuSelectionResolver.swift" \
     "$ROOT_DIR/FinderExtension/FinderSync.swift" \
     "$ROOT_DIR/FinderExtension/SharedContainer.swift" \
     "$ROOT_DIR/FinderExtension/SharedModels.swift" \
