@@ -22,13 +22,28 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Show toolchain
         run: swift --version
 
       - name: Run unit tests
-        run: swift test --disable-sandbox
+        shell: bash
+        run: |
+          set +e
+          swift test --disable-sandbox 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if (( test_status != 0 )); then
+            {
+              echo "### Swift test failure"
+              echo
+              echo '~~~text'
+              tail -n 200 "$RUNNER_TEMP/swift-test.log"
+              echo '~~~'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit "$test_status"
+          fi
 
       - name: Build all products with strict Swift 6 checks
         run: |
