@@ -1,0 +1,37 @@
+# macOS and editors
+.DS_Store
+.idea/
+.vscode/
+
+# Swift Package Manager
+.build/
+.swiftpm/
+
+# Xcode and XcodeGen output
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+*.xcarchive/
+*.dSYM/
+SvnDock.xcodeproj/
+
+# Local app and release artifacts
+dist/
+artifacts/
+*.app/
+*.dmg
+*.pkg
+SvnDock-local-*.zip
+.svndock-output.*
+.svndock-publish.*
+
+# Signing credentials and profiles
+*.p12
+*.p8
+*.mobileprovision
+*.provisionprofile
+
+# Local integration-test data
+work/

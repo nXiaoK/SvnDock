@@ -1,0 +1,140 @@
+name: SvnDock
+
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+  groupSortPosition: top
+
+configs:
+  Debug: debug
+  Release: release
+
+settings:
+  base:
+    # Production identifiers have one source of truth. Info.plist and
+    # entitlements files expand these values at build time.
+    SVNDOCK_BUNDLE_ID_PREFIX: com.svndock
+    SVNDOCK_APP_GROUP_IDENTIFIER: group.com.svndock.shared
+    MACOSX_DEPLOYMENT_TARGET: "14.0"
+    MARKETING_VERSION: "0.3.0"
+    CURRENT_PROJECT_VERSION: "4"
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CLANG_ENABLE_MODULES: YES
+    CODE_SIGN_STYLE: Automatic
+    ENABLE_HARDENED_RUNTIME: YES
+  configs:
+    Debug:
+      SWIFT_ACTIVE_COMPILATION_CONDITIONS: DEBUG
+    Release:
+      SWIFT_COMPILATION_MODE: wholemodule
+
+targets:
+  SvnDockCore:
+    type: framework
+    platform: macOS
+    sources:
+      - path: SvnDockCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(SVNDOCK_BUNDLE_ID_PREFIX).core"
+        GENERATE_INFOPLIST_FILE: YES
+        DEFINES_MODULE: YES
+        SKIP_INSTALL: YES
+
+  SvnDockFinderExtension:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: FinderExtension
+        excludes:
+          - README.md
+          - Info.plist
+          - FinderExtension.entitlements
+          - FinderExtension.entitlements.example
+    info:
+      path: FinderExtension/Info.plist
+    entitlements:
+      path: FinderExtension/FinderExtension.entitlements
+    dependencies:
+      - sdk: AppKit.framework
+      - sdk: FinderSync.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(SVNDOCK_BUNDLE_ID_PREFIX).app.finder"
+        PRODUCT_NAME: SvnDock Finder
+        PRODUCT_MODULE_NAME: SvnDockFinderExtension
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+
+  SvnDock:
+    type: application
+    platform: macOS
+    sources:
+      - path: SvnDockApp
+        excludes:
+          - README.md
+          - Resources/Info.plist
+          - Resources/SvnDock.entitlements
+    info:
+      path: SvnDockApp/Resources/Info.plist
+    entitlements:
+      path: SvnDockApp/Resources/SvnDock.entitlements
+    dependencies:
+      - target: SvnDockCore
+        embed: true
+      - target: SvnDockFinderExtension
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(SVNDOCK_BUNDLE_ID_PREFIX).app"
+        PRODUCT_NAME: SvnDock
+        COMBINE_HIDPI_IMAGES: YES
+
+  SvnDockAgent:
+    type: tool
+    platform: macOS
+    sources:
+      - path: SvnDockAgent
+        excludes:
+          - README.md
+          - Info.plist
+          - SvnDockAgent.entitlements
+          - SvnDockAgent.entitlements.example
+          - com.svndock.agent.plist.example
+    dependencies:
+      - target: SvnDockCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(SVNDOCK_BUNDLE_ID_PREFIX).agent"
+        PRODUCT_NAME: SvnDockAgent
+        SKIP_INSTALL: YES
+
+  SvnDockCoreTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - path: SvnDockCoreTests
+    dependencies:
+      - target: SvnDockCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: "$(SVNDOCK_BUNDLE_ID_PREFIX).core-tests"
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  SvnDock:
+    build:
+      targets:
+        SvnDock: all
+        SvnDockCoreTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      gatherCoverageData: true
+      targets:
+        - SvnDockCoreTests
+    archive:
+      config: Release

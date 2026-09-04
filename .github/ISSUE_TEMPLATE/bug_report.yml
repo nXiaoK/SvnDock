@@ -1,0 +1,88 @@
+name: Bug report
+description: Report a reproducible problem in SvnDock
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time to report a problem. Remove credentials,
+        private repository URLs, usernames and personal paths from all details.
+
+  - type: input
+    id: version
+    attributes:
+      label: SvnDock version or commit
+      placeholder: 0.3.0 or a commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS and hardware
+      placeholder: macOS 15.0, Apple M2
+    validations:
+      required: true
+
+  - type: input
+    id: svn
+    attributes:
+      label: SVN version
+      description: Paste the first line of `svn --version`.
+      placeholder: svn, version 1.14.x
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Main application
+        - Finder menu
+        - Finder badges
+        - Local build or signing
+        - SVN command behavior
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Use a disposable working copy whenever possible.
+      placeholder: |
+        1. Register a working copy
+        2. Select ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized logs or screenshots if they help.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data safety
+      options:
+        - label: I removed credentials, private URLs, usernames and personal paths.
+          required: true

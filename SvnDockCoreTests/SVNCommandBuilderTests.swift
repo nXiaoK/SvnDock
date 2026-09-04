@@ -1,0 +1,224 @@
+import Foundation
+import XCTest
+@testable import SvnDockCore
+
+final class SVNCommandBuilderTests: XCTestCase {
+    private let executableURL = URL(fileURLWithPath: "/opt/homebrew/bin/svn")
+    private let rootURL = URL(fileURLWithPath: "/tmp/SvnDockTests/WorkingCopy", isDirectory: true)
+
+    func testStatusBuildsXMLCommandWithoutShell() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+        let invocation = try builder.makeInvocation(
+            for: .status(SVNStatusOptions(showRemoteUpdates: true, includeIgnored: true)),
+            in: workingCopy
+        )
+
+        XCTAssertEqual(invocation.executableURL, executableURL)
+        XCTAssertEqual(invocation.currentDirectoryURL, rootURL)
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "status", "--xml", "--show-updates", "--no-ignore",
+                "--non-interactive", "--", "."
+            ]
+        )
+    }
+
+    func testStatusCanBeScopedToSafePaths() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+        let invocation = try builder.makeInvocation(
+            for: .status(SVNStatusOptions(
+                includeIgnored: true,
+                paths: ["Sources/user@example.swift"]
+            )),
+            in: workingCopy
+        )
+
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "status", "--xml", "--no-ignore", "--non-interactive",
+                "--", "Sources/user@example.swift@"
+            ]
+        )
+    }
+
+    func testFilenameBeginningWithDashComesAfterOptionTerminator() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .add(paths: ["-not-an-option.txt"], parents: false),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(Array(invocation.arguments.suffix(2)), ["--", "-not-an-option.txt"])
+    }
+
+    func testAtSignFilenameGetsEmptyPegRevision() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .add(paths: ["notes/user@example.txt"], parents: false),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(invocation.arguments.last, "notes/user@example.txt@")
+    }
+
+    func testDiffKeepsAtSignFilenameLiteral() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .diff(paths: ["notes/user@example.txt"]),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(invocation.arguments.last, "notes/user@example.txt")
+    }
+
+    func testShellMetacharactersRemainOneArgument() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let message = "fix; touch /tmp/should-never-run"
+        let invocation = try builder.makeInvocation(
+            for: .commit(paths: ["README.md"], message: message, keepLocks: false),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertFalse(invocation.arguments.contains(message))
+        XCTAssertEqual(invocation.standardInput, Data(message.utf8))
+        XCTAssertTrue(invocation.arguments.contains("/dev/stdin"))
+    }
+
+    func testTraversalOutsideWorkingCopyIsRejected() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .diff(paths: ["../../outside.txt"]),
+            in: WorkingCopy(localPath: rootURL)
+        )) { error in
+            XCTAssertEqual(
+                error as? SVNCommandBuilderError,
+                .pathOutsideWorkingCopy("../../outside.txt")
+            )
+        }
+    }
+
+    func testPrefixCollisionOutsideWorkingCopyIsRejected() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .diff(paths: ["/tmp/SvnDockTests/WorkingCopy-Evil/file.txt"]),
+            in: WorkingCopy(localPath: rootURL)
+        ))
+    }
+
+    func testOperationMustBelongToWorkingCopy() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+        let operation = SVNOperation(workingCopyID: UUID(), kind: .cleanup)
+
+        XCTAssertThrowsError(try builder.makeInvocation(for: operation, in: workingCopy)) { error in
+            XCTAssertEqual(error as? SVNCommandBuilderError, .operationWorkingCopyMismatch)
+        }
+    }
+
+    func testEmptyCommitMessageAndNegativeRevisionAreRejected() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .commit(paths: [], message: "  \n", keepLocks: false),
+            in: workingCopy
+        ))
+
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .update(revision: .number(-1)),
+            in: workingCopy
+        ))
+    }
+
+    func testLogBuildsBoundedXMLCommand() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+        let invocation = try builder.makeInvocation(
+            for: .log(paths: ["Sources/App.swift"], limit: 50),
+            in: workingCopy
+        )
+
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "log", "--xml", "--revision", "HEAD:1", "--limit", "50", "--non-interactive",
+                "--", "Sources/App.swift"
+            ]
+        )
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .log(paths: [], limit: 0),
+            in: workingCopy
+        )) { error in
+            XCTAssertEqual(error as? SVNCommandBuilderError, .invalidLogLimit(0))
+        }
+    }
+
+    func testResolveRequiresPathsAndEscapesPegRevision() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+        let invocation = try builder.makeInvocation(
+            for: .resolve(paths: ["conflicts/user@example.txt"], accept: .working),
+            in: workingCopy
+        )
+
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "resolve", "--accept", "working", "--non-interactive",
+                "--", "conflicts/user@example.txt@"
+            ]
+        )
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .resolve(paths: [], accept: .working),
+            in: workingCopy
+        )) { error in
+            XCTAssertEqual(error as? SVNCommandBuilderError, .pathsRequired("resolve"))
+        }
+    }
+
+    func testPropertiesAndIgnoreUseSafeArgumentsAndStdin() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let workingCopy = WorkingCopy(localPath: rootURL)
+
+        let list = try builder.makeInvocation(
+            for: .properties(paths: ["Assets@2x"]),
+            in: workingCopy
+        )
+        XCTAssertEqual(
+            list.arguments,
+            [
+                "proplist", "--xml", "--verbose", "--non-interactive",
+                "--", "Assets@2x@"
+            ]
+        )
+
+        let set = try builder.makeInvocation(
+            for: .setIgnore(path: ".", patterns: [".build", "*.xcuserstate"]),
+            in: workingCopy
+        )
+        XCTAssertEqual(
+            set.arguments,
+            [
+                "propset", "svn:ignore", "--file", "/dev/stdin",
+                "--non-interactive", "--", "."
+            ]
+        )
+        XCTAssertEqual(set.standardInput, Data(".build\n*.xcuserstate\n".utf8))
+
+        XCTAssertThrowsError(try builder.makeInvocation(
+            for: .setIgnore(path: ".", patterns: ["safe\nextra-rule"]),
+            in: workingCopy
+        )) { error in
+            XCTAssertEqual(
+                error as? SVNCommandBuilderError,
+                .invalidIgnorePattern("safe\nextra-rule")
+            )
+        }
+    }
+}

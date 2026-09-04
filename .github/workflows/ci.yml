@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test-package:
+    name: Build, test and package
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Run unit tests
+        run: swift test --disable-sandbox
+
+      - name: Build all products with strict Swift 6 checks
+        run: |
+          swift build --disable-sandbox -c release \
+            -Xswiftc -swift-version -Xswiftc 6 \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors
+
+      - name: Run core smoke checks
+        run: |
+          swift run --disable-sandbox -c release \
+            -Xswiftc -swift-version -Xswiftc 6 \
+            -Xswiftc -strict-concurrency=complete \
+            -Xswiftc -warnings-as-errors \
+            SvnDockCoreSmoke
+
+      - name: Validate property lists
+        run: |
+          plutil -lint SvnDockApp/Resources/Info.plist
+          plutil -lint FinderExtension/Info.plist
+          plutil -lint SvnDockAgent/Info.plist
+
+      - name: Validate local app packaging
+        run: ./Scripts/build-local-signed-app.sh "$RUNNER_TEMP/dist"
