@@ -31,15 +31,17 @@ jobs:
         shell: bash
         run: |
           set +e
-          swift test --disable-sandbox 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
+          swift test --disable-sandbox --xunit-output "$RUNNER_TEMP/swift-test.xml" 2>&1 | tee "$RUNNER_TEMP/swift-test.log"
           test_status=${PIPESTATUS[0]}
           set -e
           if (( test_status != 0 )); then
-            diagnostic="$(
-              grep -E +                '(: error: |Fatal error|Test Case .* failed|Test Suite .* failed|with [1-9][0-9]* failures?)' +                "$RUNNER_TEMP/swift-test.log" | tail -n 30 || true
-            )"
+            perl -pe 's/\e\[[0-9;]*[A-Za-z]//g' "$RUNNER_TEMP/swift-test.log" > "$RUNNER_TEMP/swift-test-clean.log"
+            diagnostic="$(grep -E '(: error: |Fatal error|XCTAssert|Test Case .* failed|Test Suite .* failed|with [1-9][0-9]* failures?)' "$RUNNER_TEMP/swift-test-clean.log" | tail -n 30 || true)"
             if [[ -z "$diagnostic" ]]; then
-              diagnostic="$(tail -n 20 "$RUNNER_TEMP/swift-test.log")"
+              diagnostic="$(grep -E '<failure|<testcase' "$RUNNER_TEMP/swift-test.xml" | tail -n 20 || true)"
+            fi
+            if [[ -z "$diagnostic" ]]; then
+              diagnostic="$(tail -n 20 "$RUNNER_TEMP/swift-test-clean.log")"
             fi
             diagnostic=${diagnostic//'%'/'%25'}
             diagnostic=${diagnostic//$'\r'/'%0D'}
