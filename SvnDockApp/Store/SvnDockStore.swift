@@ -5,17 +5,26 @@ import SwiftUI
 
 @MainActor
 final class SvnDockStore: ObservableObject {
+    private static let initialVisibleEntryLimit = 500
+    private static let visibleEntryBatchSize = 500
+
     private static let finderHandoffNotification = Notification.Name(
         "com.svndock.command-handoff"
     )
 
     @Published private(set) var workingCopies: [SvnDockWorkingCopy] = []
     @Published var selectedWorkingCopyID: UUID?
-    @Published private(set) var entries: [SvnDockStatusEntry] = []
     @Published var selectedEntryIDs: Set<SvnDockStatusEntry.ID> = []
 
-    @Published var statusFilter: SvnDockStatusFilter = .all
-    @Published var searchQuery = ""
+    @Published var statusFilter: SvnDockStatusFilter = .all {
+        didSet { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+    }
+    @Published var searchQuery = "" {
+        didSet { rebuildStatusPresentation(resetLimit: true, debounce: true) }
+    }
+    @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
+    @Published private(set) var filteredEntryCount = 0
+    @Published private(set) var isFilteringStatusEntries = false
     @Published var inspectorTab: SvnDockInspectorTab = .diff {
         didSet {
             if oldValue == .history, inspectorTab != .history {
@@ -54,6 +63,13 @@ final class SvnDockStore: ObservableObject {
     private var pendingRemoval: SvnDockWorkingCopy?
     private var pendingResolve: PendingResolve?
     private var pendingIgnore: PendingIgnore?
+    private var statusSnapshot = SvnDockStatusSnapshot.empty
+    private var filteredStatusEntries: [SvnDockStatusEntry] = []
+    private var visibleEntryLimit = SvnDockStore.initialVisibleEntryLimit
+    private var statusLoadGeneration = UUID()
+    private var activeStatusLoadTask: Task<SvnDockStatusSnapshot, Error>?
+    private var statusPresentationGeneration = UUID()
+    private var statusPresentationTask: Task<Void, Never>?
     private var historyLoadGeneration: UUID?
     private var historyLoadTask: Task<Void, Never>?
     private var historyNeedsReload = false
@@ -94,28 +110,46 @@ final class SvnDockStore: ObservableObject {
         workingCopies.first { $0.id == selectedWorkingCopyID }
     }
 
-    var filteredEntries: [SvnDockStatusEntry] {
-        entries
-            .filter(statusFilter.includes)
-            .filter { entry in
-                guard !searchQuery.isEmpty else { return true }
-                return entry.relativePath.localizedStandardContains(searchQuery)
-                    || entry.status.displayName.localizedStandardContains(searchQuery)
-            }
-            .sorted(by: Self.statusSort)
+    var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
+
+    var hasMoreFilteredEntries: Bool {
+        displayedEntries.count < filteredEntryCount
+    }
+
+    var nextVisibleEntryCount: Int {
+        min(Self.visibleEntryBatchSize, filteredEntryCount - displayedEntries.count)
     }
 
     var primarySelectedEntry: SvnDockStatusEntry? {
-        guard let id = selectedEntryIDs.sorted().first else { return nil }
-        return entries.first { $0.id == id }
+        guard let id = selectedEntryIDs.min() else { return nil }
+        return statusSnapshot.entry(withID: id)
     }
 
     var committableEntries: [SvnDockStatusEntry] {
-        entries.filter { $0.status.canCommit }
+        statusSnapshot.committableEntries
     }
 
     var hasPendingChanges: Bool {
-        !committableEntries.isEmpty
+        !statusSnapshot.committableEntries.isEmpty
+    }
+
+    /// Status scans and presentation building are read-only. Keeping the
+    /// sidebar navigable during those operations lets users leave a large
+    /// working copy while SVN is still walking the disk.
+    var isSidebarNavigationBlocked: Bool {
+        if hasBlockingPresentation
+            || activeFinderCommandID != nil
+            || !finalizingFinderCommandIDs.isEmpty {
+            return true
+        }
+        guard let kind = activeOperation?.kind else { return false }
+        switch kind {
+        case .refreshing:
+            return false
+        case .loading, .updating, .committing, .adding, .reverting, .cleaning,
+             .resolving, .ignoring:
+            return true
+        }
     }
 
     var isBusy: Bool {
@@ -167,16 +201,25 @@ final class SvnDockStore: ObservableObject {
             || presentedError != nil
     }
 
-    func selectedWorkingCopyDidChange() async {
+    func selectedWorkingCopyDidChange(to expectedID: UUID?) async {
+        guard expectedID == selectedWorkingCopyID else {
+            if suppressedSelectionReloadID == expectedID {
+                suppressedSelectionReloadID = nil
+            }
+            return
+        }
         if let suppressedID = suppressedSelectionReloadID {
             suppressedSelectionReloadID = nil
-            if suppressedID == selectedWorkingCopyID {
+            if suppressedID == expectedID {
                 return
             }
         }
         if historyTarget?.workingCopy.id != selectedWorkingCopyID {
             clearHistory()
         }
+        clearStatusEntries()
+        selectedEntryIDs = []
+        diffText = ""
         await reloadSelectedWorkingCopy()
     }
 
@@ -253,15 +296,20 @@ final class SvnDockStore: ObservableObject {
             workingCopies = loadedCopies.sorted(by: Self.copySort)
 
             if !workingCopies.contains(where: { $0.id == selectedWorkingCopyID }) {
-                selectedWorkingCopyID = workingCopies.first?.id
+                let nextID = workingCopies.first?.id
+                if selectedWorkingCopyID != nextID {
+                    suppressedSelectionReloadID = nextID
+                    selectedWorkingCopyID = nextID
+                }
             }
 
             guard let workingCopy = selectedWorkingCopy else {
-                entries = []
+                clearStatusEntries()
                 return
             }
 
-            let loadedEntries = try await service.status(for: workingCopy)
+            let loadedEntries = try await loadStatusSnapshot(for: workingCopy)
+            guard selectedWorkingCopyID == workingCopy.id else { return }
             apply(loadedEntries, to: workingCopy.id)
         }
     }
@@ -275,7 +323,7 @@ final class SvnDockStore: ObservableObject {
         }
 
         guard let workingCopy = selectedWorkingCopy else {
-            entries = []
+            clearStatusEntries()
             selectedEntryIDs = []
             diffText = ""
             clearHistory()
@@ -291,7 +339,7 @@ final class SvnDockStore: ObservableObject {
             guard selectedWorkingCopyID == expectedID else { return }
             selectedEntryIDs = []
             diffText = ""
-            let loadedEntries = try await service.status(for: workingCopy)
+            let loadedEntries = try await loadStatusSnapshot(for: workingCopy)
             guard selectedWorkingCopyID == expectedID else { return }
             apply(loadedEntries, to: expectedID)
         }
@@ -331,7 +379,10 @@ final class SvnDockStore: ObservableObject {
             workingCopies.sort(by: Self.copySort)
 
             if let first = newlyRegistered.first {
-                selectedWorkingCopyID = first.id
+                if selectedWorkingCopyID != first.id {
+                    suppressedSelectionReloadID = first.id
+                    selectedWorkingCopyID = first.id
+                }
             }
 
             if !registrationErrors.isEmpty {
@@ -389,7 +440,7 @@ final class SvnDockStore: ObservableObject {
                     suppressedSelectionReloadID = nextID
                 }
                 selectedWorkingCopyID = nextID
-                entries = []
+                clearStatusEntries()
                 selectedEntryIDs = []
                 diffText = ""
             }
@@ -1236,7 +1287,7 @@ final class SvnDockStore: ObservableObject {
         guard await waitForFinderRoutingToFinish() else { return }
         if selectedWorkingCopyID != workingCopy.id {
             clearHistory()
-            entries = []
+            clearStatusEntries()
             selectedEntryIDs = []
             diffText = ""
             suppressedSelectionReloadID = workingCopy.id
@@ -1481,13 +1532,150 @@ final class SvnDockStore: ObservableObject {
         }
     }
 
-    private func apply(_ loadedEntries: [SvnDockStatusEntry], to workingCopyID: UUID) {
-        entries = loadedEntries
-        selectedEntryIDs.formIntersection(Set(loadedEntries.map(\.id)))
+    func showMoreStatusEntries() {
+        guard hasMoreFilteredEntries else { return }
+        visibleEntryLimit = min(
+            visibleEntryLimit + Self.visibleEntryBatchSize,
+            filteredEntryCount
+        )
+        displayedEntries = Array(filteredStatusEntries.prefix(visibleEntryLimit))
+    }
+
+    func selectAllFilteredStatusEntries() {
+        guard !isFilteringStatusEntries else { return }
+        var entryIDs = Set<SvnDockStatusEntry.ID>()
+        entryIDs.reserveCapacity(filteredStatusEntries.count)
+        for entry in filteredStatusEntries {
+            entryIDs.insert(entry.id)
+        }
+        selectedEntryIDs = entryIDs
+    }
+
+    private func apply(
+        _ loadedSnapshot: SvnDockStatusSnapshot,
+        to workingCopyID: UUID
+    ) {
+        statusSnapshot = loadedSnapshot
+        selectedEntryIDs = Set(selectedEntryIDs.filter {
+            loadedSnapshot.containsEntry(withID: $0)
+        })
+        filteredStatusEntries = []
+        filteredEntryCount = 0
+        displayedEntries = []
+        rebuildStatusPresentation(resetLimit: true, debounce: false)
 
         guard let index = workingCopies.firstIndex(where: { $0.id == workingCopyID }) else { return }
-        workingCopies[index].counts = .make(from: loadedEntries)
+        workingCopies[index].counts = loadedSnapshot.counts
         workingCopies[index].lastRefreshedAt = .now
+    }
+
+    private func clearStatusEntries() {
+        activeStatusLoadTask?.cancel()
+        activeStatusLoadTask = nil
+        statusLoadGeneration = UUID()
+        statusPresentationTask?.cancel()
+        statusPresentationTask = nil
+        statusPresentationGeneration = UUID()
+        statusSnapshot = .empty
+        filteredStatusEntries = []
+        visibleEntryLimit = Self.initialVisibleEntryLimit
+        filteredEntryCount = 0
+        displayedEntries = []
+        isFilteringStatusEntries = false
+    }
+
+    private func loadStatusSnapshot(
+        for workingCopy: SvnDockWorkingCopy
+    ) async throws -> SvnDockStatusSnapshot {
+        activeStatusLoadTask?.cancel()
+        let generation = UUID()
+        statusLoadGeneration = generation
+        let service = service
+        let task = Task {
+            try await service.status(for: workingCopy)
+        }
+        activeStatusLoadTask = task
+
+        defer {
+            if statusLoadGeneration == generation {
+                activeStatusLoadTask = nil
+            }
+        }
+
+        let snapshot = try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+        try Task.checkCancellation()
+        guard statusLoadGeneration == generation else {
+            throw CancellationError()
+        }
+        return snapshot
+    }
+
+    private func rebuildStatusPresentation(resetLimit: Bool, debounce: Bool) {
+        statusPresentationTask?.cancel()
+        statusPresentationTask = nil
+        let generation = UUID()
+        statusPresentationGeneration = generation
+
+        if resetLimit {
+            visibleEntryLimit = Self.initialVisibleEntryLimit
+        }
+
+        let normalizedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filter = statusFilter
+        let sourceEntries = statusSnapshot.entries
+
+        if filter == .all, normalizedQuery.isEmpty {
+            applyFilteredStatusEntries(sourceEntries, generation: generation)
+            return
+        }
+
+        isFilteringStatusEntries = true
+        statusPresentationTask = Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                if debounce {
+                    try await Task.sleep(for: .milliseconds(200))
+                }
+
+                var matchingEntries: [SvnDockStatusEntry] = []
+                matchingEntries.reserveCapacity(min(sourceEntries.count, 1_000))
+                for (index, entry) in sourceEntries.enumerated() {
+                    if index.isMultiple(of: 256) {
+                        try Task.checkCancellation()
+                    }
+                    guard filter.includes(entry) else { continue }
+                    if normalizedQuery.isEmpty
+                        || entry.relativePath.localizedStandardContains(normalizedQuery)
+                        || entry.status.displayName.localizedStandardContains(normalizedQuery) {
+                        matchingEntries.append(entry)
+                    }
+                }
+                try Task.checkCancellation()
+                await self?.applyFilteredStatusEntries(
+                    matchingEntries,
+                    generation: generation
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                return
+            }
+        }
+    }
+
+    private func applyFilteredStatusEntries(
+        _ entries: [SvnDockStatusEntry],
+        generation: UUID
+    ) {
+        guard statusPresentationGeneration == generation else { return }
+        filteredStatusEntries = entries
+        filteredEntryCount = entries.count
+        displayedEntries = Array(entries.prefix(visibleEntryLimit))
+        isFilteringStatusEntries = false
+        statusPresentationTask = nil
     }
 
     private func present(_ error: Error, title: String) {
@@ -1510,28 +1698,6 @@ final class SvnDockStore: ObservableObject {
 
     private static func copySort(_ lhs: SvnDockWorkingCopy, _ rhs: SvnDockWorkingCopy) -> Bool {
         lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-    }
-
-    private static func statusSort(_ lhs: SvnDockStatusEntry, _ rhs: SvnDockStatusEntry) -> Bool {
-        let lhsRank = statusRank(lhs.status)
-        let rhsRank = statusRank(rhs.status)
-        if lhsRank != rhsRank { return lhsRank < rhsRank }
-        return lhs.relativePath.localizedStandardCompare(rhs.relativePath) == .orderedAscending
-    }
-
-    private static func statusRank(_ status: SvnDockStatusKind) -> Int {
-        switch status {
-        case .conflicted: 0
-        case .obstructed: 1
-        case .modified: 2
-        case .added: 3
-        case .deleted, .missing: 4
-        case .replaced: 5
-        case .unversioned: 6
-        case .external: 7
-        case .ignored: 8
-        case .clean: 9
-        }
     }
 
     private func claimFinderCommand(
@@ -1947,10 +2113,10 @@ final class SvnDockStore: ObservableObject {
             suppressedSelectionReloadID = workingCopy.id
             selectedWorkingCopyID = workingCopy.id
         }
-        entries = []
+        clearStatusEntries()
         selectedEntryIDs = []
         diffText = ""
-        let loadedEntries = try await service.status(for: workingCopy)
+        let loadedEntries = try await loadStatusSnapshot(for: workingCopy)
         guard selectedWorkingCopyID == workingCopy.id else {
             throw SvnDockServiceError.unavailable(
                 "工作副本选择在 Finder 操作期间发生了变化，请重试。"

@@ -21,19 +21,33 @@ struct StatusListView: View {
                     title: "工作副本是干净的",
                     message: "没有检测到待提交、本地新增或冲突文件。"
                 )
-            } else if store.filteredEntries.isEmpty && !store.isBusy {
+            } else if store.displayedEntries.isEmpty && !store.isBusy {
                 SvnDockEmptyState(
                     symbol: "line.3.horizontal.decrease.circle",
                     title: "没有匹配项目",
                     message: "调整筛选条件或搜索文字后重试。"
                 )
             } else {
-                List(store.filteredEntries, selection: $store.selectedEntryIDs) { entry in
-                    StatusEntryRow(entry: entry)
-                        .tag(entry.id)
-                        .contextMenu {
-                            entryContextMenu(for: entry)
+                List(selection: $store.selectedEntryIDs) {
+                    ForEach(store.displayedEntries) { entry in
+                        StatusEntryRow(entry: entry)
+                            .tag(entry.id)
+                            .contextMenu {
+                                entryContextMenu(for: entry)
+                            }
+                    }
+
+                    if store.hasMoreFilteredEntries {
+                        HStack {
+                            Spacer()
+                            Button("再显示 \(store.nextVisibleEntryCount) 项") {
+                                store.showMoreStatusEntries()
+                            }
+                            .buttonStyle(.borderless)
+                            Spacer()
                         }
+                        .padding(.vertical, 8)
+                    }
                 }
                 .listStyle(.inset)
                 .disabled(store.isInteractionBlocked)
@@ -72,7 +86,19 @@ struct StatusListView: View {
     @ViewBuilder
     private var statusFooter: some View {
         HStack(spacing: 12) {
-            Text("\(store.filteredEntries.count) 项")
+            Text("\(store.filteredEntryCount) 项")
+            if store.hasMoreFilteredEntries {
+                Text("已显示 \(store.displayedEntries.count) 项")
+                Button("选择全部 \(store.filteredEntryCount) 项") {
+                    store.selectAllFilteredStatusEntries()
+                }
+                .buttonStyle(.borderless)
+                .disabled(store.isInteractionBlocked || store.isFilteringStatusEntries)
+            }
+            if store.isFilteringStatusEntries {
+                ProgressView()
+                    .controlSize(.small)
+            }
             if !store.selectedEntryIDs.isEmpty {
                 Text("已选择 \(store.selectedEntryIDs.count) 项")
             }

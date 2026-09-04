@@ -42,7 +42,7 @@ struct WorkingCopySidebar: View {
                     }
                 }
                 .listStyle(.sidebar)
-                .disabled(store.isInteractionBlocked)
+                .disabled(store.isSidebarNavigationBlocked)
             }
 
             Divider()

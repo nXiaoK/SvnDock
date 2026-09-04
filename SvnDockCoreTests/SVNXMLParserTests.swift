@@ -54,6 +54,28 @@ final class SVNXMLParserTests: XCTestCase {
         XCTAssertEqual(entries[1].changelist, "release-fix")
     }
 
+    func testCanSkipFilesystemNodeKindResolutionForLargeStatusScans() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SvnDockStatus-\(UUID().uuidString)", isDirectory: true)
+        let sourceDirectory = root.appendingPathComponent("Sources", isDirectory: true)
+        try FileManager.default.createDirectory(at: sourceDirectory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let xml = """
+        <status><target path=".">
+          <entry path="Sources"><wc-status item="added" props="none" /></entry>
+        </target></status>
+        """
+
+        let entries = try SVNXMLParser.parseStatus(
+            Data(xml.utf8),
+            workingCopyURL: root,
+            resolveNodeKinds: false
+        )
+
+        XCTAssertEqual(entries.first?.kind, .unknown)
+    }
+
     func testParsesInfoXML() throws {
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>

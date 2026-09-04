@@ -110,7 +110,7 @@ actor CoreSvnDockService: SvnDockServicing {
         postSharedStateChanged()
     }
 
-    func status(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] {
+    func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
         let coreCopy = coreWorkingCopy(for: workingCopy)
         let executableURL = try executableLocator.locate()
         let builder = try SVNCommandBuilder(executableURL: executableURL)
@@ -134,7 +134,8 @@ actor CoreSvnDockService: SvnDockServicing {
                 }
                 let entries = try SVNXMLParser.parseStatus(
                     result.standardOutput,
-                    workingCopyURL: coreCopy.localPath
+                    workingCopyURL: coreCopy.localPath,
+                    resolveNodeKinds: false
                 )
                 let replacement = Self.badgeReplacement(entries, in: coreCopy)
                 try await badgeStore.replaceBadgeEntries(
@@ -150,7 +151,7 @@ actor CoreSvnDockService: SvnDockServicing {
             makeUIStatusEntry(entry, in: coreCopy)
         }
         postSharedStateChanged()
-        return uiEntries
+        return SvnDockStatusSnapshot(entries: uiEntries)
     }
 
     func diff(

@@ -37,9 +37,11 @@ actor MockSvnDockService: SvnDockServicing {
         entriesByWorkingCopyID[id] = nil
     }
 
-    func status(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] {
+    func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
         await briefDelay()
-        return entriesByWorkingCopyID[workingCopy.id, default: []]
+        return SvnDockStatusSnapshot(
+            entries: entriesByWorkingCopyID[workingCopy.id, default: []]
+        )
     }
 
     func diff(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> String {

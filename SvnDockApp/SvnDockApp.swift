@@ -138,7 +138,7 @@ private struct UnavailableSvnDockService: SvnDockServicing {
     func loadRegisteredWorkingCopies() async throws -> [SvnDockWorkingCopy] { throw unavailable }
     func registerWorkingCopy(at url: URL) async throws -> SvnDockWorkingCopy { throw unavailable }
     func unregisterWorkingCopy(id: UUID) async throws { throw unavailable }
-    func status(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] { throw unavailable }
+    func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot { throw unavailable }
     func diff(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> String { throw unavailable }
     func history(for workingCopy: SvnDockWorkingCopy, relativePaths: [String], limit: Int) async throws -> [SvnDockLogEntry] { throw unavailable }
     func update(workingCopies: [SvnDockWorkingCopy]) async throws { throw unavailable }

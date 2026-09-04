@@ -23,9 +23,13 @@ public enum SVNXMLParserError: Error, LocalizedError, Equatable, Sendable {
 public enum SVNXMLParser {
     public static func parseStatus(
         _ data: Data,
-        workingCopyURL: URL? = nil
+        workingCopyURL: URL? = nil,
+        resolveNodeKinds: Bool = true
     ) throws -> [StatusEntry] {
-        let delegate = StatusXMLDelegate(workingCopyURL: workingCopyURL)
+        let delegate = StatusXMLDelegate(
+            workingCopyURL: workingCopyURL,
+            resolveNodeKinds: resolveNodeKinds
+        )
         try parse(data, delegate: delegate)
         return delegate.entries
     }
@@ -231,13 +235,15 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
     }
 
     let workingCopyURL: URL?
+    let resolveNodeKinds: Bool
     private(set) var entries: [StatusEntry] = []
     private var currentChangelist: String?
     private var currentEntry: PendingEntry?
     private var text = ""
 
-    init(workingCopyURL: URL?) {
+    init(workingCopyURL: URL?, resolveNodeKinds: Bool) {
         self.workingCopyURL = workingCopyURL?.standardizedFileURL
+        self.resolveNodeKinds = resolveNodeKinds
     }
 
     func parser(
@@ -340,7 +346,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
     }
 
     private func nodeKind(for path: String) -> SVNNodeKind {
-        guard let workingCopyURL else { return .unknown }
+        guard resolveNodeKinds, let workingCopyURL else { return .unknown }
 
         let url: URL
         if path.hasPrefix("/") {

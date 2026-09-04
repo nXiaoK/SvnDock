@@ -69,7 +69,8 @@ struct SvnDockRootView: View {
             Task { await store.handleFinderURL(url) }
         }
         .onChange(of: store.selectedWorkingCopyID) {
-            Task { await store.selectedWorkingCopyDidChange() }
+            let selectedID = store.selectedWorkingCopyID
+            Task { await store.selectedWorkingCopyDidChange(to: selectedID) }
         }
         .onChange(of: store.isPresentingCommit) {
             if !store.isPresentingCommit {

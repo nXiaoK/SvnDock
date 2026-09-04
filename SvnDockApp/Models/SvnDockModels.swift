@@ -42,11 +42,17 @@ struct SvnDockStatusCounts: Hashable, Sendable {
     static let zero = SvnDockStatusCounts(changed: 0, conflicts: 0, unversioned: 0)
 
     static func make(from entries: [SvnDockStatusEntry]) -> SvnDockStatusCounts {
-        SvnDockStatusCounts(
-            changed: entries.filter { $0.status.isChange }.count,
-            conflicts: entries.filter { $0.status == .conflicted || $0.repositoryStatus == .conflicted }.count,
-            unversioned: entries.filter { $0.status == .unversioned }.count
-        )
+        entries.reduce(into: .zero) { counts, entry in
+            if entry.status.isChange {
+                counts.changed += 1
+            }
+            if entry.status == .conflicted || entry.repositoryStatus == .conflicted {
+                counts.conflicts += 1
+            }
+            if entry.status == .unversioned {
+                counts.unversioned += 1
+            }
+        }
     }
 }
 
@@ -215,6 +221,86 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
     var parentPath: String {
         let value = URL(fileURLWithPath: relativePath).deletingLastPathComponent().path
         return value == "." || value == "/" ? "" : value
+    }
+}
+
+/// Immutable, precomputed status data returned by a service refresh.
+///
+/// Sorting and indexing can be expensive for large working copies, so the
+/// service builds this value on its actor before publishing it to SwiftUI.
+struct SvnDockStatusSnapshot: Sendable {
+    static let empty = SvnDockStatusSnapshot(entries: [])
+
+    let entries: [SvnDockStatusEntry]
+    let committableEntries: [SvnDockStatusEntry]
+    let counts: SvnDockStatusCounts
+
+    private let entryIndex: [SvnDockStatusEntry.ID: Int]
+
+    init(entries unsortedEntries: [SvnDockStatusEntry]) {
+        let entries = unsortedEntries.sorted(by: Self.statusSort)
+        var entryIndex: [SvnDockStatusEntry.ID: Int] = [:]
+        var committableEntries: [SvnDockStatusEntry] = []
+        var counts = SvnDockStatusCounts.zero
+
+        entryIndex.reserveCapacity(entries.count)
+        committableEntries.reserveCapacity(entries.count)
+
+        for (index, entry) in entries.enumerated() {
+            let id = entry.id
+            entryIndex[id] = index
+            if entry.status.canCommit {
+                committableEntries.append(entry)
+            }
+            if entry.status.isChange {
+                counts.changed += 1
+            }
+            if entry.status == .conflicted || entry.repositoryStatus == .conflicted {
+                counts.conflicts += 1
+            }
+            if entry.status == .unversioned {
+                counts.unversioned += 1
+            }
+        }
+
+        self.entries = entries
+        self.entryIndex = entryIndex
+        self.committableEntries = committableEntries
+        self.counts = counts
+    }
+
+    func entry(withID id: SvnDockStatusEntry.ID) -> SvnDockStatusEntry? {
+        guard let index = entryIndex[id] else { return nil }
+        return entries[index]
+    }
+
+    func containsEntry(withID id: SvnDockStatusEntry.ID) -> Bool {
+        entryIndex[id] != nil
+    }
+
+    private static func statusSort(
+        _ lhs: SvnDockStatusEntry,
+        _ rhs: SvnDockStatusEntry
+    ) -> Bool {
+        let lhsRank = statusRank(lhs.status)
+        let rhsRank = statusRank(rhs.status)
+        if lhsRank != rhsRank { return lhsRank < rhsRank }
+        return lhs.relativePath.localizedStandardCompare(rhs.relativePath) == .orderedAscending
+    }
+
+    private static func statusRank(_ status: SvnDockStatusKind) -> Int {
+        switch status {
+        case .conflicted: 0
+        case .obstructed: 1
+        case .modified: 2
+        case .added: 3
+        case .deleted, .missing: 4
+        case .replaced: 5
+        case .unversioned: 6
+        case .external: 7
+        case .ignored: 8
+        case .clean: 9
+        }
     }
 }
 
