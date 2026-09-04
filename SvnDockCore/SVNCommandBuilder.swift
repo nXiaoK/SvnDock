@@ -89,6 +89,9 @@ public struct SVNCommandBuilder: Sendable {
             if options.includeIgnored {
                 arguments.append("--no-ignore")
             }
+            if let depth = options.depth {
+                arguments.append(contentsOf: ["--depth", depth.rawValue])
+            }
             appendCommonOptions(to: &arguments)
             arguments.append("--")
             arguments.append(contentsOf: try safePaths(
@@ -136,10 +139,16 @@ public struct SVNCommandBuilder: Sendable {
                 escapePegRevision: true
             ))
 
-        case let .add(paths, parents):
+        case let .add(paths, parents, force, depth):
             arguments = ["add"]
+            if force {
+                arguments.append("--force")
+            }
             if parents {
                 arguments.append("--parents")
+            }
+            if let depth {
+                arguments.append(contentsOf: ["--depth", depth.rawValue])
             }
             appendCommonOptions(to: &arguments)
             arguments.append("--")

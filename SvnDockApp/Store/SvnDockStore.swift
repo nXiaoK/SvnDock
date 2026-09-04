@@ -7,6 +7,8 @@ import SwiftUI
 final class SvnDockStore: ObservableObject {
     private static let initialVisibleEntryLimit = 500
     private static let visibleEntryBatchSize = 500
+    private static let initialDirectoryChildLimit = 250
+    private static let directoryChildBatchSize = 250
 
     private static let finderHandoffNotification = Notification.Name(
         "com.svndock.command-handoff"
@@ -25,6 +27,13 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
     @Published private(set) var filteredEntryCount = 0
     @Published private(set) var isFilteringStatusEntries = false
+    @Published private var expandedDirectoryIDs: Set<SvnDockStatusEntry.ID> = []
+    @Published private var directoryChildrenByID: [
+        SvnDockStatusEntry.ID: [SvnDockStatusEntry]
+    ] = [:]
+    @Published private var loadingDirectoryIDs: Set<SvnDockStatusEntry.ID> = []
+    @Published private var directoryErrorsByID: [SvnDockStatusEntry.ID: String] = [:]
+    @Published private var directoryVisibleLimits: [SvnDockStatusEntry.ID: Int] = [:]
     @Published var inspectorTab: SvnDockInspectorTab = .diff {
         didSet {
             if oldValue == .history, inspectorTab != .history {
@@ -70,6 +79,9 @@ final class SvnDockStore: ObservableObject {
     private var activeStatusLoadTask: Task<SvnDockStatusSnapshot, Error>?
     private var statusPresentationGeneration = UUID()
     private var statusPresentationTask: Task<Void, Never>?
+    private var discoveredEntryIndex: [SvnDockStatusEntry.ID: SvnDockStatusEntry] = [:]
+    private var directoryTreeGeneration = UUID()
+    private var directoryLoadTasks: [SvnDockStatusEntry.ID: Task<Void, Never>] = [:]
     private var historyLoadGeneration: UUID?
     private var historyLoadTask: Task<Void, Never>?
     private var historyNeedsReload = false
@@ -122,7 +134,7 @@ final class SvnDockStore: ObservableObject {
 
     var primarySelectedEntry: SvnDockStatusEntry? {
         guard let id = selectedEntryIDs.min() else { return nil }
-        return statusSnapshot.entry(withID: id)
+        return statusEntry(withID: id)
     }
 
     var committableEntries: [SvnDockStatusEntry] {
@@ -617,7 +629,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     @discardableResult
-    func addSelectedUnversionedEntries(
+    func addSelectedEntries(
         allowDuringFinderRouting: Bool = false
     ) async -> Bool {
         if !allowDuringFinderRouting,
@@ -625,8 +637,9 @@ final class SvnDockStore: ObservableObject {
             return false
         }
         guard let workingCopy = selectedWorkingCopy else { return false }
-        let selected = entries.filter {
-            selectedEntryIDs.contains($0.id) && $0.status == .unversioned
+        let selected = selectedStatusEntries {
+            $0.status == .unversioned
+                || ($0.status == .added && $0.nodeKind == .directory)
         }
         guard !selected.isEmpty else { return false }
 
@@ -863,9 +876,8 @@ final class SvnDockStore: ObservableObject {
     ) {
         guard allowDuringFinderRouting || !isInteractionBlocked else { return }
         guard let workingCopy = selectedWorkingCopy,
-              let currentEntry = entries.first(where: {
-                  $0.id == entry.id && $0.status == .unversioned
-              }) else {
+              let currentEntry = statusEntry(withID: entry.id),
+              currentEntry.status == .unversioned else {
             present(
                 SvnDockServiceError.invalidIgnoreTarget("所选项目已经不再是未纳管状态。"),
                 title: "无法添加忽略规则"
@@ -1568,10 +1580,178 @@ final class SvnDockStore: ObservableObject {
         selectedEntryIDs = entryIDs
     }
 
+    func canExpandDirectory(_ entry: SvnDockStatusEntry) -> Bool {
+        entry.nodeKind == .directory
+            && !entry.isSymbolicLink
+            && (entry.status == .unversioned || entry.status == .added)
+    }
+
+    func isDirectoryExpanded(_ entry: SvnDockStatusEntry) -> Bool {
+        expandedDirectoryIDs.contains(entry.id)
+    }
+
+    func isLoadingDirectory(_ entry: SvnDockStatusEntry) -> Bool {
+        loadingDirectoryIDs.contains(entry.id)
+    }
+
+    func directoryError(for entry: SvnDockStatusEntry) -> String? {
+        directoryErrorsByID[entry.id]
+    }
+
+    func visibleDirectoryChildren(
+        for entry: SvnDockStatusEntry
+    ) -> [SvnDockStatusEntry] {
+        let children = directoryChildrenByID[entry.id, default: []]
+        let limit = directoryVisibleLimits[
+            entry.id,
+            default: Self.initialDirectoryChildLimit
+        ]
+        return Array(children.prefix(limit))
+    }
+
+    func hasMoreDirectoryChildren(for entry: SvnDockStatusEntry) -> Bool {
+        visibleDirectoryChildren(for: entry).count
+            < directoryChildrenByID[entry.id, default: []].count
+    }
+
+    func remainingDirectoryChildCount(for entry: SvnDockStatusEntry) -> Int {
+        let total = directoryChildrenByID[entry.id, default: []].count
+        let visible = visibleDirectoryChildren(for: entry).count
+        return min(Self.directoryChildBatchSize, max(0, total - visible))
+    }
+
+    func toggleDirectoryExpansion(for entry: SvnDockStatusEntry) {
+        guard canExpandDirectory(entry),
+              entry.workingCopyID == selectedWorkingCopyID else { return }
+
+        if expandedDirectoryIDs.remove(entry.id) != nil {
+            return
+        }
+
+        expandedDirectoryIDs.insert(entry.id)
+        if directoryChildrenByID[entry.id] == nil,
+           !loadingDirectoryIDs.contains(entry.id) {
+            startLoadingDirectory(entry)
+        }
+    }
+
+    func retryDirectoryLoad(for entry: SvnDockStatusEntry) {
+        guard canExpandDirectory(entry),
+              entry.workingCopyID == selectedWorkingCopyID else { return }
+        directoryLoadTasks[entry.id]?.cancel()
+        directoryChildrenByID[entry.id] = nil
+        directoryErrorsByID[entry.id] = nil
+        expandedDirectoryIDs.insert(entry.id)
+        startLoadingDirectory(entry)
+    }
+
+    func showMoreDirectoryChildren(for entry: SvnDockStatusEntry) {
+        let current = directoryVisibleLimits[
+            entry.id,
+            default: Self.initialDirectoryChildLimit
+        ]
+        let total = directoryChildrenByID[entry.id, default: []].count
+        directoryVisibleLimits[entry.id] = min(
+            current + Self.directoryChildBatchSize,
+            total
+        )
+    }
+
+    private func startLoadingDirectory(_ entry: SvnDockStatusEntry) {
+        guard let workingCopy = workingCopies.first(where: {
+            $0.id == entry.workingCopyID
+        }) else { return }
+
+        let generation = directoryTreeGeneration
+        directoryErrorsByID[entry.id] = nil
+        loadingDirectoryIDs.insert(entry.id)
+        directoryVisibleLimits[entry.id] = Self.initialDirectoryChildLimit
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await self.loadDirectoryChildren(
+                of: entry,
+                in: workingCopy,
+                generation: generation
+            )
+        }
+        directoryLoadTasks[entry.id] = task
+    }
+
+    private func loadDirectoryChildren(
+        of entry: SvnDockStatusEntry,
+        in workingCopy: SvnDockWorkingCopy,
+        generation: UUID
+    ) async {
+        do {
+            let loadedChildren = try await service.directoryChildren(
+                relativePath: entry.relativePath,
+                in: workingCopy
+            )
+            try Task.checkCancellation()
+            guard directoryTreeGeneration == generation,
+                  selectedWorkingCopyID == workingCopy.id else { return }
+
+            if let previousChildren = directoryChildrenByID[entry.id] {
+                for child in previousChildren {
+                    discoveredEntryIndex[child.id] = nil
+                }
+            }
+            let children = loadedChildren.map { child in
+                statusSnapshot.entry(withID: child.id) ?? child
+            }
+            for child in children {
+                discoveredEntryIndex[child.id] = child
+            }
+            directoryChildrenByID[entry.id] = children
+            directoryErrorsByID[entry.id] = nil
+        } catch is CancellationError {
+            return
+        } catch {
+            guard directoryTreeGeneration == generation,
+                  selectedWorkingCopyID == workingCopy.id else { return }
+            directoryErrorsByID[entry.id] = error.localizedDescription
+        }
+
+        guard directoryTreeGeneration == generation else { return }
+        loadingDirectoryIDs.remove(entry.id)
+        directoryLoadTasks[entry.id] = nil
+    }
+
+    private func resetDirectoryTree() {
+        for task in directoryLoadTasks.values {
+            task.cancel()
+        }
+        directoryLoadTasks = [:]
+        directoryTreeGeneration = UUID()
+        discoveredEntryIndex = [:]
+        expandedDirectoryIDs = []
+        directoryChildrenByID = [:]
+        loadingDirectoryIDs = []
+        directoryErrorsByID = [:]
+        directoryVisibleLimits = [:]
+    }
+
+    private func statusEntry(
+        withID id: SvnDockStatusEntry.ID
+    ) -> SvnDockStatusEntry? {
+        statusSnapshot.entry(withID: id) ?? discoveredEntryIndex[id]
+    }
+
+    private func selectedStatusEntries(
+        where predicate: (SvnDockStatusEntry) -> Bool
+    ) -> [SvnDockStatusEntry] {
+        selectedEntryIDs
+            .compactMap(statusEntry(withID:))
+            .filter(predicate)
+            .sorted { $0.relativePath < $1.relativePath }
+    }
+
     private func apply(
         _ loadedSnapshot: SvnDockStatusSnapshot,
         to workingCopyID: UUID
     ) {
+        resetDirectoryTree()
         statusSnapshot = loadedSnapshot
         selectedEntryIDs = Set(selectedEntryIDs.filter {
             loadedSnapshot.containsEntry(withID: $0)
@@ -1587,6 +1767,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func clearStatusEntries() {
+        resetDirectoryTree()
         activeStatusLoadTask?.cancel()
         activeStatusLoadTask = nil
         statusLoadGeneration = UUID()
@@ -1939,7 +2120,7 @@ final class SvnDockStore: ObservableObject {
             }) else {
                 throw SvnDockServiceError.unavailable("所选文件已经不再是未纳管状态。")
             }
-            let succeeded = await addSelectedUnversionedEntries(
+            let succeeded = await addSelectedEntries(
                 allowDuringFinderRouting: true
             )
             try Task.checkCancellation()

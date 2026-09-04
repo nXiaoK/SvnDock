@@ -117,7 +117,12 @@ public struct SvnDockCoreCommandExecutor: FinderCommandExecuting, Sendable {
             }
             return .update(revision: nil)
         case .add:
-            return .add(paths: selectedPaths, parents: true)
+            return .add(
+                paths: selectedPaths,
+                parents: true,
+                force: false,
+                depth: nil
+            )
         case .cleanup:
             guard selectedPaths.count == 1,
                   selectedPaths[0] == rootPath else {

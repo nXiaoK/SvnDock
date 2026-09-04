@@ -10,6 +10,10 @@ protocol SvnDockServicing: Sendable {
     func unregisterWorkingCopy(id: UUID) async throws
 
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot
+    func directoryChildren(
+        relativePath: String,
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws -> [SvnDockStatusEntry]
     func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String
     func history(
         for workingCopy: SvnDockWorkingCopy,

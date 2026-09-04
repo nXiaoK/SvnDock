@@ -288,6 +288,9 @@ public struct SVNInfo: Codable, Hashable, Sendable {
 public struct SVNStatusOptions: Codable, Hashable, Sendable {
     public var showRemoteUpdates: Bool
     public var includeIgnored: Bool
+    /// Limits how deeply Subversion inspects directory targets. `nil` keeps
+    /// the client's default recursive behavior.
+    public var depth: SVNDepth?
     /// Optional working-copy-relative paths to inspect. An empty collection
     /// keeps the original whole-working-copy behavior.
     public var paths: [String]
@@ -295,16 +298,19 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
     public init(
         showRemoteUpdates: Bool = false,
         includeIgnored: Bool = false,
+        depth: SVNDepth? = nil,
         paths: [String] = []
     ) {
         self.showRemoteUpdates = showRemoteUpdates
         self.includeIgnored = includeIgnored
+        self.depth = depth
         self.paths = paths
     }
 
     private enum CodingKeys: String, CodingKey {
         case showRemoteUpdates
         case includeIgnored
+        case depth
         case paths
     }
 
@@ -312,6 +318,7 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         showRemoteUpdates = try container.decode(Bool.self, forKey: .showRemoteUpdates)
         includeIgnored = try container.decode(Bool.self, forKey: .includeIgnored)
+        depth = try container.decodeIfPresent(SVNDepth.self, forKey: .depth)
         paths = try container.decodeIfPresent([String].self, forKey: .paths) ?? []
     }
 
@@ -319,6 +326,7 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(showRemoteUpdates, forKey: .showRemoteUpdates)
         try container.encode(includeIgnored, forKey: .includeIgnored)
+        try container.encodeIfPresent(depth, forKey: .depth)
         if !paths.isEmpty {
             try container.encode(paths, forKey: .paths)
         }
@@ -366,7 +374,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
     case info
     case update(revision: SVNRevision?)
     case commit(paths: [String], message: String, keepLocks: Bool)
-    case add(paths: [String], parents: Bool)
+    case add(paths: [String], parents: Bool, force: Bool, depth: SVNDepth?)
     case revert(paths: [String], depth: SVNDepth)
     case cleanup
     case diff(paths: [String])

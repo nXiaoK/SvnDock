@@ -154,6 +154,63 @@ actor CoreSvnDockService: SvnDockServicing {
         return SvnDockStatusSnapshot(entries: uiEntries)
     }
 
+    func directoryChildren(
+        relativePath: String,
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws -> [SvnDockStatusEntry] {
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        let executableURL = try executableLocator.locate()
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .status(SVNStatusOptions(
+                includeIgnored: true,
+                depth: .immediates,
+                paths: [relativePath]
+            )),
+            in: coreCopy
+        )
+        let runner = processRunner
+        let operationLock = crossProcessLock
+
+        let listing = try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                let directoryURL = try Self.validatedDirectoryURL(
+                    for: relativePath,
+                    in: coreCopy
+                )
+                let diskChildren = try Self.immediateDiskChildren(
+                    of: directoryURL,
+                    in: coreCopy
+                )
+
+                let result = try await runner.run(invocation)
+                guard result.succeeded else {
+                    throw SVNProcessFailure(result: result)
+                }
+                let statusEntries = try SVNXMLParser.parseStatus(
+                    result.standardOutput,
+                    workingCopyURL: coreCopy.localPath,
+                    resolveNodeKinds: false
+                )
+
+                // Discard the snapshot if the directory was replaced by a
+                // symlink while it was being read. The filesystem is not
+                // covered by our cooperative working-copy lock.
+                _ = try Self.validatedDirectoryURL(
+                    for: relativePath,
+                    in: coreCopy
+                )
+                return DirectoryListingSnapshot(
+                    directoryURL: directoryURL,
+                    diskChildren: diskChildren,
+                    statusEntries: statusEntries
+                )
+            }
+        }
+
+        return makeUIDirectoryChildren(listing, in: coreCopy)
+    }
+
     func diff(
         relativePath: String,
         in workingCopy: SvnDockWorkingCopy
@@ -201,7 +258,15 @@ actor CoreSvnDockService: SvnDockServicing {
 
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        _ = try await run(.add(paths: relativePaths, parents: true), in: coreCopy)
+        _ = try await run(
+            .add(
+                paths: relativePaths,
+                parents: true,
+                force: true,
+                depth: nil
+            ),
+            in: coreCopy
+        )
     }
 
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
@@ -303,6 +368,36 @@ actor CoreSvnDockService: SvnDockServicing {
                         in: coreCopy
                     )
 
+                    // svn:ignore can only be stored on a versioned directory.
+                    // Always schedule only the parent chain. Status can return
+                    // an empty target for a directory nested below an
+                    // unversioned ancestor, so it cannot reliably distinguish
+                    // that case from a clean versioned directory. `--force`
+                    // makes this a no-op for directories already under version
+                    // control, while `--depth empty` leaves every child for the
+                    // user's later recursive Add.
+                    let addParentInvocation = try builder.makeInvocation(
+                        for: .add(
+                            paths: [parentPath],
+                            parents: true,
+                            force: true,
+                            depth: .empty
+                        ),
+                        in: coreCopy
+                    )
+                    let addParentResult = try await runner.run(addParentInvocation)
+                    guard addParentResult.succeeded else {
+                        throw SVNProcessFailure(result: addParentResult)
+                    }
+
+                    // Resolve the directory and selected children again after
+                    // the potential add, while the scheduler and cross-process
+                    // lock are still held.
+                    try Self.validateResolvedBoundary(
+                        relativePaths: [parentPath] + targetPaths,
+                        in: coreCopy
+                    )
+
                     let listInvocation = try builder.makeInvocation(
                         for: .properties(paths: [parentPath]),
                         in: coreCopy
@@ -348,6 +443,7 @@ actor CoreSvnDockService: SvnDockServicing {
                     let statusInvocation = try builder.makeInvocation(
                         for: .status(SVNStatusOptions(
                             includeIgnored: true,
+                            depth: .empty,
                             paths: targetPaths
                         )),
                         in: coreCopy
@@ -474,14 +570,21 @@ actor CoreSvnDockService: SvnDockServicing {
         let fileURL = entry.fileURL(relativeTo: workingCopy)
         let values = try? fileURL.resourceValues(forKeys: [
             .isDirectoryKey,
+            .isSymbolicLinkKey,
             .fileSizeKey,
             .contentModificationDateKey
         ])
+        let isSymbolicLink = values?.isSymbolicLink == true
 
         return SvnDockStatusEntry(
             workingCopyID: workingCopy.id,
             relativePath: relativePath(for: fileURL, root: workingCopy.localPath),
-            nodeKind: nodeKind(entry.kind, resourceValues: values),
+            nodeKind: nodeKind(
+                entry.kind,
+                resourceValues: values,
+                isSymbolicLink: isSymbolicLink
+            ),
+            isSymbolicLink: isSymbolicLink,
             status: effectiveStatus,
             repositoryStatus: entry.repositoryStatus.map(mapStatus),
             conflictKinds: conflictKinds(for: entry),
@@ -489,6 +592,89 @@ actor CoreSvnDockService: SvnDockServicing {
             fileSize: values?.fileSize.map { Int64($0) },
             modifiedAt: values?.contentModificationDate
         )
+    }
+
+    private func makeUIDirectoryChildren(
+        _ listing: DirectoryListingSnapshot,
+        in workingCopy: SvnDockCore.WorkingCopy
+    ) -> [SvnDockStatusEntry] {
+        var statusByPath: [String: SvnDockCore.StatusEntry] = [:]
+        for entry in listing.statusEntries {
+            let fileURL = entry.fileURL(relativeTo: workingCopy).standardizedFileURL
+            guard fileURL.lastPathComponent != ".svn",
+                  fileURL.deletingLastPathComponent().standardizedFileURL
+                    == listing.directoryURL else {
+                continue
+            }
+            statusByPath[fileURL.path] = entry
+        }
+
+        var result: [SvnDockStatusEntry] = []
+        result.reserveCapacity(listing.diskChildren.count + statusByPath.count)
+
+        for child in listing.diskChildren {
+            let statusEntry = statusByPath.removeValue(forKey: child.fileURL.path)
+            result.append(SvnDockStatusEntry(
+                workingCopyID: workingCopy.id,
+                relativePath: relativePath(
+                    for: child.fileURL,
+                    root: workingCopy.localPath
+                ),
+                nodeKind: child.isDirectory && !child.isSymbolicLink
+                    ? .directory
+                    : .file,
+                isSymbolicLink: child.isSymbolicLink,
+                status: statusEntry.map(directoryStatusKind) ?? .unversioned,
+                repositoryStatus: statusEntry?.repositoryStatus.map(mapStatus),
+                conflictKinds: statusEntry.map(conflictKinds(for:)) ?? [],
+                changelist: statusEntry?.changelist,
+                fileSize: child.fileSize,
+                modifiedAt: child.modifiedAt
+            ))
+        }
+
+        // Preserve scheduled deletions and missing nodes even though they no
+        // longer have a corresponding item in the directory enumeration.
+        for (path, statusEntry) in statusByPath {
+            let fileURL = URL(fileURLWithPath: path).standardizedFileURL
+            result.append(SvnDockStatusEntry(
+                workingCopyID: workingCopy.id,
+                relativePath: relativePath(
+                    for: fileURL,
+                    root: workingCopy.localPath
+                ),
+                nodeKind: nodeKind(statusEntry.kind, resourceValues: nil),
+                status: directoryStatusKind(statusEntry),
+                repositoryStatus: statusEntry.repositoryStatus.map(mapStatus),
+                conflictKinds: conflictKinds(for: statusEntry),
+                changelist: statusEntry.changelist
+            ))
+        }
+
+        return result.sorted { lhs, rhs in
+            if lhs.nodeKind != rhs.nodeKind {
+                return lhs.nodeKind == .directory
+            }
+            let nameOrder = lhs.fileName.localizedStandardCompare(rhs.fileName)
+            if nameOrder != .orderedSame {
+                return nameOrder == .orderedAscending
+            }
+            return lhs.relativePath < rhs.relativePath
+        }
+    }
+
+    private func directoryStatusKind(
+        _ entry: SvnDockCore.StatusEntry
+    ) -> SvnDockStatusKind {
+        if entry.isTreeConflicted
+            || entry.status == .conflicted
+            || entry.propertyStatus == .conflicted {
+            return .conflicted
+        }
+        if entry.status == .normal || entry.status == .none {
+            return entry.propertyStatus.isLocalChange ? .modified : .clean
+        }
+        return mapStatus(entry.status)
     }
 
     private func conflictKinds(
@@ -509,8 +695,12 @@ actor CoreSvnDockService: SvnDockServicing {
 
     private func nodeKind(
         _ kind: SVNNodeKind,
-        resourceValues: URLResourceValues?
+        resourceValues: URLResourceValues?,
+        isSymbolicLink: Bool = false
     ) -> SvnDockNodeKind {
+        if isSymbolicLink {
+            return .file
+        }
         switch kind {
         case .file:
             return .file
@@ -630,6 +820,83 @@ actor CoreSvnDockService: SvnDockServicing {
                     "所选项目已经不再是可按扩展名忽略的文件。"
                 )
             }
+        }
+    }
+
+    private static func validatedDirectoryURL(
+        for relativePath: String,
+        in workingCopy: SvnDockCore.WorkingCopy
+    ) throws -> URL {
+        try validateResolvedBoundary(
+            relativePaths: [relativePath],
+            in: workingCopy
+        )
+
+        let targetURL = absoluteURL(
+            for: relativePath,
+            in: workingCopy
+        )
+        let attributes: [FileAttributeKey: Any]
+        do {
+            attributes = try FileManager.default.attributesOfItem(
+                atPath: targetURL.path
+            )
+        } catch {
+            throw SvnDockServiceError.unavailable(
+                "无法读取所选目录，请刷新后重试。"
+            )
+        }
+
+        let fileType = attributes[.type] as? FileAttributeType
+        guard fileType != .typeSymbolicLink else {
+            throw SvnDockServiceError.unavailable(
+                "符号链接目录不能展开，以避免访问工作副本之外的内容。"
+            )
+        }
+        guard fileType == .typeDirectory else {
+            throw SvnDockServiceError.unavailable(
+                "所选项目已经不再是目录，请刷新后重试。"
+            )
+        }
+        return targetURL
+    }
+
+    private static func immediateDiskChildren(
+        of directoryURL: URL,
+        in workingCopy: SvnDockCore.WorkingCopy
+    ) throws -> [DirectoryDiskChild] {
+        let fileManager = FileManager.default
+        let childURLs = try fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: nil,
+            options: []
+        )
+        let rootURL = workingCopy.localPath.standardizedFileURL
+
+        return childURLs.compactMap { childURL in
+            let childURL = childURL.standardizedFileURL
+            guard childURL.lastPathComponent != ".svn",
+                  childURL.deletingLastPathComponent().standardizedFileURL
+                    == directoryURL,
+                  path(childURL.path, isInside: rootURL.path) else {
+                return nil
+            }
+
+            // attributesOfItem reports the link itself, unlike directory
+            // traversal APIs that can transparently follow directory links.
+            // If metadata races with a deletion, retain a conservative file
+            // row rather than attempting to inspect a possible link target.
+            let attributes = try? fileManager.attributesOfItem(
+                atPath: childURL.path
+            )
+            let fileType = attributes?[.type] as? FileAttributeType
+            return DirectoryDiskChild(
+                fileURL: childURL,
+                isDirectory: fileType == .typeDirectory,
+                isSymbolicLink: fileType == .typeSymbolicLink,
+                fileSize: (attributes?[.size] as? NSNumber)?.int64Value,
+                modifiedAt: attributes?[.modificationDate] as? Date
+            )
         }
     }
 
@@ -767,6 +1034,20 @@ actor CoreSvnDockService: SvnDockServicing {
         case .clean: 8
         }
     }
+}
+
+private struct DirectoryDiskChild: Sendable {
+    let fileURL: URL
+    let isDirectory: Bool
+    let isSymbolicLink: Bool
+    let fileSize: Int64?
+    let modifiedAt: Date?
+}
+
+private struct DirectoryListingSnapshot: Sendable {
+    let directoryURL: URL
+    let diskChildren: [DirectoryDiskChild]
+    let statusEntries: [SvnDockCore.StatusEntry]
 }
 
 private struct SVNProcessFailure: LocalizedError, Sendable {

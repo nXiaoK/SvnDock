@@ -45,10 +45,45 @@ final class SVNCommandBuilderTests: XCTestCase {
         )
     }
 
+    func testStatusCanLimitDirectoryTraversalDepth() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .status(SVNStatusOptions(depth: .immediates, paths: ["ImportedProject"])),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "status", "--xml", "--depth", "immediates", "--non-interactive",
+                "--", "ImportedProject"
+            ]
+        )
+    }
+
+    func testStatusOptionsDecodeLegacyPayloadWithoutDepth() throws {
+        let legacyPayload = Data(
+            #"{"showRemoteUpdates":false,"includeIgnored":true,"paths":["Sources"]}"#.utf8
+        )
+
+        let options = try JSONDecoder().decode(SVNStatusOptions.self, from: legacyPayload)
+
+        XCTAssertNil(options.depth)
+        XCTAssertEqual(options.paths, ["Sources"])
+        let encoded = try JSONEncoder().encode(options)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        XCTAssertNil(object["depth"])
+    }
+
     func testFilenameBeginningWithDashComesAfterOptionTerminator() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
         let invocation = try builder.makeInvocation(
-            for: .add(paths: ["-not-an-option.txt"], parents: false),
+            for: .add(
+                paths: ["-not-an-option.txt"],
+                parents: false,
+                force: false,
+                depth: nil
+            ),
             in: WorkingCopy(localPath: rootURL)
         )
 
@@ -58,11 +93,37 @@ final class SVNCommandBuilderTests: XCTestCase {
     func testAtSignFilenameGetsEmptyPegRevision() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
         let invocation = try builder.makeInvocation(
-            for: .add(paths: ["notes/user@example.txt"], parents: false),
+            for: .add(
+                paths: ["notes/user@example.txt"],
+                parents: false,
+                force: false,
+                depth: nil
+            ),
             in: WorkingCopy(localPath: rootURL)
         )
 
         XCTAssertEqual(invocation.arguments.last, "notes/user@example.txt@")
+    }
+
+    func testAddSupportsForcedRecursiveDirectoryImport() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let invocation = try builder.makeInvocation(
+            for: .add(
+                paths: ["ImportedProject"],
+                parents: true,
+                force: true,
+                depth: .infinity
+            ),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "add", "--force", "--parents", "--depth", "infinity",
+                "--non-interactive", "--", "ImportedProject"
+            ]
+        )
     }
 
     func testDiffKeepsAtSignFilenameLiteral() throws {

@@ -44,6 +44,25 @@ actor MockSvnDockService: SvnDockServicing {
         )
     }
 
+    func directoryChildren(
+        relativePath: String,
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws -> [SvnDockStatusEntry] {
+        await briefDelay()
+        let prefix = relativePath == "." ? "" : relativePath + "/"
+        return entriesByWorkingCopyID[workingCopy.id, default: []]
+            .filter { entry in
+                guard entry.relativePath.hasPrefix(prefix) else { return false }
+                return !entry.relativePath.dropFirst(prefix.count).contains("/")
+            }
+            .sorted {
+                if $0.nodeKind != $1.nodeKind {
+                    return $0.nodeKind == .directory
+                }
+                return $0.fileName.localizedStandardCompare($1.fileName) == .orderedAscending
+            }
+    }
+
     func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String {
         await briefDelay()
         return Self.exampleDiff(relativePath: relativePath)

@@ -29,7 +29,12 @@ struct SvnDockCoreSmokeTestMain {
             executableURL: URL(fileURLWithPath: "/opt/homebrew/bin/svn")
         )
         let invocation = try builder.makeInvocation(
-            for: .add(paths: ["-safe-because-after-terminator"], parents: false),
+            for: .add(
+                paths: ["-safe-because-after-terminator"],
+                parents: false,
+                force: false,
+                depth: nil
+            ),
             in: workingCopy
         )
         try check(
@@ -46,7 +51,12 @@ struct SvnDockCoreSmokeTestMain {
         try check(commit.standardInput == Data(commitMessage.utf8), "commit message stdin")
 
         let pegSafe = try builder.makeInvocation(
-            for: .add(paths: ["notes/user@example.txt"], parents: false),
+            for: .add(
+                paths: ["notes/user@example.txt"],
+                parents: false,
+                force: false,
+                depth: nil
+            ),
             in: workingCopy
         )
         try check(pegSafe.arguments.last == "notes/user@example.txt@", "peg revision escaping")
@@ -765,7 +775,12 @@ struct SvnDockCoreSmokeTestMain {
 
         let addResult = try await runner.run(
             builder.makeInvocation(
-                for: .add(paths: [file.path], parents: false),
+                for: .add(
+                    paths: [file.path],
+                    parents: false,
+                    force: false,
+                    depth: nil
+                ),
                 in: workingCopy
             )
         )

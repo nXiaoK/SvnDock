@@ -189,6 +189,7 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
     let workingCopyID: UUID
     var relativePath: String
     var nodeKind: SvnDockNodeKind
+    var isSymbolicLink: Bool
     var status: SvnDockStatusKind
     var repositoryStatus: SvnDockStatusKind?
     var conflictKinds: Set<SvnDockConflictKind>
@@ -201,6 +202,7 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
         workingCopyID: UUID,
         relativePath: String,
         nodeKind: SvnDockNodeKind,
+        isSymbolicLink: Bool = false,
         status: SvnDockStatusKind,
         repositoryStatus: SvnDockStatusKind? = nil,
         conflictKinds: Set<SvnDockConflictKind>? = nil,
@@ -212,6 +214,7 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
         self.workingCopyID = workingCopyID
         self.relativePath = relativePath
         self.nodeKind = nodeKind
+        self.isSymbolicLink = isSymbolicLink
         self.status = status
         self.repositoryStatus = repositoryStatus
         self.conflictKinds = conflictKinds
