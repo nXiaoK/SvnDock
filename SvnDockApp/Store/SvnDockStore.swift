@@ -1236,7 +1236,10 @@ final class SvnDockStore: ObservableObject {
         defer { isLoadingDiff = false }
 
         do {
-            let loadedDiff = try await service.diff(for: entry, in: workingCopy)
+            let loadedDiff = try await service.diff(
+                relativePath: entry.relativePath,
+                in: workingCopy
+            )
             guard primarySelectedEntry?.id == expectedEntryID else { return false }
             diffText = loadedDiff
             return true
@@ -1248,6 +1251,20 @@ final class SvnDockStore: ObservableObject {
             present(error, title: "无法读取差异")
             return false
         }
+    }
+
+    func diffText(for request: SvnDockDiffRequest) async throws -> String {
+        guard let workingCopy = workingCopies.first(where: {
+            $0.id == request.workingCopyID
+        }) else {
+            throw SvnDockServiceError.unavailable(
+                "该工作副本已不在 SvnDock 的登记列表中。"
+            )
+        }
+        return try await service.diff(
+            relativePath: request.relativePath,
+            in: workingCopy
+        )
     }
 
     func showHistoryForSelection(

@@ -44,9 +44,9 @@ actor MockSvnDockService: SvnDockServicing {
         )
     }
 
-    func diff(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> String {
+    func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String {
         await briefDelay()
-        return Self.exampleDiff(for: entry)
+        return Self.exampleDiff(relativePath: relativePath)
     }
 
     func history(
@@ -214,10 +214,10 @@ actor MockSvnDockService: SvnDockServicing {
         )
     }
 
-    private static func exampleDiff(for entry: SvnDockStatusEntry) -> String {
+    private static func exampleDiff(relativePath: String) -> String {
         """
-        --- \(entry.relativePath) (base)
-        +++ \(entry.relativePath) (working copy)
+        --- \(relativePath) (base)
+        +++ \(relativePath) (working copy)
         @@ -18,6 +18,9 @@
          struct WorkingCopyView: View {
              let workingCopy: WorkingCopy

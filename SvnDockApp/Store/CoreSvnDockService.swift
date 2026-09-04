@@ -155,11 +155,11 @@ actor CoreSvnDockService: SvnDockServicing {
     }
 
     func diff(
-        for entry: SvnDockStatusEntry,
+        relativePath: String,
         in workingCopy: SvnDockWorkingCopy
     ) async throws -> String {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        let result = try await run(.diff(paths: [entry.relativePath]), in: coreCopy)
+        let result = try await run(.diff(paths: [relativePath]), in: coreCopy)
         return result.standardOutputString
     }
 

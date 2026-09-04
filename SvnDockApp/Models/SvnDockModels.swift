@@ -124,6 +124,17 @@ struct SvnDockHistoryTarget: Identifiable, Hashable, Sendable {
     }
 }
 
+/// Stable identity for a standalone diff window. Keeping only repository
+/// coordinates makes each window independent from the main list selection.
+struct SvnDockDiffRequest: Codable, Hashable, Sendable {
+    let workingCopyID: UUID
+    let relativePath: String
+
+    var fileName: String {
+        URL(fileURLWithPath: relativePath).lastPathComponent
+    }
+}
+
 enum SvnDockStatusKind: String, CaseIterable, Hashable, Sendable {
     case modified
     case added

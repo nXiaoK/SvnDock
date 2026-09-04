@@ -18,6 +18,19 @@ struct SvnDockApplication: App {
             SvnDockCommands(store: store)
         }
 
+        WindowGroup("文件差异", for: SvnDockDiffRequest.self) { $request in
+            if let request {
+                SideBySideDiffWindow(store: store, request: request)
+            } else {
+                ContentUnavailableView(
+                    "未选择文件",
+                    systemImage: "doc.text.magnifyingglass",
+                    description: Text("请在状态列表中双击一个文件。")
+                )
+            }
+        }
+        .defaultSize(width: 1_240, height: 760)
+
         Settings {
             SvnDockSettingsView()
         }
@@ -139,7 +152,7 @@ private struct UnavailableSvnDockService: SvnDockServicing {
     func registerWorkingCopy(at url: URL) async throws -> SvnDockWorkingCopy { throw unavailable }
     func unregisterWorkingCopy(id: UUID) async throws { throw unavailable }
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot { throw unavailable }
-    func diff(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> String { throw unavailable }
+    func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String { throw unavailable }
     func history(for workingCopy: SvnDockWorkingCopy, relativePaths: [String], limit: Int) async throws -> [SvnDockLogEntry] { throw unavailable }
     func update(workingCopies: [SvnDockWorkingCopy]) async throws { throw unavailable }
     func commit(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws { throw unavailable }

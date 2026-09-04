@@ -72,7 +72,13 @@ final class SVNCommandBuilderTests: XCTestCase {
             in: WorkingCopy(localPath: rootURL)
         )
 
-        XCTAssertEqual(invocation.arguments.last, "notes/user@example.txt")
+        XCTAssertEqual(
+            invocation.arguments,
+            [
+                "diff", "--internal-diff", "--non-interactive",
+                "--", "notes/user@example.txt"
+            ]
+        )
     }
 
     func testShellMetacharactersRemainOneArgument() throws {

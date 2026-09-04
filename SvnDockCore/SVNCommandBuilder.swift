@@ -167,7 +167,9 @@ public struct SVNCommandBuilder: Sendable {
             arguments.append(contentsOf: ["--", "."])
 
         case let .diff(paths):
-            arguments = ["diff"]
+            // Side-by-side presentation relies on Subversion's unified diff
+            // grammar, regardless of any external diff command in user config.
+            arguments = ["diff", "--internal-diff"]
             appendCommonOptions(to: &arguments)
             arguments.append("--")
             // `svn diff` treats a local trailing `@` as part of the filename,

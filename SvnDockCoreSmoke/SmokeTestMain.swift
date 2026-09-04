@@ -56,6 +56,10 @@ struct SvnDockCoreSmokeTestMain {
             in: workingCopy
         )
         try check(diffLiteral.arguments.last == "notes/user@example.txt", "diff @ literal")
+        try check(
+            diffLiteral.arguments.contains("--internal-diff"),
+            "diff output remains unified"
+        )
 
         let scopedStatus = try builder.makeInvocation(
             for: .status(SVNStatusOptions(
@@ -184,6 +188,25 @@ struct SvnDockCoreSmokeTestMain {
         } catch SVNXMLParserError.unsupportedPropertyEncoding("base64") {
             // Expected. Rewriting an opaque value would risk data loss.
         }
+
+        let unifiedDiff = UnifiedDiffParser.parse("""
+        --- Sources/App.swift (revision 4)
+        +++ Sources/App.swift (working copy)
+        @@ -8,2 +8,3 @@ struct App {
+         unchanged
+        -old value
+        +new value
+        +new line
+        """)
+        try check(
+            unifiedDiff.rows.map(\.kind) == [.context, .change, .addition],
+            "side-by-side diff alignment"
+        )
+        try check(
+            unifiedDiff.rows[1].oldLineNumber == 9
+                && unifiedDiff.rows[1].newLineNumber == 9,
+            "side-by-side diff line numbers"
+        )
     }
 
     private static func locatorCheck() throws {

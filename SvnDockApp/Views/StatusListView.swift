@@ -3,6 +3,7 @@ import SwiftUI
 
 struct StatusListView: View {
     @ObservedObject var store: SvnDockStore
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -32,6 +33,11 @@ struct StatusListView: View {
                     ForEach(store.displayedEntries) { entry in
                         StatusEntryRow(entry: entry)
                             .tag(entry.id)
+                            .simultaneousGesture(
+                                TapGesture(count: 2).onEnded {
+                                    openDiffWindow(for: entry)
+                                }
+                            )
                             .contextMenu {
                                 entryContextMenu(for: entry)
                             }
@@ -137,9 +143,10 @@ struct StatusListView: View {
         }
 
         if entry.status.isChange {
-            Button("查看差异") {
-                store.selectedEntryIDs = [entry.id]
-                store.inspectorTab = .diff
+            if entry.nodeKind == .file {
+                Button("在窗口中查看差异") {
+                    openDiffWindow(for: entry)
+                }
             }
             Button("还原…", role: .destructive) {
                 store.selectedEntryIDs = [entry.id]
@@ -174,6 +181,18 @@ struct StatusListView: View {
     private func reveal(_ entry: SvnDockStatusEntry) {
         guard let root = store.selectedWorkingCopy?.rootURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([root.appending(path: entry.relativePath)])
+    }
+
+    private func openDiffWindow(for entry: SvnDockStatusEntry) {
+        guard entry.nodeKind == .file,
+              entry.status != .unversioned,
+              entry.status != .ignored,
+              entry.status != .external else { return }
+        store.selectedEntryIDs = [entry.id]
+        openWindow(value: SvnDockDiffRequest(
+            workingCopyID: entry.workingCopyID,
+            relativePath: entry.relativePath
+        ))
     }
 
     private func copy(_ value: String) {
