@@ -128,10 +128,14 @@ private struct DiffInspector: View {
                 if geometry.size.width >= 820 {
                     Divider()
                     FileDetailsSidebar(store: store, entry: entry,
-                                       statistics: store.isLoadingDiff ? nil : presentationModel.statistics)
+                                       statistics: store.isLoadingDiff || store.diffText.isEmpty
+                                           ? nil : presentationModel.statistics)
                         .frame(width: 208)
                 }
             }
+        }
+        .onChange(of: store.diffText) { _, text in
+            if text.isEmpty { presentationModel.clear() }
         }
     }
 

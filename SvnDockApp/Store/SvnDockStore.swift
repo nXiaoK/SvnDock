@@ -15,17 +15,31 @@ final class SvnDockStore: ObservableObject {
     )
 
     @Published private(set) var workingCopies: [SvnDockWorkingCopy] = []
-    @Published var selectedWorkingCopyID: UUID?
-    @Published var selectedEntryIDs: Set<SvnDockStatusEntry.ID> = []
+    @Published var selectedWorkingCopyID: UUID? {
+        didSet {
+            if oldValue != selectedWorkingCopyID { clearDiff() }
+        }
+    }
+    @Published var selectedEntryIDs: Set<SvnDockStatusEntry.ID> = [] {
+        didSet {
+            if oldValue != selectedEntryIDs { clearDiff() }
+        }
+    }
 
     @Published var statusFilter: SvnDockStatusFilter = .all {
-        didSet { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+        didSet {
+            if oldValue != statusFilter { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+        }
     }
     @Published var searchQuery = "" {
-        didSet { rebuildStatusPresentation(resetLimit: true, debounce: true) }
+        didSet {
+            if oldValue != searchQuery { rebuildStatusPresentation(resetLimit: true, debounce: true) }
+        }
     }
     @Published var showsMissingDetails = false {
-        didSet { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+        didSet {
+            if oldValue != showsMissingDetails { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+        }
     }
     @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
     @Published private(set) var filteredEntryCount = 0
@@ -39,6 +53,7 @@ final class SvnDockStore: ObservableObject {
     @Published private var directoryVisibleLimits: [SvnDockStatusEntry.ID: Int] = [:]
     @Published var inspectorTab: SvnDockInspectorTab = .diff {
         didSet {
+            if oldValue == .diff, inspectorTab != .diff { clearDiff() }
             if oldValue == .history, inspectorTab != .history {
                 cancelHiddenHistoryLoad()
             }
@@ -85,10 +100,11 @@ final class SvnDockStore: ObservableObject {
     private var statusPresentationGeneration = UUID()
     private var statusPresentationTask: Task<Void, Never>?
     private var discoveredEntryIndex: [SvnDockStatusEntry.ID: SvnDockStatusEntry] = [:]
-    private var directoryTreeGeneration = UUID()
     private var directoryLoadTasks: [SvnDockStatusEntry.ID: Task<Void, Never>] = [:]
+    private var directoryLoadGenerations: [SvnDockStatusEntry.ID: UUID] = [:]
     private var historyLoadGeneration: UUID?
     private var diffLoadGeneration = UUID()
+    private var diffLoadTask: Task<String, Error>?
     private var historyLoadTask: Task<Void, Never>?
     private var historyNeedsReload = false
     private var isFinderQueueRecoveryPaused = false
@@ -129,6 +145,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
+    var statusCounts: SvnDockStatusCounts { statusSnapshot.counts }
     var missingEntryCount: Int { statusSnapshot.missingEntries.count }
     var groupedMissingCount: Int { statusSnapshot.groupedMissingCount }
 
@@ -1383,6 +1400,8 @@ final class SvnDockStore: ObservableObject {
            !(await waitForFinderRoutingToFinish()) {
             return false
         }
+        guard !Task.isCancelled else { return false }
+        clearDiff()
         let generation = UUID()
         diffLoadGeneration = generation
         guard
@@ -1403,7 +1422,10 @@ final class SvnDockStore: ObservableObject {
         isLoadingDiff = true
         diffText = ""
         defer {
-            if diffLoadGeneration == generation { isLoadingDiff = false }
+            if diffLoadGeneration == generation {
+                isLoadingDiff = false
+                diffLoadTask = nil
+            }
         }
 
         func isCurrentRequest() -> Bool {
@@ -1414,10 +1436,16 @@ final class SvnDockStore: ObservableObject {
         }
 
         do {
-            let loadedDiff = try await service.diff(
-                relativePath: entry.relativePath,
-                in: workingCopy
-            )
+            let service = service
+            let task = Task {
+                try await service.diff(relativePath: entry.relativePath, in: workingCopy)
+            }
+            diffLoadTask = task
+            let loadedDiff = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
             guard isCurrentRequest() else { return false }
             diffText = loadedDiff
             return true
@@ -1429,6 +1457,14 @@ final class SvnDockStore: ObservableObject {
             present(error, title: "无法读取差异")
             return false
         }
+    }
+
+    private func clearDiff() {
+        diffLoadTask?.cancel()
+        diffLoadTask = nil
+        diffLoadGeneration = UUID()
+        if !diffText.isEmpty { diffText = "" }
+        if isLoadingDiff { isLoadingDiff = false }
     }
 
     func diffText(for request: SvnDockDiffRequest) async throws -> String {
@@ -1792,13 +1828,13 @@ final class SvnDockStore: ObservableObject {
     }
 
     func hasMoreDirectoryChildren(for entry: SvnDockStatusEntry) -> Bool {
-        visibleDirectoryChildren(for: entry).count
+        directoryVisibleLimits[entry.id, default: Self.initialDirectoryChildLimit]
             < directoryChildrenByID[entry.id, default: []].count
     }
 
     func remainingDirectoryChildCount(for entry: SvnDockStatusEntry) -> Int {
         let total = directoryChildrenByID[entry.id, default: []].count
-        let visible = visibleDirectoryChildren(for: entry).count
+        let visible = directoryVisibleLimits[entry.id, default: Self.initialDirectoryChildLimit]
         return min(Self.directoryChildBatchSize, max(0, total - visible))
     }
 
@@ -1844,7 +1880,8 @@ final class SvnDockStore: ObservableObject {
             $0.id == entry.workingCopyID
         }) else { return }
 
-        let generation = directoryTreeGeneration
+        let generation = UUID()
+        directoryLoadGenerations[entry.id] = generation
         directoryErrorsByID[entry.id] = nil
         loadingDirectoryIDs.insert(entry.id)
         directoryVisibleLimits[entry.id] = Self.initialDirectoryChildLimit
@@ -1865,13 +1902,20 @@ final class SvnDockStore: ObservableObject {
         in workingCopy: SvnDockWorkingCopy,
         generation: UUID
     ) async {
+        defer {
+            if directoryLoadGenerations[entry.id] == generation {
+                loadingDirectoryIDs.remove(entry.id)
+                directoryLoadTasks[entry.id] = nil
+                directoryLoadGenerations[entry.id] = nil
+            }
+        }
         do {
             let loadedChildren = try await service.directoryChildren(
                 relativePath: entry.relativePath,
                 in: workingCopy
             )
             try Task.checkCancellation()
-            guard directoryTreeGeneration == generation,
+            guard directoryLoadGenerations[entry.id] == generation,
                   selectedWorkingCopyID == workingCopy.id else { return }
 
             if let previousChildren = directoryChildrenByID[entry.id] {
@@ -1890,14 +1934,11 @@ final class SvnDockStore: ObservableObject {
         } catch is CancellationError {
             return
         } catch {
-            guard directoryTreeGeneration == generation,
+            guard !Task.isCancelled,
+                  directoryLoadGenerations[entry.id] == generation,
                   selectedWorkingCopyID == workingCopy.id else { return }
             directoryErrorsByID[entry.id] = error.localizedDescription
         }
-
-        guard directoryTreeGeneration == generation else { return }
-        loadingDirectoryIDs.remove(entry.id)
-        directoryLoadTasks[entry.id] = nil
     }
 
     private func resetDirectoryTree() {
@@ -1905,7 +1946,7 @@ final class SvnDockStore: ObservableObject {
             task.cancel()
         }
         directoryLoadTasks = [:]
-        directoryTreeGeneration = UUID()
+        directoryLoadGenerations = [:]
         discoveredEntryIndex = [:]
         expandedDirectoryIDs = []
         directoryChildrenByID = [:]
@@ -1949,6 +1990,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func clearStatusEntries() {
+        clearDiff()
         resetDirectoryTree()
         activeStatusLoadTask?.cancel()
         activeStatusLoadTask = nil

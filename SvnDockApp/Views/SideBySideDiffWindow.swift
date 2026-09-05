@@ -3,6 +3,11 @@ import SwiftUI
 import SvnDockCore
 
 struct SideBySideDiffWindow: View {
+    private struct LoadID: Equatable {
+        let request: SvnDockDiffRequest
+        let reloadID: UUID
+    }
+
     let store: SvnDockStore
     let request: SvnDockDiffRequest
 
@@ -48,7 +53,7 @@ struct SideBySideDiffWindow: View {
                 .disabled(isLoading)
             }
         }
-        .task(id: reloadID) {
+        .task(id: LoadID(request: request, reloadID: reloadID)) {
             await loadDiff()
         }
     }

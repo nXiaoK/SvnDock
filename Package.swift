@@ -69,6 +69,12 @@ let package = Package(
             path: "SvnDockCoreTests"
         ),
         .testTarget(
+            name: "SvnDockAppTests",
+            dependencies: ["SvnDockApp"],
+            path: "SvnDockAppTests",
+            exclude: ["SmokeMain.swift"]
+        ),
+        .testTarget(
             name: "SvnDockFinderExtensionTests",
             dependencies: ["SvnDockFinderExtension"],
             path: "FinderExtensionTests"

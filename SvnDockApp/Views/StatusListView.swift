@@ -3,7 +3,12 @@ import SwiftUI
 
 struct StatusListView: View {
     @ObservedObject var store: SvnDockStore
-    @State private var statusCounts: [SvnDockStatusFilter: Int] = [:]
+
+    private var statusCounts: [SvnDockStatusFilter: Int] {
+        let counts = store.statusCounts
+        return [.all: store.entries.count, .changed: counts.changed,
+                .conflicts: counts.conflicts, .unversioned: counts.unversioned]
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -94,21 +99,6 @@ struct StatusListView: View {
             statusFooter
         }
         .background(SvnDockTheme.surface)
-        .onReceive(store.$displayedEntries) { _ in
-            // Recount when the status presentation changes, never on each
-            // selection or diff-preview update in a large working copy.
-            statusCounts = makeStatusCounts()
-        }
-    }
-
-    private func makeStatusCounts() -> [SvnDockStatusFilter: Int] {
-        var counts = Dictionary(uniqueKeysWithValues: SvnDockStatusFilter.allCases.map { ($0, 0) })
-        for entry in store.entries {
-            for filter in SvnDockStatusFilter.allCases where filter.includes(entry) {
-                counts[filter, default: 0] += 1
-            }
-        }
-        return counts
     }
 
     private func workspaceHeader(counts: [SvnDockStatusFilter: Int]) -> some View {

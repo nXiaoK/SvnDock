@@ -22,8 +22,8 @@ struct DiffPresentation: Sendable {
             case line(Int)
         }
         enum Content: Sendable {
-            case hunk(Int, UnifiedDiffHunk)
-            case line(UnifiedDiffRow)
+            case hunk(Int)
+            case line(hunk: Int, row: Int, kind: UnifiedDiffRowKind)
         }
         let id: ID
         let content: Content
@@ -42,24 +42,61 @@ struct DiffPresentation: Sendable {
         var added = 0
         var deleted = 0
         for (index, hunk) in document.hunks.enumerated() {
-            let header = Item(id: .hunk(index), content: .hunk(index, hunk))
+            guard !Task.isCancelled else { break }
+            let header = Item(id: .hunk(index), content: .hunk(index))
             unified.append(header)
             sideBySide.append(header)
-            for row in hunk.rows {
-                sideBySide.append(Item(id: .line(sideBySide.count), content: .line(row)))
+            for (rowIndex, row) in hunk.rows.enumerated() {
+                sideBySide.append(Item(id: .line(sideBySide.count),
+                    content: .line(hunk: index, row: rowIndex, kind: row.kind)))
                 if row.kind != .context {
                     if row.oldText != nil { deleted += 1 }
                     if row.newText != nil { added += 1 }
                 }
             }
-            for row in hunk.unifiedRows {
-                unified.append(Item(id: .line(unified.count), content: .line(row)))
+            // Store coordinates into the parsed document, not another two
+            // arrays of full row values. Unified blocks still list every
+            // deletion before their additions, as in the original patch.
+            var rowIndex = 0
+            while rowIndex < hunk.rows.count {
+                if hunk.rows[rowIndex].kind == .context {
+                    unified.append(Item(id: .line(unified.count),
+                        content: .line(hunk: index, row: rowIndex, kind: .context)))
+                    rowIndex += 1
+                    continue
+                }
+                let start = rowIndex
+                while rowIndex < hunk.rows.count, hunk.rows[rowIndex].kind != .context {
+                    rowIndex += 1
+                }
+                for offset in start..<rowIndex where hunk.rows[offset].oldText != nil {
+                    unified.append(Item(id: .line(unified.count),
+                        content: .line(hunk: index, row: offset, kind: .deletion)))
+                }
+                for offset in start..<rowIndex where hunk.rows[offset].newText != nil {
+                    unified.append(Item(id: .line(unified.count),
+                        content: .line(hunk: index, row: offset, kind: .addition)))
+                }
             }
         }
         unifiedItems = unified
         sideBySideItems = sideBySide
         additions = added
         deletions = deleted
+    }
+
+    func row(hunk: Int, index: Int, kind: UnifiedDiffRowKind) -> UnifiedDiffRow {
+        let row = document.hunks[hunk].rows[index]
+        guard kind != row.kind else { return row }
+        return UnifiedDiffRow(
+            oldLineNumber: kind == .deletion ? row.oldLineNumber : nil,
+            newLineNumber: kind == .addition ? row.newLineNumber : nil,
+            oldText: kind == .deletion ? row.oldText : nil,
+            newText: kind == .addition ? row.newText : nil,
+            kind: kind,
+            oldHasTrailingNewline: kind == .deletion ? row.oldHasTrailingNewline : true,
+            newHasTrailingNewline: kind == .addition ? row.newHasTrailingNewline : true
+        )
     }
 }
 
@@ -81,11 +118,15 @@ final class DiffPresentationModel: ObservableObject {
         }
     }
 
+    func clear() {
+        generation += 1
+        presentation = nil
+    }
+
     func load(text: String) async {
         guard !Task.isCancelled else { return }
-        generation += 1
+        clear()
         let requestGeneration = generation
-        presentation = nil
         let worker = Task.detached(priority: .userInitiated) {
             DiffPresentation(text: text)
         }
@@ -162,11 +203,12 @@ struct DiffContentView: View {
                             LazyVStack(alignment: .leading, spacing: 0) {
                                 ForEach(mode == .sideBySide ? presentation.sideBySideItems : presentation.unifiedItems) { item in
                                     switch item.content {
-                                    case let .hunk(index, hunk):
-                                        hunkHeader(hunk, index: index)
+                                    case let .hunk(index):
+                                        hunkHeader(presentation.document.hunks[index], index: index)
                                             .id(item.id)
-                                    case let .line(row):
-                                        DiffCodeRow(row: row, sideBySide: mode == .sideBySide, fontSize: fontSize)
+                                    case let .line(hunk, row, kind):
+                                        DiffCodeRow(row: presentation.row(hunk: hunk, index: row, kind: kind),
+                                                    sideBySide: mode == .sideBySide, fontSize: fontSize)
                                             .id(item.id)
                                     }
                                 }

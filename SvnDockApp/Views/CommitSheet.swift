@@ -6,6 +6,7 @@ struct CommitSheet: View {
 
     @State private var message = ""
     @State private var includedEntryIDs: Set<SvnDockStatusEntry.ID>
+    @State private var selectionSummary: SelectionSummary
     @State private var previewEntryID: SvnDockStatusEntry.ID?
     @State private var showsDiffPreview = true
     @State private var isPreviewExpanded = false
@@ -21,6 +22,9 @@ struct CommitSheet: View {
             ? committableIDs
             : selectedCommittableIDs
         _includedEntryIDs = State(initialValue: includedIDs)
+        _selectionSummary = State(initialValue: SelectionSummary(
+            entries: store.committableEntries, includedIDs: includedIDs
+        ))
         _previewEntryID = State(initialValue:
             store.committableEntries.first(where: { includedIDs.contains($0.id) })?.id
                 ?? store.committableEntries.first?.id
@@ -69,10 +73,15 @@ struct CommitSheet: View {
         .task(id: previewRequest) {
             await loadPreview(for: previewRequest)
         }
-        .onChange(of: store.committableEntries.map(\.id)) { _, ids in
+        .onChange(of: includedEntryIDs) { _, ids in
+            selectionSummary = SelectionSummary(entries: store.committableEntries, includedIDs: ids)
+        }
+        .onChange(of: store.committableEntries) { _, entries in
+            let ids = Set(entries.map(\.id))
             includedEntryIDs.formIntersection(ids)
+            selectionSummary = SelectionSummary(entries: entries, includedIDs: includedEntryIDs)
             if let previewEntryID, !ids.contains(previewEntryID) {
-                self.previewEntryID = ids.first
+                self.previewEntryID = entries.first?.id
             }
         }
     }
@@ -126,8 +135,8 @@ struct CommitSheet: View {
 
     private var summary: some View {
         HStack(spacing: 0) {
-            summaryItem(symbol: "doc.text", title: "\(includedEntries.count) 个文件",
-                        detail: "已选择 \(includedEntries.count) / \(store.committableEntries.count) 个文件")
+            summaryItem(symbol: "doc.text", title: "\(selectionSummary.count) 个文件",
+                        detail: "已选择 \(selectionSummary.count) / \(store.committableEntries.count) 个文件")
             Divider().frame(height: 42)
             summaryItem(symbol: "plus.forwardslash.minus", title: "提交范围",
                         detail: selectedStatusSummary, color: SvnDockTheme.green)
@@ -200,13 +209,13 @@ struct CommitSheet: View {
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
                 Button {
-                    if includedEntries.count == store.committableEntries.count {
+                    if selectionSummary.count == store.committableEntries.count {
                         includedEntryIDs.removeAll()
                     } else {
                         includedEntryIDs = Set(store.committableEntries.map(\.id))
                     }
                 } label: {
-                    Text(includedEntries.count == store.committableEntries.count ? "全部取消" : "全部选择")
+                    Text(selectionSummary.count == store.committableEntries.count ? "全部取消" : "全部选择")
                         .font(.system(size: 12))
                         .foregroundStyle(SvnDockTheme.accent)
                         .padding(.horizontal, 8)
@@ -387,7 +396,7 @@ struct CommitSheet: View {
 
     private var expandedFooter: some View {
         HStack(spacing: 10) {
-            Text("已选择 \(includedEntries.count) 个文件 · 提交说明已保留")
+            Text("已选择 \(selectionSummary.count) 个文件 · 提交说明已保留")
                 .font(.system(size: 12))
                 .foregroundStyle(SvnDockTheme.secondaryText)
             Spacer()
@@ -462,7 +471,7 @@ struct CommitSheet: View {
 
     private var footer: some View {
         HStack(spacing: 10) {
-            Label("将提交 \(includedEntries.count) 个文件到 SVN", systemImage: "info.circle")
+            Label("将提交 \(selectionSummary.count) 个文件到 SVN", systemImage: "info.circle")
                 .font(.system(size: 12))
                 .foregroundStyle(SvnDockTheme.secondaryText)
             Spacer()
@@ -487,7 +496,7 @@ struct CommitSheet: View {
             .disabled(
                 store.isBusy
                 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                || includedEntries.isEmpty
+                || selectionSummary.count == 0
             )
         }
         .padding(.horizontal, 24)
@@ -495,16 +504,27 @@ struct CommitSheet: View {
         .background(SvnDockTheme.subtleSurface.opacity(0.55))
     }
 
-    private var includedEntries: [SvnDockStatusEntry] {
-        store.committableEntries.filter { includedEntryIDs.contains($0.id) }
+    private var selectedStatusSummary: String {
+        "修改 \(selectionSummary.changed) · 新增 \(selectionSummary.added) · 删除 \(selectionSummary.deleted)"
     }
 
-    private var selectedStatusSummary: String {
-        let entries = includedEntries
-        let changed = entries.filter { $0.status == .modified || $0.status == .replaced }.count
-        let added = entries.filter { $0.status == .added }.count
-        let deleted = entries.filter { $0.status == .deleted }.count
-        return "修改 \(changed) · 新增 \(added) · 删除 \(deleted)"
+    private struct SelectionSummary {
+        var count = 0
+        var changed = 0
+        var added = 0
+        var deleted = 0
+
+        init(entries: [SvnDockStatusEntry], includedIDs: Set<SvnDockStatusEntry.ID>) {
+            for entry in entries where includedIDs.contains(entry.id) {
+                count += 1
+                switch entry.status {
+                case .modified, .replaced: changed += 1
+                case .added: added += 1
+                case .deleted: deleted += 1
+                default: break
+                }
+            }
+        }
     }
 
     private var previewEntry: SvnDockStatusEntry? {

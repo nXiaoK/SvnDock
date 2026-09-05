@@ -3,6 +3,11 @@ import SwiftUI
 import SvnDockCore
 
 struct HistoryRevisionView: View {
+    private struct LoadID: Equatable {
+        let request: SvnDockRevisionRequest
+        let reloadID: UUID
+    }
+
     let request: SvnDockRevisionRequest
     let expanded: Bool
     @StateObject private var model: HistoryRevisionModel
@@ -45,7 +50,7 @@ struct HistoryRevisionView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .task(id: reloadID) { await model.load(request) }
+        .task(id: LoadID(request: request, reloadID: reloadID)) { await model.load(request) }
         .onDisappear { model.cancel() }
     }
 

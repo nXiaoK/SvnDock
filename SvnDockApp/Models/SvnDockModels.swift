@@ -40,20 +40,6 @@ struct SvnDockStatusCounts: Hashable, Sendable {
     var unversioned: Int
 
     static let zero = SvnDockStatusCounts(changed: 0, conflicts: 0, unversioned: 0)
-
-    static func make(from entries: [SvnDockStatusEntry]) -> SvnDockStatusCounts {
-        entries.reduce(into: .zero) { counts, entry in
-            if entry.status.isChange {
-                counts.changed += 1
-            }
-            if entry.status == .conflicted || entry.repositoryStatus == .conflicted {
-                counts.conflicts += 1
-            }
-            if entry.status == .unversioned {
-                counts.unversioned += 1
-            }
-        }
-    }
 }
 
 enum SvnDockNodeKind: String, Hashable, Sendable {
@@ -270,11 +256,15 @@ struct SvnDockStatusSnapshot: Sendable {
 
     init(entries unsortedEntries: [SvnDockStatusEntry]) {
         var enrichedEntries = unsortedEntries
-        let missingIndices = Dictionary(unsortedEntries.enumerated()
-            .filter { $0.element.status == .missing }
-            .map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        var missingIndices: [SvnDockStatusEntry.ID: Int] = [:]
+        for (index, entry) in unsortedEntries.enumerated()
+            where entry.status == .missing && missingIndices[entry.id] == nil {
+            missingIndices[entry.id] = index
+        }
         var groupedIDs = Set<SvnDockStatusEntry.ID>()
-        for index in enrichedEntries.indices { enrichedEntries[index].missingDescendantCount = 0 }
+        for index in enrichedEntries.indices where enrichedEntries[index].missingDescendantCount != 0 {
+            enrichedEntries[index].missingDescendantCount = 0
+        }
         // Keep the full snapshot for operations/search, but coalesce missing
         // subtrees in the default list. No disk access or per-row SVN calls.
         for entry in unsortedEntries where entry.status == .missing {
@@ -294,17 +284,16 @@ struct SvnDockStatusSnapshot: Sendable {
         }
         let entries = enrichedEntries.sorted(by: Self.statusSort)
         var entryIndex: [SvnDockStatusEntry.ID: Int] = [:]
-        var committableEntries: [SvnDockStatusEntry] = []
+        var committableCount = 0
         var counts = SvnDockStatusCounts.zero
 
         entryIndex.reserveCapacity(entries.count)
-        committableEntries.reserveCapacity(entries.count)
 
         for (index, entry) in entries.enumerated() {
             let id = entry.id
             entryIndex[id] = index
             if entry.status.canCommit {
-                committableEntries.append(entry)
+                committableCount += 1
             }
             if entry.status.isChange {
                 counts.changed += 1
@@ -318,11 +307,14 @@ struct SvnDockStatusSnapshot: Sendable {
         }
 
         self.entries = entries
-        self.groupedEntries = entries.filter { !groupedIDs.contains($0.id) }
+        // Most snapshots have no missing subtrees. Share the array storage in
+        // that case rather than retaining a second copy of every status entry.
+        self.groupedEntries = groupedIDs.isEmpty ? entries : entries.filter { !groupedIDs.contains($0.id) }
         self.missingEntries = entries.filter { $0.status == .missing }
         self.groupedMissingCount = groupedIDs.count
         self.entryIndex = entryIndex
-        self.committableEntries = committableEntries
+        self.committableEntries = committableCount == entries.count
+            ? entries : committableCount == 0 ? [] : entries.filter { $0.status.canCommit }
         self.counts = counts
     }
 

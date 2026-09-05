@@ -17,7 +17,9 @@ final class HistoryRevisionModel: ObservableObject {
     @Published private(set) var filteredChanges: [SVNChangedPath] = []
     @Published private(set) var visibleLimit = 300
     @Published private(set) var isFiltering = false
-    @Published var pathQuery = "" { didSet { filterPaths() } }
+    @Published var pathQuery = "" {
+        didSet { if pathQuery != oldValue { filterPaths() } }
+    }
 
     private let detailsLoader: DetailsLoader
     private let diffLoader: DiffLoader
@@ -36,6 +38,11 @@ final class HistoryRevisionModel: ObservableObject {
         self.diffLoader = diffLoader
     }
 
+    deinit {
+        diffTask?.cancel()
+        filterTask?.cancel()
+    }
+
     convenience init(store: SvnDockStore) {
         self.init(detailsLoader: { try await store.revisionDetails(for: $0) }, diffLoader: {
             try await store.revisionDiff(for: $0, change: $1, repositoryRoot: $2)
@@ -45,11 +52,11 @@ final class HistoryRevisionModel: ObservableObject {
     var selectedChange: SVNChangedPath? {
         filteredChanges.first { $0.path == selectedPath }
     }
-    var displayedChanges: [SVNChangedPath] { Array(filteredChanges.prefix(visibleLimit)) }
+    var displayedChanges: ArraySlice<SVNChangedPath> { filteredChanges.prefix(visibleLimit) }
     var selectionIndex: Int? { filteredChanges.firstIndex { $0.path == selectedPath } }
 
     func load(_ request: SvnDockRevisionRequest) async {
-        let previousPath = selectedPath
+        let previousPath = self.request == request ? selectedPath : nil
         cancel()
         let generation = UUID()
         loadGeneration = generation
@@ -71,15 +78,9 @@ final class HistoryRevisionModel: ObservableObject {
                 throw SvnDockServiceError.unavailable("返回的提交版本与所选版本不一致，请刷新后重试。")
             }
             details = loaded
-            filterTask?.cancel()
-            filterGeneration = UUID()
-            isFiltering = false
             isLoading = false
-            filteredChanges = Self.matching(loaded.changes, query: pathQuery)
-            visibleLimit = 300
-            let preferred = filteredChanges.first { $0.path == (previousPath ?? request.preferredPath) }
-                ?? filteredChanges.first { $0.kind != .directory } ?? filteredChanges.first
-            select(preferred?.path)
+            filterPaths(preferredPath: previousPath ?? request.preferredPath, debounce: false)
+            await filterTask?.value
         } catch {
             guard !Task.isCancelled, generation == loadGeneration else { return }
             isLoading = false
@@ -98,12 +99,18 @@ final class HistoryRevisionModel: ObservableObject {
         isLoadingDiff = false
         guard let request, let details, let change = selectedChange else { return }
         if let index = selectionIndex, index >= visibleLimit { visibleLimit = index + 1 }
-        if !force, let cached = cache[change.path] { diffText = cached; return }
+        if !force, let cached = cache[change.path] {
+            cacheOrder.removeAll { $0 == change.path }
+            cacheOrder.append(change.path)
+            diffText = cached
+            return
+        }
         isLoadingDiff = true
         let loader = diffLoader
+        let repositoryRoot = details.repositoryRootURL
         diffTask = Task { [weak self] in
             do {
-                let text = try await loader(request, change, details.repositoryRootURL)
+                let text = try await loader(request, change, repositoryRoot)
                 guard let self, !Task.isCancelled, self.diffGeneration == generation else { return }
                 self.diffText = text
                 self.isLoadingDiff = false
@@ -130,12 +137,14 @@ final class HistoryRevisionModel: ObservableObject {
         filterGeneration = UUID()
         diffTask?.cancel()
         filterTask?.cancel()
+        diffTask = nil
+        filterTask = nil
         isLoading = false
         isLoadingDiff = false
         isFiltering = false
     }
 
-    private func filterPaths() {
+    private func filterPaths(preferredPath: String? = nil, debounce: Bool = true) {
         filterTask?.cancel()
         let generation = UUID()
         filterGeneration = generation
@@ -143,28 +152,47 @@ final class HistoryRevisionModel: ObservableObject {
         let changes = details?.changes ?? []
         isFiltering = true
         filterTask = Task { [weak self] in
-            do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
-            let matches = await Task.detached(priority: .userInitiated) {
-                Self.matching(changes, query: query)
-            }.value
+            if debounce {
+                do { try await Task.sleep(for: .milliseconds(150)) } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            let worker = Task.detached(priority: .userInitiated) {
+                try Self.matching(changes, query: query)
+            }
+            let matches: [SVNChangedPath]
+            do {
+                matches = try await withTaskCancellationHandler {
+                    try await worker.value
+                } onCancel: {
+                    worker.cancel()
+                }
+            } catch { return }
             guard let self, !Task.isCancelled, self.filterGeneration == generation else { return }
             self.filteredChanges = matches
             self.visibleLimit = 300
             self.isFiltering = false
             if !matches.contains(where: { $0.path == self.selectedPath }) {
-                self.select(matches.first?.path)
+                let preferred = matches.first { $0.path == preferredPath }
+                    ?? matches.first { $0.kind != .directory } ?? matches.first
+                self.select(preferred?.path)
             } else if let index = self.selectionIndex {
                 self.visibleLimit = max(300, index + 1)
             }
         }
     }
 
-    private nonisolated static func matching(_ changes: [SVNChangedPath], query: String) -> [SVNChangedPath] {
+    private nonisolated static func matching(_ changes: [SVNChangedPath], query: String) throws -> [SVNChangedPath] {
+        try Task.checkCancellation()
         let query = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return changes }
-        return changes.filter {
-            $0.path.localizedStandardContains(query) || $0.copyFromPath?.localizedStandardContains(query) == true
+        var matches: [SVNChangedPath] = []
+        for (index, change) in changes.enumerated() {
+            if index.isMultiple(of: 256) { try Task.checkCancellation() }
+            if change.path.localizedStandardContains(query) || change.copyFromPath?.localizedStandardContains(query) == true {
+                matches.append(change)
+            }
         }
+        return matches
     }
 
     private func remember(_ text: String, for path: String) {
