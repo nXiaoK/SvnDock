@@ -174,6 +174,18 @@ final class SVNXMLParserTests: XCTestCase {
         XCTAssertEqual(entries.first?.message, "\nTitle\n\nBody\n")
     }
 
+    func testDateParsingSupportsMixedFormatsWithoutLeakingPreviousValues() throws {
+        let dates = ["2026-09-04T02:03:04.125Z", "2026-09-04T02:03:04Z", "invalid", ""]
+        let xml = "<log>" + dates.enumerated().map { index, date in
+            "<logentry revision=\"\(index + 1)\"><date>\(date)</date><msg/></logentry>"
+        }.joined() + "</log>"
+        let entries = try SVNXMLParser.parseLog(Data(xml.utf8))
+        XCTAssertEqual(entries.count, dates.count)
+        XCTAssertEqual(try XCTUnwrap(entries[0].date).timeIntervalSince(try XCTUnwrap(entries[1].date)), 0.125, accuracy: 0.001)
+        XCTAssertNil(entries[2].date)
+        XCTAssertNil(entries[3].date)
+    }
+
     func testParsesVerbosePropertiesXMLWithoutLosingIgnoreLines() throws {
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>

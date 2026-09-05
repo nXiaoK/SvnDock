@@ -170,6 +170,7 @@ private final class LogXMLDelegate: NSObject, XMLParserDelegate {
     private var currentEntry: PendingEntry?
     private var text = ""
     private var pathAttributes: [String: String]?
+    private let dates = SVNDateParser()
 
     func parser(
         _ parser: XMLParser,
@@ -213,7 +214,7 @@ private final class LogXMLDelegate: NSObject, XMLParserDelegate {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .nilIfEmpty
         case "date":
-            currentEntry?.date = SVNDateParser.date(
+            currentEntry?.date = dates.date(
                 from: text.trimmingCharacters(in: .whitespacesAndNewlines)
             )
         case "msg":
@@ -291,6 +292,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
     private var currentChangelist: String?
     private var currentEntry: PendingEntry?
     private var text = ""
+    private let dates = SVNDateParser()
 
     init(workingCopyURL: URL?, resolveNodeKinds: Bool) {
         self.workingCopyURL = workingCopyURL?.standardizedFileURL
@@ -355,7 +357,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
             }
 
         case "date":
-            currentEntry?.commitDate = SVNDateParser.date(from: value)
+            currentEntry?.commitDate = dates.date(from: value)
 
         case "entry":
             if let pending = currentEntry, let status = pending.status {
@@ -444,6 +446,7 @@ private final class InfoXMLDelegate: NSObject, XMLParserDelegate {
     private(set) var infos: [SVNInfo] = []
     private var currentInfo: PendingInfo?
     private var text = ""
+    private let dates = SVNDateParser()
 
     func parser(
         _ parser: XMLParser,
@@ -501,7 +504,7 @@ private final class InfoXMLDelegate: NSObject, XMLParserDelegate {
         case "author":
             currentInfo?.commitAuthor = value.nilIfEmpty
         case "date":
-            currentInfo?.commitDate = SVNDateParser.date(from: value)
+            currentInfo?.commitDate = dates.date(from: value)
         case "entry":
             if let pending = currentInfo {
                 let commit: SVNCommitInfo?
@@ -537,18 +540,27 @@ private final class InfoXMLDelegate: NSObject, XMLParserDelegate {
     }
 }
 
-private enum SVNDateParser {
-    static func date(from string: String) -> Date? {
-        guard !string.isEmpty else { return nil }
-
+// Each XML delegate reuses its own formatters. Large status/log responses can
+// contain thousands of dates; constructing an ICU formatter per entry is costly.
+// Keeping them local also avoids sharing mutable formatters between parses.
+private final class SVNDateParser {
+    private lazy var fractional: ISO8601DateFormatter = {
         let fractional = ISO8601DateFormatter()
         fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional
+    }()
+
+    private lazy var wholeSeconds: ISO8601DateFormatter = {
+        let wholeSeconds = ISO8601DateFormatter()
+        wholeSeconds.formatOptions = [.withInternetDateTime]
+        return wholeSeconds
+    }()
+
+    func date(from string: String) -> Date? {
+        guard !string.isEmpty else { return nil }
         if let date = fractional.date(from: string) {
             return date
         }
-
-        let wholeSeconds = ISO8601DateFormatter()
-        wholeSeconds.formatOptions = [.withInternetDateTime]
         return wholeSeconds.date(from: string)
     }
 }
