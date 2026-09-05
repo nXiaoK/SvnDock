@@ -27,6 +27,11 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Single-click a file to update the diff inspector immediately; double-click
   to open its diff in a separate window. Command/Shift multiselection and
   keyboard navigation remain available.
+- Inspect local directory property changes and preview unversioned UTF-8 text
+  without adding it first. Local previews are limited to 1 MiB and distinguish
+  binary, unsupported, missing and unreadable files. Diff mode and text size persist.
+- Context-menu Add and Revert preserve selections and show the affected count;
+  the multi-selection inspector summarizes statuses and available actions.
 - Switch between unified, side-by-side and raw diffs with actual file line
   numbers, hunk navigation, automatic wrapping, full-patch copying and 10–20 pt
   text sizing. The inspector and standalone window share the same viewer.

@@ -74,11 +74,7 @@ struct InspectorView: View {
     @ViewBuilder
     private var fileInspectorContent: some View {
         if store.selectedEntryIDs.count > 1 {
-            SvnDockEmptyState(
-                symbol: "square.stack.3d.up",
-                title: "已选择多个项目",
-                message: "选择单个文件以查看差异和详细信息。"
-            )
+            SelectionInspector(store: store)
         } else if let entry = store.primarySelectedEntry {
             if store.inspectorTab == .diff {
                 DiffInspector(store: store, entry: entry)
@@ -106,10 +102,72 @@ struct InspectorView: View {
     }
 }
 
+private struct SelectionInspector: View {
+    @ObservedObject var store: SvnDockStore
+
+    private var selection: StatusActionSelection { .init(entries: store.selectedEntries) }
+
+    var body: some View {
+        let selection = self.selection
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Label("已选择 \(selection.entries.count) 项", systemImage: "square.stack.3d.up")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(SvnDockTheme.text)
+                Text("\(selection.entries.count - selection.directoryCount) 个文件 · \(selection.directoryCount) 个目录")
+                    .font(.system(size: 13))
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+
+                VStack(spacing: 10) {
+                    ForEach(SvnDockStatusKind.allCases, id: \.self) { status in
+                        let count = selection.entries.filter { $0.status == status }.count
+                        if count > 0 {
+                            HStack {
+                                SvnDockStatusPill(status: status)
+                                Spacer()
+                                Text("\(count) 项").monospacedDigit()
+                            }
+                        }
+                    }
+                }
+                .padding(16)
+                .svnDockSurface(cornerRadius: 9)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    Button("添加 \(selection.countLabel(selection.addableEntries.count)) 到 SVN") {
+                        let ids = Set(selection.addableEntries.map(\.id))
+                        Task { await store.addSelectedEntries(entryIDs: ids) }
+                    }
+                    .disabled(selection.addableEntries.isEmpty || store.isInteractionBlocked)
+                    Text("添加仅处理未纳管项目和已添加目录的内容；目录包含其子项。")
+                        .font(.caption)
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                    Button("还原 \(selection.countLabel(selection.revertibleEntries.count))…", role: .destructive) {
+                        store.requestRevertConfirmation()
+                    }
+                    .disabled(selection.revertibleEntries.isEmpty || store.isInteractionBlocked)
+                    Text("还原仅处理有本地变更的已纳管项目；确认时可检查路径及目录范围。未纳管和未更改项目不受影响。")
+                        .font(.caption)
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                }
+                .buttonStyle(SvnDockButtonStyle())
+
+                Text("选择单个项目可查看内容或属性差异。冲突解决、忽略和历史查询可从对应项目的右键菜单进入。")
+                    .font(.system(size: 12))
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+            }
+            .padding(24)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+}
+
 private struct DiffInspector: View {
     @ObservedObject var store: SvnDockStore
     let entry: SvnDockStatusEntry
     @StateObject private var presentationModel = DiffPresentationModel()
+    @State private var localPreview: LocalFilePreview?
+    @State private var previewReload = 0
 
     var body: some View {
         GeometryReader { geometry in
@@ -136,6 +194,22 @@ private struct DiffInspector: View {
         }
         .onChange(of: store.diffText) { _, text in
             if text.isEmpty { presentationModel.clear() }
+        }
+        .task(id: "\(entry.id)::\(entry.status.rawValue)::\(entry.fileSize ?? 0)::\(entry.modifiedAt?.timeIntervalSince1970 ?? 0)::\(previewReload)") {
+            guard entry.status == .unversioned, entry.nodeKind != .directory,
+                  let rootURL = store.selectedWorkingCopy?.rootURL else { return }
+            localPreview = nil
+            let relativePath = entry.relativePath
+            let task = Task.detached(priority: .userInitiated) {
+                LocalFilePreview.read(relativePath: relativePath, rootURL: rootURL)
+            }
+            let result = await withTaskCancellationHandler {
+                await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            guard !Task.isCancelled else { return }
+            localPreview = result
         }
     }
 
@@ -167,27 +241,75 @@ private struct DiffInspector: View {
                     .padding(.bottom, 24)
                 }
             }
-        } else if entry.nodeKind == .directory {
+        } else if let error = store.diffLoadError {
+            VStack(spacing: 12) {
+                SvnDockEmptyState(symbol: "exclamationmark.triangle", title: "无法读取差异", message: error)
+                Button("重试") { Task { await store.loadDiffForSelection() } }
+                    .buttonStyle(SvnDockButtonStyle())
+                    .disabled(store.isInteractionBlocked)
+                    .padding(.bottom, 24)
+            }
+        } else if entry.nodeKind == .directory && store.diffText.isEmpty {
             SvnDockEmptyState(
                 symbol: "folder",
-                title: "目录没有文本差异",
-                message: "可在信息标签中查看目录状态。"
+                title: entry.status == .unversioned ? "目录尚未纳管" : "目录自身没有属性差异",
+                message: entry.status == .unversioned
+                    ? "展开目录并选择文件，可以在添加到 SVN 前预览内容。"
+                    : "此处只检查目录自身的属性。选择子文件可查看其内容差异。"
             )
         } else if entry.status == .unversioned {
-            SvnDockEmptyState(
-                symbol: "questionmark.circle",
-                title: "文件尚未纳管",
-                message: "先将文件添加到 SVN，随后即可查看版本差异。"
-            )
+            unversionedContent
         } else if store.diffText.isEmpty {
             SvnDockEmptyState(
                 symbol: "doc.text",
                 title: "没有文本差异",
-                message: "该文件可能是二进制文件，或内容与基础版本一致。"
+                message: "SVN 未返回内容或属性差异。文件可能与基础版本一致；可刷新状态后重新检查。"
             )
         } else {
             DiffContentView(text: store.diffText, presentationModel: presentationModel)
                 .id(entry.id)
+        }
+    }
+
+    @ViewBuilder
+    private var unversionedContent: some View {
+        switch localPreview {
+        case nil:
+            ProgressView("正在读取文件…")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        case let .text(text):
+            VStack(spacing: 0) {
+                Text("未纳管文件 · 只读内容预览 · UTF-8")
+                    .font(.caption)
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(SvnDockTheme.subtleSurface)
+                if text.isEmpty {
+                    SvnDockEmptyState(symbol: "doc", title: "空文件", message: "此文件尚未包含任何内容。")
+                } else {
+                    DiffRawTextView(text: text)
+                }
+            }
+        case let .tooLarge(limit):
+            SvnDockEmptyState(symbol: "doc", title: "文件过大，未载入预览",
+                              message: "只读预览支持不超过 \(ByteCountFormatter.string(fromByteCount: Int64(limit), countStyle: .file)) 的文本。可通过右键菜单在 Finder 中显示文件。")
+        case .binary:
+            SvnDockEmptyState(symbol: "doc.zipper", title: "二进制内容无法显示为文本",
+                              message: "文件包含非文本字节。可在 Finder 中使用合适的应用检查内容。")
+        case .unsupportedEncoding:
+            SvnDockEmptyState(symbol: "character.textbox", title: "暂不支持此文本编码",
+                              message: "只读预览目前支持 UTF-8。文件内容未被更改，可在外部编辑器中查看。")
+        case .unsupportedType:
+            SvnDockEmptyState(symbol: "doc.badge.ellipsis", title: "此项目不支持内容预览",
+                              message: "只读预览仅支持普通文件。")
+        case let .unavailable(message):
+            VStack(spacing: 12) {
+                SvnDockEmptyState(symbol: "exclamationmark.triangle", title: "无法读取文件", message: message)
+                Button("重试") { previewReload += 1 }
+                    .buttonStyle(SvnDockButtonStyle())
+                    .padding(.bottom, 24)
+            }
         }
     }
 
@@ -232,8 +354,10 @@ private struct DiffInspector: View {
     private func metadata(showsDate: Bool) -> some View {
         HStack(spacing: 16) {
             Label {
-                if let revision = store.selectedWorkingCopy?.revision {
-                    Text("工作副本 r\(String(revision))")
+                if entry.status == .unversioned {
+                    Text("工作副本 · 只读预览")
+                } else if entry.nodeKind == .directory {
+                    Text("BASE → 工作副本 · 目录自身属性")
                 } else {
                     Text("BASE → 工作副本")
                 }
@@ -249,7 +373,11 @@ private struct DiffInspector: View {
             }
             Spacer(minLength: 4)
             Button {
-                Task { await store.loadDiffForSelection() }
+                if entry.status == .unversioned {
+                    previewReload += 1
+                } else {
+                    Task { await store.loadDiffForSelection() }
+                }
             } label: {
                 Image(systemName: "arrow.clockwise")
                     .frame(width: 32, height: 32)

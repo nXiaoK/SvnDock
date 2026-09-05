@@ -135,7 +135,7 @@ struct SvnDockRootView: View {
                 store.confirmRevert()
             }
         } message: {
-            Text("此操作会丢弃所选文件尚未提交的本地修改，且无法由 SvnDock 撤销。")
+            Text(store.revertConfirmationMessage)
         }
         .confirmationDialog(
             "解决“\(store.pendingResolveName)”的冲突？",

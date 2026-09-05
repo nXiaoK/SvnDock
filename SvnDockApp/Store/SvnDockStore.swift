@@ -60,6 +60,7 @@ final class SvnDockStore: ObservableObject {
         }
     }
     @Published private(set) var diffText = ""
+    @Published private(set) var diffLoadError: String?
     @Published private(set) var isLoadingDiff = false
     @Published private(set) var historyEntries: [SvnDockLogEntry] = []
     @Published private(set) var historyTarget: SvnDockHistoryTarget?
@@ -152,6 +153,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
+    var selectedEntries: [SvnDockStatusEntry] { selectedStatusEntries { _ in true } }
     var statusCounts: SvnDockStatusCounts { statusSnapshot.counts }
     var missingEntryCount: Int { statusSnapshot.missingEntries.count }
     var missingAdditionCount: Int { statusSnapshot.missingAdditionCount }
@@ -705,18 +707,23 @@ final class SvnDockStore: ObservableObject {
 
     @discardableResult
     func addSelectedEntries(
+        entryIDs: Set<SvnDockStatusEntry.ID>? = nil,
         allowDuringFinderRouting: Bool = false
     ) async -> Bool {
+        guard let workingCopy = selectedWorkingCopy else { return false }
+        let targetIDs = entryIDs ?? selectedEntryIDs
+        let selected = targetIDs.compactMap { statusEntry(withID: $0) }
+        guard selected.count == targetIDs.count, !selected.isEmpty,
+              selected.allSatisfy({ entry in
+                  entry.workingCopyID == workingCopy.id
+                      && (entry.status == .unversioned
+                          || (entry.status == .added && entry.nodeKind == .directory))
+              }) else { return false }
         if !allowDuringFinderRouting,
            !(await waitForFinderRoutingToFinish()) {
             return false
         }
-        guard let workingCopy = selectedWorkingCopy else { return false }
-        let selected = selectedStatusEntries {
-            $0.status == .unversioned
-                || ($0.status == .added && $0.nodeKind == .directory)
-        }
-        guard !selected.isEmpty else { return false }
+        guard selectedWorkingCopyID == workingCopy.id else { return false }
 
         let succeeded = await perform(
             kind: .adding,
@@ -967,9 +974,7 @@ final class SvnDockStore: ObservableObject {
     ) {
         guard allowDuringFinderRouting || !isInteractionBlocked else { return }
         guard let workingCopy = selectedWorkingCopy else { return }
-        let selected = entries.filter {
-            selectedEntryIDs.contains($0.id) && $0.status.isChange
-        }
+        let selected = selectedStatusEntries { $0.status.isChange }
         guard !selected.isEmpty else { return }
 
         pendingRevert = PendingRevert(
@@ -985,6 +990,14 @@ final class SvnDockStore: ObservableObject {
         pendingRevert = nil
         isPresentingRevertConfirmation = false
         finalizeAwaitingFinderClaim(finderClaim, outcome: .cancelled)
+    }
+
+    var revertConfirmationMessage: String {
+        guard let request = pendingRevert else { return "请重新选择需要还原的项目。" }
+        let paths = request.relativePaths.sorted()
+        let preview = paths.prefix(10).joined(separator: "\n")
+        let remaining = paths.count > 10 ? "\n另有 \(paths.count - 10) 项" : ""
+        return "工作副本：\(request.workingCopy.name)\n将还原 \(paths.count) 项：\n\(preview)\(remaining)\n\n普通目录仅还原自身属性；缺失、待删除或待添加目录可能递归恢复内容或取消添加计划。所选项目的未提交修改会丢弃，SvnDock 无法撤销。"
     }
 
     /// Captures the exact working copy and paths before dismissing the alert,
@@ -1540,7 +1553,6 @@ final class SvnDockStore: ObservableObject {
             selectedEntryIDs.count == 1,
             let workingCopy = selectedWorkingCopy,
             let entry = primarySelectedEntry,
-            entry.nodeKind == .file,
             entry.status != .unversioned,
             entry.status != .ignored,
             entry.status != .missing
@@ -1586,7 +1598,7 @@ final class SvnDockStore: ObservableObject {
         } catch {
             guard isCurrentRequest() else { return false }
             diffText = ""
-            present(error, title: "无法读取差异")
+            diffLoadError = error.localizedDescription
             return false
         }
     }
@@ -1595,6 +1607,7 @@ final class SvnDockStore: ObservableObject {
         diffLoadTask?.cancel()
         diffLoadTask = nil
         diffLoadGeneration = UUID()
+        diffLoadError = nil
         if !diffText.isEmpty { diffText = "" }
         if isLoadingDiff { isLoadingDiff = false }
     }

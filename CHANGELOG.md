@@ -7,6 +7,8 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Read-only previews for unversioned UTF-8 files, local directory property diffs,
+  persistent diff reading preferences and multi-selection action summaries.
 - Working-copy-specific commit drafts survive closing and restarting, with path
   filtering, inclusion filtering and explicit clearing of message and selection.
 - Independent Settings switches for launch at login and menu bar visibility.
@@ -31,6 +33,8 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- Context-menu Add and Revert preserve selected groups and explain eligible
+  subsets. Revert confirmation identifies the captured paths and directory scope.
 - Selected commits keep directory property changes shallow, validate required
   added parents and current SVN status, and reject file externals before writing.
   Directory copy/delete scope is explained without including unselected local edits.

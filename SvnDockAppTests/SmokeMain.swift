@@ -5,6 +5,8 @@ struct AppRegressionSmoke {
     static func main() async throws {
         try await CommitDraftRegressionChecks.run()
         try await SelectedCommitRegressionChecks.run()
+        try ReviewInteractionRegressionChecks.localPreviewBoundaries()
+        try ReviewInteractionRegressionChecks.contextSelectionPreservesScope()
         try await StoreRegressionChecks.selectionCancelsDiff()
         try await StoreRegressionChecks.directoryRetryRejectsOldError()
         try await MissingDeletionRegressionChecks.run()

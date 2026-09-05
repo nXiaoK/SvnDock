@@ -146,10 +146,20 @@ struct DiffContentView: View {
     let text: String
     let oldTitle: String
     let newTitle: String
-    @State private var mode: DiffDisplayMode
+    @AppStorage("diff.displayMode") private var storedMode = DiffDisplayMode.unified.rawValue
     @StateObject private var presentationModel: DiffPresentationModel
     @State private var selectedHunk = 0
-    @State private var fontSize: CGFloat = 12
+    @AppStorage("diff.fontSize") private var storedFontSize = 12.0
+
+    private var mode: DiffDisplayMode {
+        get { DiffDisplayMode(rawValue: storedMode) ?? .unified }
+        nonmutating set { storedMode = newValue.rawValue }
+    }
+
+    private var fontSize: CGFloat {
+        get { storedFontSize.isFinite ? CGFloat(min(20, max(10, storedFontSize))) : 12 }
+        nonmutating set { storedFontSize = Double(newValue) }
+    }
 
     init(text: String, initialMode: DiffDisplayMode = .unified,
          oldTitle: String = "BASE · 基础版本", newTitle: String = "工作副本 · 本地修改",
@@ -157,7 +167,7 @@ struct DiffContentView: View {
         self.text = text
         self.oldTitle = oldTitle
         self.newTitle = newTitle
-        _mode = State(initialValue: initialMode)
+        _storedMode = AppStorage(wrappedValue: initialMode.rawValue, "diff.displayMode")
         _presentationModel = StateObject(wrappedValue: presentationModel ?? DiffPresentationModel())
     }
 

@@ -503,24 +503,62 @@ private struct StatusTreeEntryRowView: View {
 
     @ViewBuilder
     private var entryContextMenu: some View {
-        if entry.status == .unversioned
-            || (entry.status == .added && entry.nodeKind == .directory) {
-            Button(entry.status == .added ? "添加目录内容到 SVN" : "添加到 SVN") {
-                store.selectedEntryIDs = [entry.id]
-                Task { await store.addSelectedEntries() }
+        let selection = StatusActionSelection.context(for: entry, selectedEntries: store.selectedEntries)
+        let multiple = selection.entries.count > 1
+
+        if multiple {
+            Text("已选择 \(selection.entries.count) 项")
+        }
+
+        if !selection.addableEntries.isEmpty {
+            Button("添加 \(selection.countLabel(selection.addableEntries.count)) 到 SVN") {
+                store.selectedEntryIDs = selection.entryIDs
+                let ids = Set(selection.addableEntries.map(\.id))
+                Task { await store.addSelectedEntries(entryIDs: ids) }
             }
+            .disabled(store.isInteractionBlocked)
+            if selection.addableEntries.count < selection.entries.count {
+                Text("仅添加未纳管项目和已添加目录的内容")
+            }
+        }
+
+        if multiple, !selection.revertibleEntries.isEmpty {
+            Button("还原 \(selection.countLabel(selection.revertibleEntries.count))…", role: .destructive) {
+                store.selectedEntryIDs = selection.entryIDs
+                store.requestRevertConfirmation()
+            }
+            .disabled(store.isInteractionBlocked)
+            if selection.revertibleEntries.count < selection.entries.count {
+                Text("仅还原有本地变更的已纳管项目")
+            }
+        }
+
+        if multiple, entry.isMissingVersioned {
+            Button("标记 \(selection.entries.count) 项为 SVN 删除…") {
+                store.requestMissingDeletion(for: entry)
+            }
+            .disabled(!store.canScheduleMissingDeletion(for: entry))
+        }
+        if multiple, entry.isMissingScheduledAddition {
+            Button("清理 \(selection.entries.count) 项缺失的添加记录…") {
+                store.requestMissingAdditionCleanup(for: entry)
+            }
+            .disabled(!store.canCleanupMissingAdditions(for: entry))
+        }
+
+        if multiple {
+            Divider()
+            Text("以下操作仅针对：\(entry.fileName)")
         }
 
         if entry.status == .unversioned {
             Menu("忽略") {
                 Button("忽略此名称") {
-                    store.selectedEntryIDs = [entry.id]
                     store.requestIgnoreConfirmation(for: entry, mode: .name)
                 }
                 if entry.nodeKind == .file,
                    !(entry.relativePath as NSString).pathExtension.isEmpty {
                     Button("忽略所有 .\((entry.relativePath as NSString).pathExtension) 文件") {
-                        store.selectedEntryIDs = [entry.id]
                         store.requestIgnoreConfirmation(for: entry, mode: .fileExtension)
                     }
                 }
@@ -534,20 +572,20 @@ private struct StatusTreeEntryRowView: View {
                 }
             }
             if entry.status == .missing {
-                if entry.isMissingVersioned {
+                if entry.isMissingVersioned && !multiple {
                     Button("标记为 SVN 删除…") {
                         store.requestMissingDeletion(for: entry)
                     }
                     .disabled(!store.canScheduleMissingDeletion(for: entry))
                 }
-                if entry.isMissingScheduledAddition {
+                if entry.isMissingScheduledAddition && !multiple {
                     Button("清理缺失的添加记录…") {
                         store.requestMissingAdditionCleanup(for: entry)
                     }
                     .disabled(!store.canCleanupMissingAdditions(for: entry))
                 }
-                if entry.isMissingVersioned {
-                    Button("还原已纳管文件…", role: .destructive) {
+                if entry.isMissingVersioned && !multiple {
+                    Button("还原 1 项已纳管项目…", role: .destructive) {
                         guard store.canScheduleMissingDeletion(for: entry) else { return }
                         if !store.selectedEntryIDs.contains(entry.id) {
                             store.selectedEntryIDs = [entry.id]
@@ -558,20 +596,18 @@ private struct StatusTreeEntryRowView: View {
                 }
             } else if entry.status == .added {
                 Button("取消添加…") {
-                    store.selectedEntryIDs = [entry.id]
                     store.requestUnscheduleAddConfirmation(for: entry)
                 }
-            } else {
-                Button("还原…", role: .destructive) {
-                    store.selectedEntryIDs = [entry.id]
+            } else if !multiple {
+                Button("还原 1 项…", role: .destructive) {
+                    store.selectedEntryIDs = selection.entryIDs
                     store.requestRevertConfirmation()
                 }
             }
         }
 
         if entry.status == .conflicted {
-            Button("解决冲突…") {
-                store.selectedEntryIDs = [entry.id]
+            Button("解决此项冲突…") {
                 store.requestResolveConfirmation(for: entry)
             }
         }
