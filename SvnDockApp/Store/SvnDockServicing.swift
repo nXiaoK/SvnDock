@@ -40,6 +40,10 @@ protocol SvnDockServicing: Sendable {
         relativePaths: [String],
         in workingCopy: SvnDockWorkingCopy
     ) async throws
+    func scheduleMissingDeletion(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws
     func resolve(
         relativePaths: [String],

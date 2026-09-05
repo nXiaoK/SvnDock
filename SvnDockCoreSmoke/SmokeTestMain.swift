@@ -11,6 +11,7 @@ struct SvnDockCoreSmokeTestMain {
         try await CoreRegressionSmoke.run()
         try await FinderQueueRegressionSmoke.run()
         try await HistoryRevisionSmoke.run()
+        try await MissingDeletionSmoke.run()
         try locatorCheck()
         try await processRunnerCheck()
         try await schedulerCheck()

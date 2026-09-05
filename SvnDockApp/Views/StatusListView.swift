@@ -21,20 +21,32 @@ struct StatusListView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("\(store.missingEntryCount) 个项目在本地缺失", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
-                    HStack {
-                        Button("清理未提交的添加记录…") {
+                    if store.missingVersionedCount > 0 {
+                        Button("标记 \(store.missingVersionedCount) 个已纳管项目为删除…") {
+                            store.requestMissingDeletion(allMissing: true)
+                        }
+                        .disabled(store.isInteractionBlocked)
+                    }
+                    if store.missingAdditionCount > 0 {
+                        Button("清理 \(store.missingAdditionCount) 个未提交的添加记录…") {
                             store.requestMissingAdditionCleanup(allMissing: true)
                         }
                         .disabled(store.isInteractionBlocked)
-                        if store.groupedMissingCount > 0 {
+                    }
+                    Text("已纳管项目标记删除后需提交到仓库；未提交的新增项目可清理添加记录。")
+                        .foregroundStyle(.secondary)
+                    if store.missingEntryCount > store.missingVersionedCount + store.missingAdditionCount {
+                        Text("部分项目状态未确认或存在冲突，请刷新后检查。")
+                            .foregroundStyle(.secondary)
+                    }
+                    if store.groupedMissingCount > 0 {
+                        HStack {
                             Spacer()
                             Button(store.showsMissingDetails ? "合并目录" : "显示明细") {
                                 store.showsMissingDetails.toggle()
                             }
                         }
                     }
-                    Text("仅清理已删除且尚未提交的新增项目，已纳管项目不会被清理。")
-                        .foregroundStyle(.secondary)
                 }
                 .font(.caption)
                 .padding(12)
@@ -522,13 +534,27 @@ private struct StatusTreeEntryRowView: View {
                 }
             }
             if entry.status == .missing {
-                Button("清理缺失的添加记录…") {
-                    store.selectedEntryIDs = [entry.id]
-                    store.requestMissingAdditionCleanup(for: entry)
+                if entry.isMissingVersioned {
+                    Button("标记为 SVN 删除…") {
+                        store.requestMissingDeletion(for: entry)
+                    }
+                    .disabled(!store.canScheduleMissingDeletion(for: entry))
                 }
-                Button("还原已纳管文件…", role: .destructive) {
-                    store.selectedEntryIDs = [entry.id]
-                    store.requestRevertConfirmation()
+                if entry.isMissingScheduledAddition {
+                    Button("清理缺失的添加记录…") {
+                        store.requestMissingAdditionCleanup(for: entry)
+                    }
+                    .disabled(!store.canCleanupMissingAdditions(for: entry))
+                }
+                if entry.isMissingVersioned {
+                    Button("还原已纳管文件…", role: .destructive) {
+                        guard store.canScheduleMissingDeletion(for: entry) else { return }
+                        if !store.selectedEntryIDs.contains(entry.id) {
+                            store.selectedEntryIDs = [entry.id]
+                        }
+                        store.requestRevertConfirmation()
+                    }
+                    .disabled(!store.canScheduleMissingDeletion(for: entry))
                 }
             } else if entry.status == .added {
                 Button("取消添加…") {

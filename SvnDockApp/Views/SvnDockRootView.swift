@@ -178,6 +178,7 @@ struct SvnDockRootView: View {
             Text(store.pendingIgnoreMessage)
         }
         .modifier(UnscheduleAddPresentationModifier(store: store))
+        .modifier(MissingDeletionPresentationModifier(store: store))
     }
 
     private var commandBar: some View {
@@ -370,6 +371,30 @@ struct SvnDockRootView: View {
         Task {
             await store.processPendingFinderCommands()
         }
+    }
+}
+
+private struct MissingDeletionPresentationModifier: ViewModifier {
+    @ObservedObject var store: SvnDockStore
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: store.isPresentingMissingDeletionConfirmation) {
+                if !store.isPresentingMissingDeletionConfirmation {
+                    store.cancelMissingDeletionConfirmation()
+                    Task { await store.processPendingFinderCommands() }
+                }
+            }
+            .alert("标记为 SVN 删除？", isPresented: $store.isPresentingMissingDeletionConfirmation) {
+                Button("取消", role: .cancel) {
+                    store.cancelMissingDeletionConfirmation()
+                }
+                Button("标记删除", role: .destructive) {
+                    store.confirmMissingDeletion()
+                }
+            } message: {
+                Text(store.missingDeletionConfirmationMessage)
+            }
     }
 }
 

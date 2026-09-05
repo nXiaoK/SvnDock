@@ -72,6 +72,7 @@ final class SvnDockStore: ObservableObject {
     @Published var isPresentingCommit = false
     @Published var isPresentingDirectoryImporter = false
     @Published var isPresentingUnscheduleAddConfirmation = false
+    @Published var isPresentingMissingDeletionConfirmation = false
     @Published var isPresentingRevertConfirmation = false
     @Published var isPresentingRemovalConfirmation = false
     @Published var isPresentingResolveConfirmation = false
@@ -88,6 +89,7 @@ final class SvnDockStore: ObservableObject {
     private var rejectedFinderCommandIDs: Set<UUID> = []
     private var suppressedSelectionReloadID: UUID?
     private var pendingUnscheduleAdd: PendingUnscheduleAdd?
+    private var pendingMissingDeletion: PendingMissingDeletion?
     private var pendingRevert: PendingRevert?
     private var pendingRemoval: SvnDockWorkingCopy?
     private var pendingResolve: PendingResolve?
@@ -147,6 +149,8 @@ final class SvnDockStore: ObservableObject {
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
     var statusCounts: SvnDockStatusCounts { statusSnapshot.counts }
     var missingEntryCount: Int { statusSnapshot.missingEntries.count }
+    var missingAdditionCount: Int { statusSnapshot.missingAdditionCount }
+    var missingVersionedCount: Int { statusSnapshot.missingVersionedCount }
     var groupedMissingCount: Int { statusSnapshot.groupedMissingCount }
 
     var hasMoreFilteredEntries: Bool {
@@ -183,7 +187,7 @@ final class SvnDockStore: ObservableObject {
         switch kind {
         case .refreshing:
             return false
-        case .loading, .updating, .committing, .adding, .unschedulingAdd,
+        case .loading, .updating, .committing, .adding, .unschedulingAdd, .deleting,
              .reverting, .cleaning, .resolving, .ignoring:
             return true
         }
@@ -232,6 +236,7 @@ final class SvnDockStore: ObservableObject {
         isPresentingCommit
             || isPresentingDirectoryImporter
             || isPresentingUnscheduleAddConfirmation
+            || isPresentingMissingDeletionConfirmation
             || isPresentingRevertConfirmation
             || isPresentingRemovalConfirmation
             || isPresentingResolveConfirmation
@@ -724,13 +729,13 @@ final class SvnDockStore: ObservableObject {
         guard !isInteractionBlocked, let workingCopy = selectedWorkingCopy else { return }
         let selected: [SvnDockStatusEntry]
         if allMissing {
-            selected = statusSnapshot.missingEntries
-        } else if let entry, let current = statusEntry(withID: entry.id), current.status == .missing {
-            selected = [current]
+            selected = statusSnapshot.missingEntries.filter {
+                $0.workingCopyID == workingCopy.id && $0.isMissingScheduledAddition
+            }
         } else {
-            selected = selectedStatusEntries { $0.status == .missing }
+            selected = missingActionEntries(for: entry)
         }
-        guard !selected.isEmpty else { return }
+        guard !selected.isEmpty, selected.allSatisfy(\.isMissingScheduledAddition) else { return }
         pendingUnscheduleAdd = PendingUnscheduleAdd(
             workingCopy: workingCopy,
             relativePaths: selected.map(\.relativePath),
@@ -738,6 +743,89 @@ final class SvnDockStore: ObservableObject {
             missingOnly: true
         )
         isPresentingUnscheduleAddConfirmation = true
+    }
+
+    // A context action applies to the selection only when its row belongs to
+    // it. Never fall back to unrelated selected paths for a stale context row.
+    private func missingActionEntries(for entry: SvnDockStatusEntry?) -> [SvnDockStatusEntry] {
+        guard let workingCopy = selectedWorkingCopy else { return [] }
+        if let entry {
+            guard entry.workingCopyID == workingCopy.id,
+                  let current = statusEntry(withID: entry.id),
+                  current.workingCopyID == workingCopy.id else { return [] }
+            if !selectedEntryIDs.contains(current.id) { return [current] }
+        }
+        let selected = selectedEntryIDs.compactMap(statusEntry(withID:))
+        guard selected.count == selectedEntryIDs.count,
+              selected.allSatisfy({ $0.workingCopyID == workingCopy.id }) else { return [] }
+        return selected.sorted { $0.relativePath < $1.relativePath }
+    }
+
+    func canScheduleMissingDeletion(for entry: SvnDockStatusEntry) -> Bool {
+        let selected = missingActionEntries(for: entry)
+        return !selected.isEmpty && selected.allSatisfy { $0.isMissingVersioned && $0.relativePath != "." }
+    }
+
+    func canCleanupMissingAdditions(for entry: SvnDockStatusEntry) -> Bool {
+        let selected = missingActionEntries(for: entry)
+        return !selected.isEmpty && selected.allSatisfy(\.isMissingScheduledAddition)
+    }
+
+    func requestMissingDeletion(for entry: SvnDockStatusEntry? = nil, allMissing: Bool = false) {
+        guard !isInteractionBlocked, let workingCopy = selectedWorkingCopy else { return }
+        let selected = allMissing
+            ? statusSnapshot.missingEntries.filter { $0.workingCopyID == workingCopy.id && $0.isMissingVersioned }
+            : missingActionEntries(for: entry)
+        guard !selected.isEmpty,
+              selected.allSatisfy({ $0.isMissingVersioned && $0.relativePath != "." }) else { return }
+        pendingMissingDeletion = PendingMissingDeletion(
+            workingCopy: workingCopy,
+            relativePaths: selected.map(\.relativePath)
+        )
+        isPresentingMissingDeletionConfirmation = true
+    }
+
+    var missingDeletionConfirmationMessage: String {
+        guard let request = pendingMissingDeletion else { return "" }
+        let paths = request.relativePaths.prefix(5).joined(separator: "\n")
+        let summary = request.relativePaths.count > 5 ? paths + "\n等 \(request.relativePaths.count) 个项目" : paths
+        return "将这些已纳管且本地缺失的项目标记为 SVN 删除，目录包含其子项。标记后请在提交窗口中提交删除，仓库中的文件才会移除。提交前可通过还原撤销。\n\n\(summary)"
+    }
+
+    func cancelMissingDeletionConfirmation() {
+        pendingMissingDeletion = nil
+        isPresentingMissingDeletionConfirmation = false
+    }
+
+    func confirmMissingDeletion() {
+        guard let request = pendingMissingDeletion, activeOperation == nil else {
+            cancelMissingDeletionConfirmation()
+            return
+        }
+        pendingMissingDeletion = nil
+        activeOperation = SvnDockOperationState(kind: .deleting, detail: "\(request.relativePaths.count) 个项目")
+        isPresentingMissingDeletionConfirmation = false
+        Task { [weak self] in
+            await self?.executeConfirmedMissingDeletion(request)
+        }
+    }
+
+    private func executeConfirmedMissingDeletion(_ request: PendingMissingDeletion) async {
+        do {
+            try Task.checkCancellation()
+            try await service.scheduleMissingDeletion(relativePaths: request.relativePaths, in: request.workingCopy)
+        } catch is CancellationError {
+            // Do not retry a mutation automatically after cancellation.
+        } catch {
+            present(error, title: operationFailureTitle(for: .deleting))
+        }
+        activeOperation = nil
+        // SVN can fail after changing some targets. Refresh even on failure so
+        // the user sees the actual schedules before deciding what to do next.
+        if selectedWorkingCopyID == request.workingCopy.id {
+            await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
+        }
+        await processPendingFinderCommands()
     }
 
     var isConfirmingMissingAdditionCleanup: Bool { pendingUnscheduleAdd?.missingOnly == true }
@@ -2113,6 +2201,7 @@ final class SvnDockStore: ObservableObject {
         case .committing: "提交失败"
         case .adding: "添加失败"
         case .unschedulingAdd: "取消添加失败"
+        case .deleting: "标记删除失败"
         case .reverting: "还原失败"
         case .cleaning: "清理失败"
         case .resolving: "解决冲突失败"
@@ -2588,6 +2677,11 @@ private struct PendingCommitExecution: Sendable {
     let relativePaths: [String]
     let message: String
     let finderClaim: FinderCommandClaim?
+}
+
+private struct PendingMissingDeletion: Sendable {
+    let workingCopy: SvnDockWorkingCopy
+    let relativePaths: [String]
 }
 
 private struct PendingUnscheduleAdd: Sendable {

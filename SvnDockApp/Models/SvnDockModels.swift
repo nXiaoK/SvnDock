@@ -196,6 +196,13 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
     var lockOwner: String?
     var fileSize: Int64?
     var modifiedAt: Date?
+    /// Local SVN schedule from `svn info`, populated for missing nodes.
+    /// A copied addition can retain a revision, so status revisions alone do
+    /// not identify whether a missing path has already been committed.
+    var workingCopySchedule: String?
+    /// BASE revision reported by `svn status`, not a copy source from info.
+    /// Children of uncommitted copies can have a normal schedule but no BASE.
+    var workingCopyRevision: Int?
     var missingDescendantCount = 0
 
     init(
@@ -209,7 +216,9 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
         changelist: String? = nil,
         lockOwner: String? = nil,
         fileSize: Int64? = nil,
-        modifiedAt: Date? = nil
+        modifiedAt: Date? = nil,
+        workingCopySchedule: String? = nil,
+        workingCopyRevision: Int? = nil
     ) {
         self.workingCopyID = workingCopyID
         self.relativePath = relativePath
@@ -223,6 +232,17 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
         self.lockOwner = lockOwner
         self.fileSize = fileSize
         self.modifiedAt = modifiedAt
+        self.workingCopySchedule = workingCopySchedule
+        self.workingCopyRevision = workingCopyRevision
+    }
+
+    var isMissingScheduledAddition: Bool {
+        status == .missing && workingCopySchedule == "add" && conflictKinds.isEmpty
+    }
+
+    var isMissingVersioned: Bool {
+        status == .missing && workingCopySchedule == "normal"
+            && (workingCopyRevision ?? -1) >= 0 && conflictKinds.isEmpty
     }
 
     var fileName: String {
@@ -248,6 +268,8 @@ struct SvnDockStatusSnapshot: Sendable {
     let entries: [SvnDockStatusEntry]
     let groupedEntries: [SvnDockStatusEntry]
     let missingEntries: [SvnDockStatusEntry]
+    let missingAdditionCount: Int
+    let missingVersionedCount: Int
     let groupedMissingCount: Int
     let committableEntries: [SvnDockStatusEntry]
     let counts: SvnDockStatusCounts
@@ -285,6 +307,8 @@ struct SvnDockStatusSnapshot: Sendable {
         let entries = enrichedEntries.sorted(by: Self.statusSort)
         var entryIndex: [SvnDockStatusEntry.ID: Int] = [:]
         var committableCount = 0
+        var missingAdditionCount = 0
+        var missingVersionedCount = 0
         var counts = SvnDockStatusCounts.zero
 
         entryIndex.reserveCapacity(entries.count)
@@ -304,6 +328,12 @@ struct SvnDockStatusSnapshot: Sendable {
             if entry.status == .unversioned {
                 counts.unversioned += 1
             }
+            if entry.isMissingScheduledAddition {
+                missingAdditionCount += 1
+            }
+            if entry.isMissingVersioned {
+                missingVersionedCount += 1
+            }
         }
 
         self.entries = entries
@@ -311,6 +341,8 @@ struct SvnDockStatusSnapshot: Sendable {
         // that case rather than retaining a second copy of every status entry.
         self.groupedEntries = groupedIDs.isEmpty ? entries : entries.filter { !groupedIDs.contains($0.id) }
         self.missingEntries = entries.filter { $0.status == .missing }
+        self.missingAdditionCount = missingAdditionCount
+        self.missingVersionedCount = missingVersionedCount
         self.groupedMissingCount = groupedIDs.count
         self.entryIndex = entryIndex
         self.committableEntries = committableCount == entries.count
@@ -406,6 +438,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
     case updating
     case committing
     case adding
+    case deleting
     case unschedulingAdd
     case reverting
     case cleaning
@@ -419,6 +452,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
         case .updating: "正在更新…"
         case .committing: "正在提交…"
         case .adding: "正在添加…"
+        case .deleting: "正在标记删除…"
         case .unschedulingAdd: "正在取消添加…"
         case .reverting: "正在还原…"
         case .cleaning: "正在清理…"

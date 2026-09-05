@@ -149,14 +149,23 @@ private struct DiffInspector: View {
                 SvnDockEmptyState(
                     symbol: "exclamationmark.triangle",
                     title: "项目在本地已不存在",
-                    message: "添加后尚未提交就删除的项目，可以清理其添加记录。目录会连同缺失子项一起处理。已纳管文件请恢复文件或明确标记为 SVN 删除。"
+                    message: missingEntryMessage
                 )
-                Button("清理缺失的添加记录…") {
-                    store.requestMissingAdditionCleanup(for: entry)
+                if entry.isMissingVersioned {
+                    Button("标记为 SVN 删除…") {
+                        store.requestMissingDeletion(for: entry)
+                    }
+                    .buttonStyle(SvnDockButtonStyle())
+                    .disabled(store.isInteractionBlocked)
+                    .padding(.bottom, 24)
+                } else if entry.isMissingScheduledAddition {
+                    Button("清理缺失的添加记录…") {
+                        store.requestMissingAdditionCleanup(for: entry)
+                    }
+                    .buttonStyle(SvnDockButtonStyle())
+                    .disabled(store.isInteractionBlocked)
+                    .padding(.bottom, 24)
                 }
-                .buttonStyle(SvnDockButtonStyle())
-                .disabled(store.isInteractionBlocked)
-                .padding(.bottom, 24)
             }
         } else if entry.nodeKind == .directory {
             SvnDockEmptyState(
@@ -180,6 +189,16 @@ private struct DiffInspector: View {
             DiffContentView(text: store.diffText, presentationModel: presentationModel)
                 .id(entry.id)
         }
+    }
+
+    private var missingEntryMessage: String {
+        if entry.isMissingVersioned {
+            return "这是已经纳管的项目。要从仓库删除，请先标记为 SVN 删除，再提交这次删除；目录包含其子项。若只是误删，可通过右键菜单还原文件。"
+        }
+        if entry.isMissingScheduledAddition {
+            return "这是添加后尚未提交就被删除的项目，可以清理其添加记录。目录会连同缺失子项一起处理。"
+        }
+        return "此项目的 SVN 状态尚未确认或存在冲突。请刷新状态并检查后再处理。"
     }
 
     private var inspectorHeader: some View {

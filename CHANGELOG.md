@@ -24,6 +24,11 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- Missing versioned files and directories can be scheduled for SVN deletion
+  and then committed. Context menus distinguish these from uncommitted
+  additions, preserve multiselection and check current SVN schedules before
+  changing them. Revert restores missing/deleted directory contents while
+  keeping ordinary property-only directory reverts shallow.
 - File rows update the diff inspector on a single click. Native list actions
   preserve double-click opening, directory expansion and Command/Shift selection.
 - Custom buttons respond across their full visible bounds, including padding,

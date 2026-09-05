@@ -134,6 +134,8 @@ actor MockSvnDockService: SvnDockServicing {
         guard var entries = entriesByWorkingCopyID[workingCopy.id] else { return }
         for index in entries.indices where relativePaths.contains(entries[index].relativePath) {
             entries[index].status = .added
+            entries[index].workingCopySchedule = "add"
+            entries[index].workingCopyRevision = nil
         }
         entriesByWorkingCopyID[workingCopy.id] = entries
     }
@@ -158,6 +160,8 @@ actor MockSvnDockService: SvnDockServicing {
                 Self.path(entries[index].relativePath, isInside: $0)
             }) {
                 entries[index].status = .unversioned
+                entries[index].workingCopySchedule = nil
+                entries[index].workingCopyRevision = nil
             }
         }
         entriesByWorkingCopyID[workingCopy.id] = entries
@@ -166,10 +170,33 @@ actor MockSvnDockService: SvnDockServicing {
     func cleanupMissingAdditions(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
         await briefDelay()
         entriesByWorkingCopyID[workingCopy.id]?.removeAll { entry in
-            entry.status == .missing && relativePaths.contains { target in
+            entry.isMissingScheduledAddition && relativePaths.contains { target in
                 entry.relativePath == target || entry.relativePath.hasPrefix(target + "/")
             }
         }
+    }
+
+    func scheduleMissingDeletion(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws {
+        await briefDelay()
+        guard var entries = entriesByWorkingCopyID[workingCopy.id] else { return }
+        let targets = Self.collapsingDescendantPaths(relativePaths)
+        guard !targets.isEmpty, targets.allSatisfy({ target in
+            target != "." && entries.contains {
+                $0.relativePath == target && $0.isMissingVersioned
+            }
+        }) else {
+            throw SvnDockServiceError.unavailable("所选项目已不再是已纳管的本地缺失项目，请刷新后重试。")
+        }
+        for index in entries.indices where entries[index].isMissingVersioned {
+            if targets.contains(where: { Self.path(entries[index].relativePath, isInside: $0) }) {
+                entries[index].status = .deleted
+                entries[index].workingCopySchedule = "delete"
+            }
+        }
+        entriesByWorkingCopyID[workingCopy.id] = entries
     }
 
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {

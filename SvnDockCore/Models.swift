@@ -379,6 +379,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
     case update(revision: SVNRevision?)
     case commit(paths: [String], message: String, keepLocks: Bool)
     case add(paths: [String], parents: Bool, force: Bool, depth: SVNDepth?)
+    case delete(paths: [String])
     case revert(paths: [String], depth: SVNDepth)
     case cleanup
     case diff(paths: [String])
@@ -392,7 +393,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
 
     public var mutatesWorkingCopy: Bool {
         switch self {
-        case .update, .commit, .add, .revert, .cleanup, .resolve, .setIgnore:
+        case .update, .commit, .add, .delete, .revert, .cleanup, .resolve, .setIgnore:
             return true
         case .status, .info, .infoTargets, .diff, .log, .revisionLog, .revisionSummary, .revisionDiff, .properties:
             return false

@@ -55,6 +55,15 @@ its pending addition, or schedule its deletion as appropriate before retrying.
 Committing a directory still includes its descendants, which may contain missing
 files. SvnDock does not automatically change their add/delete schedules.
 
+For an already-versioned file or directory deleted from disk, choose
+**标记为 SVN 删除…** (Schedule SVN deletion) in its context menu or inspector.
+The action supports multiselection and grouped missing directories. It changes
+the local SVN state from missing (`!`) to deleted (`D`); commit that deletion
+to remove the path from the repository. Updating a merely missing path can
+restore it, whereas updating after the deletion is committed will not.
+Revert restores a missing or scheduled-deletion directory and its contents.
+Ordinary directory property reverts remain shallow.
+
 If a directory was added locally, never committed, then deleted from disk, use
 **Clean uncommitted addition records** in the missing-items banner (or the
 directory's context menu). SvnDock verifies that the selected roots are missing

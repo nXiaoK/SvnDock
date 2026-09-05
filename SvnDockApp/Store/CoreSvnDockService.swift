@@ -135,7 +135,7 @@ actor CoreSvnDockService: SvnDockServicing {
         // the lock were released immediately after `svn status`, an Agent
         // mutation could publish newer badges and then be overwritten by this
         // stale result.
-        let coreEntries = try await scheduler.enqueue(for: coreCopy.id) {
+        let listing = try await scheduler.enqueue(for: coreCopy.id) {
             try await operationLock.withLock(for: coreCopy.id) {
                 let result = try await runner.run(invocation)
                 guard result.succeeded else {
@@ -146,18 +146,26 @@ actor CoreSvnDockService: SvnDockServicing {
                     workingCopyURL: coreCopy.localPath,
                     resolveNodeKinds: false
                 )
+                let missingInfoByPath = try await Self.missingStatusInfo(
+                    for: entries, in: coreCopy, builder: builder, runner: runner
+                )
                 let replacement = Self.badgeReplacement(entries, in: coreCopy)
                 try await badgeStore.replaceBadgeEntries(
                     forWorkingCopyID: coreCopy.id,
                     underWorkingCopyRoot: coreCopy.localPath.standardizedFileURL.path,
                     with: replacement
                 )
-                return entries
+                return StatusListingSnapshot(entries: entries, missingInfoByPath: missingInfoByPath)
             }
         }
 
-        let uiEntries = coreEntries.compactMap { entry in
-            makeUIStatusEntry(entry, in: coreCopy)
+        let uiEntries = listing.entries.compactMap { entry in
+            makeUIStatusEntry(
+                entry, in: coreCopy,
+                missingInfo: entry.status == .missing || entry.status == .deleted
+                    ? listing.missingInfoByPath[entry.fileURL(relativeTo: coreCopy).path]
+                    : nil
+            )
         }
         postSharedStateChanged()
         return SvnDockStatusSnapshot(entries: uiEntries)
@@ -201,6 +209,9 @@ actor CoreSvnDockService: SvnDockServicing {
                     workingCopyURL: coreCopy.localPath,
                     resolveNodeKinds: false
                 )
+                let missingInfoByPath = try await Self.missingStatusInfo(
+                    for: statusEntries, in: coreCopy, builder: builder, runner: runner
+                )
 
                 // Discard the snapshot if the directory was replaced by a
                 // symlink while it was being read. The filesystem is not
@@ -212,7 +223,8 @@ actor CoreSvnDockService: SvnDockServicing {
                 return DirectoryListingSnapshot(
                     directoryURL: directoryURL,
                     diskChildren: diskChildren,
-                    statusEntries: statusEntries
+                    statusEntries: statusEntries,
+                    missingInfoByPath: missingInfoByPath
                 )
             }
         }
@@ -320,6 +332,23 @@ actor CoreSvnDockService: SvnDockServicing {
         try await undoAddition(relativePaths: relativePaths, in: workingCopy, missingOnly: true)
     }
 
+    func scheduleMissingDeletion(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws {
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        let deletion = try SVNMissingDeletion(executableURL: executableLocator.locate(), runner: processRunner)
+        let targets = try deletion.targets(for: relativePaths, in: coreCopy)
+        let operationLock = crossProcessLock
+        try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                try Task.checkCancellation()
+                try Self.validateResolvedBoundary(relativePaths: targets, in: coreCopy)
+                try await deletion.run(targets: targets, in: coreCopy)
+            }
+        }
+    }
+
     private func undoAddition(
         relativePaths: [String],
         in workingCopy: SvnDockWorkingCopy,
@@ -343,10 +372,105 @@ actor CoreSvnDockService: SvnDockServicing {
 
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        // Revert only the exact status rows the user confirmed. A directory
-        // row can represent a property-only change (for example svn:ignore);
-        // recursively reverting it would also discard unrelated child edits.
-        _ = try await run(.revert(paths: relativePaths, depth: .empty), in: coreCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let targets = Array(Set(try builder.normalizedLocalPaths(relativePaths, in: coreCopy))).sorted()
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                try Self.validateResolvedBoundary(relativePaths: targets, in: coreCopy)
+                let groups = try await Self.revertTargetGroups(
+                    targets, in: coreCopy, builder: builder, runner: runner
+                )
+                for (paths, depth) in groups where !paths.isEmpty {
+                    try Task.checkCancellation()
+                    try Self.validateResolvedBoundary(relativePaths: paths, in: coreCopy)
+                    let result = try await runner.run(builder.makeInvocation(
+                        for: .revert(paths: paths, depth: depth), in: coreCopy
+                    ))
+                    guard result.succeeded else { throw SVNProcessFailure(result: result) }
+                }
+            }
+        }
+    }
+
+    private static func revertTargetGroups(
+        _ targets: [String], in workingCopy: SvnDockCore.WorkingCopy,
+        builder: SVNCommandBuilder, runner: any ProcessRunning
+    ) async throws -> [([String], SVNDepth)] {
+        var statuses: [String: SvnDockCore.StatusEntry] = [:]
+        var start = 0
+        // Status does not support --targets. Bound both the number of arguments
+        // and their bytes while checking the full selection before any revert.
+        while start < targets.count {
+            var end = start
+            var bytes = 0
+            while end < targets.count && end - start < 256 {
+                let size = targets[end].utf8.count + 1
+                if end > start && bytes + size > 64_000 { break }
+                bytes += size
+                end += 1
+            }
+            try Task.checkCancellation()
+            let result = try await runner.run(builder.makeInvocation(
+                for: .status(SVNStatusOptions(depth: .empty, paths: Array(targets[start..<end]))),
+                in: workingCopy
+            ))
+            guard result.succeeded else { throw SVNProcessFailure(result: result) }
+            for entry in try SVNXMLParser.parseStatus(
+                result.standardOutput, workingCopyURL: workingCopy.localPath, resolveNodeKinds: false
+            ) {
+                statuses[absoluteURL(for: entry.path, in: workingCopy).path] = entry
+            }
+            start = end
+        }
+
+        let candidates = targets.filter {
+            let status = statuses[absoluteURL(for: $0, in: workingCopy).path]?.status
+            return status == .missing || status == .deleted
+        }
+        var recursive = Set<String>()
+        if !candidates.isEmpty {
+            try Task.checkCancellation()
+            let result = try await runner.run(builder.makeInvocation(
+                for: .infoTargets(paths: candidates), in: workingCopy
+            ))
+            guard result.succeeded else { throw SVNProcessFailure(result: result) }
+            let infos = try SVNXMLParser.parseInfos(result.standardOutput)
+            let infoByPath = Dictionary(infos.map {
+                (absoluteURL(for: $0.path, in: workingCopy).path, $0)
+            }, uniquingKeysWith: { _, latest in latest })
+            for target in candidates {
+                let path = absoluteURL(for: target, in: workingCopy).path
+                guard let info = infoByPath[path], info.kind == .directory else { continue }
+                let status = statuses[path]?.status
+                // Recursive restore is necessary for an absent/deleted tree.
+                // Property-only directories and paths whose schedule changed
+                // must remain shallow to preserve unrelated child edits.
+                if (status == .missing && info.schedule == "normal")
+                    || (status == .deleted && info.schedule == "delete") {
+                    guard info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL
+                        == workingCopy.localPath.resolvingSymlinksInPath().standardizedFileURL else {
+                        throw SvnDockServiceError.unavailable("无法确认“\(target)”属于当前工作副本，请刷新后重试。")
+                    }
+                    recursive.insert(target)
+                }
+            }
+        }
+
+        let independentTargets = targets.filter { target in
+            if target != "." && recursive.contains(".") { return false }
+            var parent = (target as NSString).deletingLastPathComponent
+            while !parent.isEmpty {
+                if recursive.contains(parent) { return false }
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+            return true
+        }
+        return [
+            (independentTargets.filter { recursive.contains($0) }, .infinity),
+            (independentTargets.filter { !recursive.contains($0) }, .empty)
+        ]
     }
 
     func resolve(
@@ -616,7 +740,8 @@ actor CoreSvnDockService: SvnDockServicing {
 
     private func makeUIStatusEntry(
         _ entry: SvnDockCore.StatusEntry,
-        in workingCopy: SvnDockCore.WorkingCopy
+        in workingCopy: SvnDockCore.WorkingCopy,
+        missingInfo: MissingStatusInfo?
     ) -> SvnDockStatusEntry? {
         let effectiveStatus: SvnDockStatusKind
         if entry.isTreeConflicted
@@ -640,7 +765,7 @@ actor CoreSvnDockService: SvnDockServicing {
         }
 
         let fileURL = entry.fileURL(relativeTo: workingCopy)
-        let values = try? fileURL.resourceValues(forKeys: [
+        let values = entry.status == .missing ? nil : try? fileURL.resourceValues(forKeys: [
             .isDirectoryKey,
             .isSymbolicLinkKey,
             .fileSizeKey,
@@ -652,7 +777,7 @@ actor CoreSvnDockService: SvnDockServicing {
             workingCopyID: workingCopy.id,
             relativePath: relativePath(for: fileURL, root: workingCopy.localPath),
             nodeKind: nodeKind(
-                entry.kind,
+                missingInfo?.kind ?? entry.kind,
                 resourceValues: values,
                 isSymbolicLink: isSymbolicLink
             ),
@@ -662,7 +787,9 @@ actor CoreSvnDockService: SvnDockServicing {
             conflictKinds: conflictKinds(for: entry),
             changelist: entry.changelist,
             fileSize: values?.fileSize.map { Int64($0) },
-            modifiedAt: values?.contentModificationDate
+            modifiedAt: values?.contentModificationDate,
+            workingCopySchedule: missingInfo?.schedule,
+            workingCopyRevision: entry.revision
         )
     }
 
@@ -701,7 +828,9 @@ actor CoreSvnDockService: SvnDockServicing {
                 conflictKinds: statusEntry.map(conflictKinds(for:)) ?? [],
                 changelist: statusEntry?.changelist,
                 fileSize: child.fileSize,
-                modifiedAt: child.modifiedAt
+                modifiedAt: child.modifiedAt,
+                workingCopySchedule: listing.missingInfoByPath[child.fileURL.path]?.schedule,
+                workingCopyRevision: statusEntry?.revision
             ))
         }
 
@@ -709,17 +838,20 @@ actor CoreSvnDockService: SvnDockServicing {
         // longer have a corresponding item in the directory enumeration.
         for (path, statusEntry) in statusByPath {
             let fileURL = URL(fileURLWithPath: path).standardizedFileURL
+            let missingInfo = listing.missingInfoByPath[path]
             result.append(SvnDockStatusEntry(
                 workingCopyID: workingCopy.id,
                 relativePath: relativePath(
                     for: fileURL,
                     root: workingCopy.localPath
                 ),
-                nodeKind: nodeKind(statusEntry.kind, resourceValues: nil),
+                nodeKind: nodeKind(missingInfo?.kind ?? statusEntry.kind, resourceValues: nil),
                 status: directoryStatusKind(statusEntry),
                 repositoryStatus: statusEntry.repositoryStatus.map(mapStatus),
                 conflictKinds: conflictKinds(for: statusEntry),
-                changelist: statusEntry.changelist
+                changelist: statusEntry.changelist,
+                workingCopySchedule: missingInfo?.schedule,
+                workingCopyRevision: statusEntry.revision
             ))
         }
 
@@ -732,6 +864,49 @@ actor CoreSvnDockService: SvnDockServicing {
                 return nameOrder == .orderedAscending
             }
             return lhs.relativePath < rhs.relativePath
+        }
+    }
+
+    private static func missingStatusInfo(
+        for entries: [SvnDockCore.StatusEntry],
+        in workingCopy: SvnDockCore.WorkingCopy,
+        builder: SVNCommandBuilder,
+        runner: any ProcessRunning
+    ) async throws -> [String: MissingStatusInfo] {
+        let paths = entries.compactMap {
+            $0.status == .missing || $0.status == .deleted ? $0.path : nil
+        }
+        guard !paths.isEmpty else { return [:] }
+
+        // `status` reports both missing committed nodes and missing pending
+        // additions as "missing". Deleted directories also need their stored
+        // kind because they no longer exist on disk. Read this in one local info
+        // call; infoTargets uses a targets file when the argument list is large.
+        // Keep only the small fields the UI needs, rather than whole SVNInfo
+        // records, and do not guess from revisions on copied additions.
+        do {
+            let invocation = try builder.makeInvocation(for: .infoTargets(paths: paths), in: workingCopy)
+            let result = try await runner.run(invocation)
+            try Task.checkCancellation()
+            guard result.succeeded else { return [:] }
+            var metadata: [String: MissingStatusInfo] = [:]
+            metadata.reserveCapacity(paths.count)
+            for info in try SVNXMLParser.parseInfos(result.standardOutput) {
+                let url = info.path.hasPrefix("/")
+                    ? URL(fileURLWithPath: info.path)
+                    : workingCopy.localPath.appendingPathComponent(info.path)
+                metadata[url.standardizedFileURL.path] = MissingStatusInfo(
+                    schedule: info.schedule, kind: info.kind
+                )
+            }
+            return metadata
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            try Task.checkCancellation()
+            // A transient info failure must not hide an otherwise valid status
+            // snapshot. Unknown schedules disable the schedule-specific actions.
+            return [:]
         }
     }
 
@@ -1116,10 +1291,21 @@ private struct DirectoryDiskChild: Sendable {
     let modifiedAt: Date?
 }
 
+private struct MissingStatusInfo: Sendable {
+    let schedule: String?
+    let kind: SVNNodeKind
+}
+
+private struct StatusListingSnapshot: Sendable {
+    let entries: [SvnDockCore.StatusEntry]
+    let missingInfoByPath: [String: MissingStatusInfo]
+}
+
 private struct DirectoryListingSnapshot: Sendable {
     let directoryURL: URL
     let diskChildren: [DirectoryDiskChild]
     let statusEntries: [SvnDockCore.StatusEntry]
+    let missingInfoByPath: [String: MissingStatusInfo]
 }
 
 private struct SVNProcessFailure: LocalizedError, Sendable {

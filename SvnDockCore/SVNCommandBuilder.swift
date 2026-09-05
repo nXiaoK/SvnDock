@@ -175,6 +175,17 @@ public struct SVNCommandBuilder: Sendable {
                 escapePegRevision: true
             ))
 
+        case let .delete(paths):
+            // Only schedule local working-copy deletion. Keeping disk content
+            // protects a file recreated after the missing-file preflight.
+            arguments = ["delete", "--keep-local"]
+            appendCommonOptions(to: &arguments)
+            appendFileTargets(
+                try requiredSafePaths(paths, root: root, command: "delete", escapePegRevision: true),
+                to: &arguments,
+                files: &argumentFiles
+            )
+
         case let .revert(paths, depth):
             arguments = ["revert", "--depth", depth.rawValue]
             appendCommonOptions(to: &arguments)
@@ -375,11 +386,15 @@ public struct SVNCommandBuilder: Sendable {
         arguments.append(contentsOf: literalTargets)
     }
 
-    func normalizedLocalPaths(_ paths: [String], in workingCopy: WorkingCopy) throws -> [String] {
+    /// Returns working-copy-relative paths, accepting the root's physical
+    /// spelling too (for example /tmp and /private/tmp), without peg escaping.
+    public func normalizedLocalPaths(
+        _ paths: [String], in workingCopy: WorkingCopy, command: String = "revert"
+    ) throws -> [String] {
         try requiredSafePaths(
             paths,
             root: workingCopy.localPath.standardizedFileURL,
-            command: "revert",
+            command: command,
             escapePegRevision: false
         )
     }
