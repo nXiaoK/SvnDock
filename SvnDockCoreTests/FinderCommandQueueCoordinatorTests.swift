@@ -79,6 +79,47 @@ final class FinderCommandQueueCoordinatorTests: XCTestCase {
         XCTAssertTrue(applicationIDs.isEmpty)
         XCTAssertTrue(agentIDs.isEmpty)
         XCTAssertEqual(location, .completed(.completed))
+        XCTAssertTrue(try fileNames(in: directory.appendingPathComponent("command-queue")).isEmpty)
+        XCTAssertTrue(try fileNames(in: directory.appendingPathComponent("command-app-inbox")).isEmpty)
+    }
+
+    func testCompletedCopiesPublishedLaterAreRemovedFromTheHotQueue() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let command = makeCommand()
+        try await enqueue(command, in: directory)
+        let coordinator = try FinderCommandQueueCoordinator(directoryURL: directory)
+        let claimed = try await coordinator.claimCommand(id: command.id, as: .agent)
+        let executing = try await coordinator.markExecuting(XCTUnwrap(claimed))
+        try await coordinator.acknowledge(executing, outcome: .completed)
+
+        try await enqueue(command, in: directory)
+        let ids = try await coordinator.availableCommandIDs(for: .agent)
+
+        XCTAssertTrue(ids.isEmpty)
+        XCTAssertTrue(try fileNames(in: directory.appendingPathComponent("command-queue")).isEmpty)
+        let location = try await coordinator.location(of: command.id)
+        XCTAssertEqual(location, .completed(.completed))
+    }
+
+    func testMalformedReceiptDoesNotBlockUnrelatedCommands() async throws {
+        let directory = try makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let blocked = makeCommand()
+        let available = makeCommand()
+        try await enqueue(blocked, in: directory)
+        try await enqueue(available, in: directory)
+        let coordinator = try FinderCommandQueueCoordinator(directoryURL: directory)
+        try await coordinator.prepareDirectories()
+        let receiptURL = directory.appendingPathComponent("command-receipts")
+            .appendingPathComponent(blocked.id.uuidString.lowercased() + ".json")
+        try Data("{".utf8).write(to: receiptURL, options: .atomic)
+
+        let ids = try await coordinator.availableCommandIDs(for: .agent)
+
+        XCTAssertEqual(ids, [available.id])
+        XCTAssertTrue(try fileNames(in: directory.appendingPathComponent("command-queue"))
+            .contains(blocked.id.uuidString.lowercased() + ".json"))
     }
 
     func testAgentHandoffAtomicallyPublishesCommandOnlyToApplicationInbox() async throws {

@@ -226,7 +226,8 @@ public actor FinderCommandQueueCoordinator {
 
             // A durable receipt is the terminal authority for this immutable
             // request identifier. Never resurrect a duplicate pending file.
-            if try loadReceipt(id: id) != nil {
+            if let receipt = try loadReceipt(id: id) {
+                try retireCompletedCommandCopies(receipt.command)
                 return nil
             }
             for currentOwner in [FinderCommandConsumer.application, .agent] {
@@ -377,8 +378,22 @@ public actor FinderCommandQueueCoordinator {
             }
         }
 
-        return try candidates.filter { id, _ in
-            try loadReceipt(id: id) == nil
+        return candidates.filter { id, _ in
+            do {
+                guard try loadReceipt(id: id) != nil else { return true }
+                // Producers can leave or recreate duplicate pending files.
+                // Retire them once a terminal receipt exists so every idle
+                // Agent scan does not keep decoding the same old receipts.
+                try withStateLock {
+                    if let receipt = try loadReceipt(id: id) {
+                        try retireCompletedCommandCopies(receipt.command)
+                    }
+                }
+            } catch {
+                // An unreadable receipt fails closed for this UUID, without
+                // preventing unrelated queued commands from making progress.
+            }
+            return false
         }.sorted { lhs, rhs in
             if lhs.1 == rhs.1 { return lhs.0.uuidString < rhs.0.uuidString }
             return lhs.1 < rhs.1
@@ -508,6 +523,9 @@ public actor FinderCommandQueueCoordinator {
             } catch {
                 throw FinderCommandQueueError.filesystemFailure("remove a completed claim")
             }
+            // Receipt persistence already made this command terminal. Cleanup
+            // failure must not change its outcome; a later scan retries it.
+            try? retireCompletedCommandCopies(claim.command)
         }
     }
 
@@ -1142,6 +1160,26 @@ public actor FinderCommandQueueCoordinator {
                     throw FinderCommandQueueError.filesystemFailure(
                         "quarantine conflicting command copies"
                     )
+                }
+            }
+        }
+    }
+
+    /// Caller holds the state lock and has validated a terminal receipt.
+    /// Preserve conflicting payloads for inspection; only equivalent copies
+    /// of an already completed command may be discarded.
+    private func retireCompletedCommandCopies(_ command: FinderCommand) throws {
+        let directories = [applicationInboxURL, pendingURL]
+        switch existingCommandMatch(for: command, in: directories) {
+        case .absent:
+            return
+        case .conflicting:
+            try quarantineUnownedCommandCopies(id: command.id)
+        case .identical:
+            for directory in directories {
+                for url in commandURLs(id: command.id, in: directory) {
+                    guard fileManager.fileExists(atPath: url.path) else { continue }
+                    try fileManager.removeItem(at: url)
                 }
             }
         }

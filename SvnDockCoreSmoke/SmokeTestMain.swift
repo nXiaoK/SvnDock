@@ -8,6 +8,7 @@ struct SvnDockCoreSmokeTestMain {
         try commandBuilderChecks()
         try parserChecks()
         try diffRegressionChecks()
+        try await FinderQueueRegressionSmoke.run()
         try await HistoryRevisionSmoke.run()
         try locatorCheck()
         try await processRunnerCheck()
