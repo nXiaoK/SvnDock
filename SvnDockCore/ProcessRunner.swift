@@ -107,9 +107,16 @@ public struct ProcessRunner: ProcessRunning, Sendable {
 
         let state = RunningProcessState()
         return try await withTaskCancellationHandler {
-            try await Task.detached(priority: nil) {
-                try Self.runBlocking(invocation, state: state)
-            }.value
+            // Process.waitUntilExit and FileHandle I/O block threads. Keep them
+            // off Swift's cooperative executor so other async work can run even
+            // when several repositories have commands in flight.
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .utility).async {
+                    continuation.resume(with: Result {
+                        try Self.runBlocking(invocation, state: state)
+                    })
+                }
+            }
         } onCancel: {
             state.cancel()
         }
@@ -162,7 +169,12 @@ public struct ProcessRunner: ProcessRunning, Sendable {
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
-        let inputPipe = Pipe()
+        let inputPipe = invocation.standardInput == nil ? nil : Pipe()
+        if let inputPipe,
+           Darwin.fcntl(inputPipe.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) == -1 {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            throw ProcessRunnerError.launchFailed("Unable to configure standard input: \(error.localizedDescription)")
+        }
 
         var temporaryDirectory: URL?
         defer {
@@ -213,7 +225,11 @@ public struct ProcessRunner: ProcessRunning, Sendable {
         process.currentDirectoryURL = invocation.currentDirectoryURL
         process.standardOutput = outputPipe
         process.standardError = errorPipe
-        process.standardInput = inputPipe
+        if let inputPipe {
+            process.standardInput = inputPipe
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
 
         process.environment = environment
 
@@ -223,6 +239,7 @@ public struct ProcessRunner: ProcessRunning, Sendable {
 
         do {
             try process.run()
+            state.didLaunch(process)
         } catch {
             state.clear(process)
             throw ProcessRunnerError.launchFailed(error.localizedDescription)
@@ -244,19 +261,15 @@ public struct ProcessRunner: ProcessRunning, Sendable {
             drains.leave()
         }
 
-        if let standardInput = invocation.standardInput, !standardInput.isEmpty {
+        if let inputPipe, let standardInput = invocation.standardInput, !standardInput.isEmpty {
             do {
-                try inputPipe.fileHandleForWriting.write(contentsOf: standardInput)
+                try writeStandardInput(standardInput, to: inputPipe.fileHandleForWriting)
             } catch {
                 // A command is allowed to close stdin early; its exit status and
                 // stderr are more useful than turning that into a launch error.
             }
         }
-        try? inputPipe.fileHandleForWriting.close()
-
-        if state.isCancelled, process.isRunning {
-            process.terminate()
-        }
+        try? inputPipe?.fileHandleForWriting.close()
 
         process.waitUntilExit()
         drains.wait()
@@ -277,6 +290,27 @@ public struct ProcessRunner: ProcessRunning, Sendable {
             standardError: errors.value
         )
     }
+
+    private static func writeStandardInput(_ data: Data, to handle: FileHandle) throws {
+        // A child can close stdin before consuming it (including on cancel).
+        // F_SETNOSIGPIPE on this private pipe converts that into EPIPE without
+        // changing the app's signal handlers or other threads' signal masks.
+        // Write directly so partial writes and interruptions remain explicit.
+        try data.withUnsafeBytes { bytes in
+            guard let baseAddress = bytes.baseAddress else { return }
+            var offset = 0
+            while offset < bytes.count {
+                let written = Darwin.write(handle.fileDescriptor, baseAddress.advanced(by: offset), bytes.count - offset)
+                if written > 0 {
+                    offset += written
+                } else {
+                    let error = written == 0 ? EIO : errno
+                    if error == EINTR { continue }
+                    throw POSIXError(POSIXErrorCode(rawValue: error) ?? .EIO)
+                }
+            }
+        }
+    }
 }
 
 private final class LockedData: @unchecked Sendable {
@@ -296,6 +330,8 @@ private final class RunningProcessState: @unchecked Sendable {
     private let lock = NSLock()
     private var process: Process?
     private var cancelled = false
+    private var launched = false
+    private var terminationRequested = false
 
     var isCancelled: Bool {
         lock.withLock { cancelled }
@@ -317,14 +353,33 @@ private final class RunningProcessState: @unchecked Sendable {
         }
     }
 
-    func cancel() {
-        let processToTerminate: Process? = lock.withLock {
-            cancelled = true
-            return process
+    func didLaunch(_ process: Process) {
+        lock.withLock {
+            guard self.process === process else { return }
+            launched = true
+            if cancelled { terminateLocked() }
         }
+    }
 
-        if let processToTerminate, processToTerminate.isRunning {
-            processToTerminate.terminate()
+    func cancel() {
+        lock.withLock {
+            cancelled = true
+            if launched { terminateLocked() }
+        }
+    }
+
+    private func terminateLocked() {
+        guard !terminationRequested, let process, process.isRunning else { return }
+        terminationRequested = true
+        process.terminate()
+        // SVN normally handles SIGTERM and releases its locks. A stuck helper
+        // may ignore it; allow cleanup time, then ensure cancellation finishes.
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self, weak process] in
+            guard let self, let process else { return }
+            self.lock.withLock {
+                guard self.process === process, process.isRunning else { return }
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+            }
         }
     }
 }

@@ -136,4 +136,54 @@ final class ProcessRunnerTests: XCTestCase {
             XCTFail("Unexpected error: \(error)")
         }
     }
+
+    func testNoStandardInputIsImmediateEndOfFile() async throws {
+        let result = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/bin/cat"), arguments: []
+        ))
+        XCTAssertTrue(result.succeeded)
+        XCTAssertTrue(result.standardOutput.isEmpty)
+    }
+
+    func testLargeStandardInputIsDrainedWithoutDeadlock() async throws {
+        let input = Data(repeating: 0x61, count: 2_000_000)
+        let result = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/bin/cat"), arguments: [], standardInput: input
+        ))
+        XCTAssertTrue(result.succeeded)
+        XCTAssertEqual(result.standardOutput, input)
+    }
+
+    func testChildClosingStandardInputEarlyDoesNotTerminateTheApp() async throws {
+        let result = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/usr/bin/true"), arguments: [],
+            standardInput: Data(repeating: 0x61, count: 2_000_000)
+        ))
+        XCTAssertTrue(result.succeeded)
+    }
+
+    func testCancellationStopsChildIgnoringTerminationWhileInputIsBlocked() async throws {
+        let ready = FileManager.default.temporaryDirectory.appendingPathComponent("SvnDock-ready-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: ready) }
+        let task = Task {
+            try await ProcessRunner().run(ProcessInvocation(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "trap '' TERM; printf ready > \"$1\"; exec /bin/sleep 6", "svndock-test", ready.path],
+                standardInput: Data(repeating: 0x61, count: 2_000_000)
+            ))
+        }
+        defer { task.cancel() }
+        let deadline = Date().addingTimeInterval(3)
+        while !FileManager.default.fileExists(atPath: ready.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: ready.path))
+        let start = Date()
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError { }
+        XCTAssertLessThan(Date().timeIntervalSince(start), 4)
+    }
 }
