@@ -469,6 +469,7 @@ mkdir -p \
 echo "Building SvnDock $VERSION ($BUILD_NUMBER) for $ARCH..."
 swift build \
     --disable-sandbox \
+    --package-path "$ROOT_DIR" \
     --scratch-path "$SWIFTPM_SCRATCH" \
     -c release \
     --product SvnDock \
@@ -481,6 +482,7 @@ swift build \
 
 SWIFTPM_BIN_DIRECTORY="$(swift build \
     --disable-sandbox \
+    --package-path "$ROOT_DIR" \
     --scratch-path "$SWIFTPM_SCRATCH" \
     -c release \
     --show-bin-path)"
