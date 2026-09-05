@@ -13,7 +13,8 @@ struct SvnDockApplication: App {
         WindowGroup {
             SvnDockRootView(store: store)
         }
-        .defaultSize(width: 1_240, height: 760)
+        .defaultSize(width: 1_400, height: 860)
+        .windowToolbarStyle(.unifiedCompact)
         .commands {
             SvnDockCommands(store: store)
         }
@@ -30,6 +31,15 @@ struct SvnDockApplication: App {
             }
         }
         .defaultSize(width: 1_240, height: 760)
+
+        WindowGroup("提交详情", for: SvnDockRevisionRequest.self) { $request in
+            if let request {
+                HistoryRevisionView(store: store, request: request, expanded: true)
+                    .frame(minWidth: 960, minHeight: 560)
+                    .navigationTitle("r\(request.revision) — 提交详情")
+            }
+        }
+        .defaultSize(width: 1_240, height: 800)
 
         Settings {
             SvnDockSettingsView()
@@ -155,10 +165,13 @@ private struct UnavailableSvnDockService: SvnDockServicing {
     func directoryChildren(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] { throw unavailable }
     func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String { throw unavailable }
     func history(for workingCopy: SvnDockWorkingCopy, relativePaths: [String], limit: Int) async throws -> [SvnDockLogEntry] { throw unavailable }
+    func revisionDetails(revision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SVNRevisionDetails { throw unavailable }
+    func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL, in workingCopy: SvnDockWorkingCopy) async throws -> String { throw unavailable }
     func update(workingCopies: [SvnDockWorkingCopy]) async throws { throw unavailable }
     func commit(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws { throw unavailable }
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func unscheduleAdd(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
+    func cleanupMissingAdditions(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func resolve(relativePaths: [String], using resolution: SvnDockConflictResolution, in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func addIgnoreRules(_ rules: [SvnDockIgnoreRule], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }

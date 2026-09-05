@@ -1,4 +1,5 @@
 import Foundation
+import SvnDockCore
 
 /// Injectable boundary between the SwiftUI application and the SVN engine.
 ///
@@ -20,6 +21,9 @@ protocol SvnDockServicing: Sendable {
         relativePaths: [String],
         limit: Int
     ) async throws -> [SvnDockLogEntry]
+    func revisionDetails(revision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SVNRevisionDetails
+    func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL,
+                      in workingCopy: SvnDockWorkingCopy) async throws -> String
 
     func update(workingCopies: [SvnDockWorkingCopy]) async throws
     func commit(
@@ -29,6 +33,10 @@ protocol SvnDockServicing: Sendable {
     ) async throws
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws
     func unscheduleAdd(
+        relativePaths: [String],
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws
+    func cleanupMissingAdditions(
         relativePaths: [String],
         in workingCopy: SvnDockWorkingCopy
     ) async throws

@@ -3,11 +3,45 @@ import SwiftUI
 
 struct StatusListView: View {
     @ObservedObject var store: SvnDockStore
+    @State private var statusCounts: [SvnDockStatusFilter: Int] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
-            filterBar
-            Divider()
+            workspaceHeader(counts: statusCounts)
+            filterBar(counts: statusCounts)
+
+            if store.missingEntryCount > 0 {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label("\(store.missingEntryCount) 个项目在本地缺失", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                    HStack {
+                        Button("清理未提交的添加记录…") {
+                            store.requestMissingAdditionCleanup(allMissing: true)
+                        }
+                        .disabled(store.isInteractionBlocked)
+                        if store.groupedMissingCount > 0 {
+                            Spacer()
+                            Button(store.showsMissingDetails ? "合并目录" : "显示明细") {
+                                store.showsMissingDetails.toggle()
+                            }
+                        }
+                    }
+                    Text("仅清理已删除且尚未提交的新增项目，已纳管项目不会被清理。")
+                        .foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .stroke(Color.orange.opacity(0.18), lineWidth: 1)
+                        .allowsHitTesting(false)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
 
             if store.selectedWorkingCopy == nil {
                 SvnDockEmptyState(
@@ -36,77 +70,185 @@ struct StatusListView: View {
                     if store.hasMoreFilteredEntries {
                         HStack {
                             Spacer()
-                            Button("再显示 \(store.nextVisibleEntryCount) 项") {
+                            Button {
                                 store.showMoreStatusEntries()
+                            } label: {
+                                Text("再显示 \(store.nextVisibleEntryCount) 项")
+                                    .padding(.horizontal, 10)
+                                    .frame(minHeight: 32)
+                                    .contentShape(Rectangle())
                             }
-                            .buttonStyle(.borderless)
+                            .buttonStyle(SvnDockPlainButtonStyle())
                             Spacer()
                         }
                         .padding(.vertical, 8)
+                        .listRowSeparator(.hidden)
+                        .listRowBackground(Color.clear)
                     }
                 }
-                .listStyle(.inset)
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
                 .disabled(store.isInteractionBlocked)
             }
 
-            Divider()
             statusFooter
         }
-        .navigationTitle(store.selectedWorkingCopy?.name ?? "状态")
-        .searchable(text: $store.searchQuery, placement: .toolbar, prompt: "筛选路径")
+        .background(SvnDockTheme.surface)
+        .onReceive(store.$displayedEntries) { _ in
+            // Recount when the status presentation changes, never on each
+            // selection or diff-preview update in a large working copy.
+            statusCounts = makeStatusCounts()
+        }
     }
 
-    private var filterBar: some View {
-        HStack(spacing: 10) {
-            Picker("状态", selection: $store.statusFilter) {
-                ForEach(SvnDockStatusFilter.allCases) { filter in
-                    Text(filter.displayName).tag(filter)
-                }
+    private func makeStatusCounts() -> [SvnDockStatusFilter: Int] {
+        var counts = Dictionary(uniqueKeysWithValues: SvnDockStatusFilter.allCases.map { ($0, 0) })
+        for entry in store.entries {
+            for filter in SvnDockStatusFilter.allCases where filter.includes(entry) {
+                counts[filter, default: 0] += 1
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+        }
+        return counts
+    }
 
+    private func workspaceHeader(counts: [SvnDockStatusFilter: Int]) -> some View {
+        HStack(alignment: .center) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(store.statusFilter == .conflicts ? "冲突文件" : "工作区")
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundStyle(SvnDockTheme.text)
+                Text(workspaceSummary(counts: counts))
+                    .font(.system(size: 12))
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 4)
             Button {
                 Task { await store.reloadSelectedWorkingCopy() }
             } label: {
                 Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 13, weight: .medium))
+                    .frame(width: 18, height: 18)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(SvnDockButtonStyle())
             .disabled(store.selectedWorkingCopy == nil || store.isInteractionBlocked)
             .help("刷新状态")
+            .accessibilityLabel("刷新工作区状态")
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 20)
+        .padding(.bottom, 17)
+    }
+
+    private func workspaceSummary(counts: [SvnDockStatusFilter: Int]) -> String {
+        guard store.selectedWorkingCopy != nil else { return "选择工作副本以查看文件状态" }
+        if store.isBusy && store.entries.isEmpty { return "正在读取文件状态…" }
+        switch store.statusFilter {
+        case .conflicts:
+            return "发现 \(counts[.conflicts, default: 0]) 个项目存在冲突"
+        case .unversioned:
+            return "发现 \(counts[.unversioned, default: 0]) 个未纳管项目"
+        case .all, .changed:
+            let changed = counts[.changed, default: 0]
+            if changed == 0 && counts[.unversioned, default: 0] > 0 {
+                return "发现 \(counts[.unversioned, default: 0]) 个未纳管项目"
+            }
+            return changed == 0 ? "工作副本没有待提交的变更" : "发现 \(changed) 个项目发生变更"
+        }
+    }
+
+    private func filterBar(counts: [SvnDockStatusFilter: Int]) -> some View {
+        HStack(spacing: 5) {
+            ForEach(SvnDockStatusFilter.allCases) { filter in
+                let isSelected = store.statusFilter == filter
+                let count = counts[filter, default: 0]
+                Button {
+                    store.statusFilter = filter
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(filter.displayName)
+                            .fontWeight(isSelected ? .semibold : .medium)
+                        Text(count.formatted())
+                            .font(.system(size: 10, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(
+                                isSelected ? Color.white.opacity(0.22) : SvnDockTheme.secondaryText.opacity(0.09),
+                                in: Capsule()
+                            )
+                    }
+                    .font(.system(size: 11))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .foregroundStyle(isSelected ? SvnDockTheme.onAccent : SvnDockTheme.secondaryText)
+                    .frame(maxWidth: .infinity)
+                    .padding(.horizontal, 6)
+                    .frame(height: 32)
+                    .contentShape(Rectangle())
+                    .background(
+                        isSelected ? SvnDockTheme.accent : SvnDockTheme.subtleSurface,
+                        in: RoundedRectangle(cornerRadius: 8)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isSelected ? SvnDockTheme.accent.opacity(0.5) : Color.clear, lineWidth: 1)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .buttonStyle(SvnDockPlainButtonStyle())
+                .accessibilityLabel("\(filter.displayName)，\(count) 项")
+                .accessibilityAddTraits(isSelected ? .isSelected : [])
+                .help("\(filter.displayName)：\(count) 项")
+            }
         }
         .padding(.horizontal, 12)
-        .frame(height: 42)
+        .padding(.bottom, 12)
     }
 
     @ViewBuilder
     private var statusFooter: some View {
-        HStack(spacing: 12) {
-            Text("\(store.filteredEntryCount) 项")
-            if store.hasMoreFilteredEntries {
-                Text("已显示 \(store.displayedEntries.count) 项")
-                Button("选择全部 \(store.filteredEntryCount) 项") {
-                    store.selectAllFilteredStatusEntries()
+        VStack(spacing: 6) {
+            HStack(spacing: 8) {
+                Text("\(store.filteredEntryCount) 项")
+                if store.hasMoreFilteredEntries {
+                    Text("已显示 \(store.displayedEntries.count) 项")
                 }
-                .buttonStyle(.borderless)
-                .disabled(store.isInteractionBlocked || store.isFilteringStatusEntries)
+                if store.isFilteringStatusEntries {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                Spacer(minLength: 4)
+                if !store.selectedEntryIDs.isEmpty {
+                    Text("已选择 \(store.selectedEntryIDs.count) 项")
+                        .foregroundStyle(SvnDockTheme.accent)
+                }
             }
-            if store.isFilteringStatusEntries {
-                ProgressView()
-                    .controlSize(.small)
-            }
-            if !store.selectedEntryIDs.isEmpty {
-                Text("已选择 \(store.selectedEntryIDs.count) 项")
-            }
-            Spacer()
-            if let refreshedAt = store.selectedWorkingCopy?.lastRefreshedAt {
-                Text("刷新于 \(refreshedAt.formatted(date: .omitted, time: .shortened))")
+            if store.hasMoreFilteredEntries {
+                HStack {
+                    Button {
+                        store.selectAllFilteredStatusEntries()
+                    } label: {
+                        Text("选择全部 \(store.filteredEntryCount) 项")
+                            .padding(.horizontal, 8)
+                            .frame(minHeight: 32)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(SvnDockPlainButtonStyle())
+                    .disabled(store.isInteractionBlocked || store.isFilteringStatusEntries)
+                    Spacer()
+                }
             }
         }
-        .font(.caption)
-        .foregroundStyle(.secondary)
-        .padding(.horizontal, 12)
-        .frame(height: 28)
+        .font(.system(size: 10))
+        .foregroundStyle(SvnDockTheme.secondaryText)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 11)
+        .background(SvnDockTheme.subtleSurface.opacity(0.6))
+        .overlay(alignment: .top) {
+            Rectangle().fill(SvnDockTheme.border).frame(height: 1)
+                .allowsHitTesting(false)
+        }
     }
 
     private var statusTreeRows: [StatusTreeRow] {
@@ -176,7 +318,11 @@ struct StatusListView: View {
         switch row.kind {
         case let .entry(entry):
             StatusTreeEntryRowView(store: store, entry: entry, depth: row.depth)
+                .svnDockCardSelection()
                 .tag(entry.id)
+                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 8, trailing: 12))
+                .listRowSeparator(.hidden)
+                .listRowBackground(Color.clear)
         case .loading:
             directoryMessage(depth: row.depth) {
                 ProgressView()
@@ -189,17 +335,27 @@ struct StatusListView: View {
                     .foregroundStyle(.orange)
                 Text(message)
                     .lineLimit(2)
-                Button("重试") {
+                Button {
                     store.retryDirectoryLoad(for: parent)
+                } label: {
+                    Text("重试")
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: 32)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(SvnDockPlainButtonStyle())
             }
         case let .more(parent, count):
             directoryMessage(depth: row.depth) {
-                Button("再显示 \(count) 项") {
+                Button {
                     store.showMoreDirectoryChildren(for: parent)
+                } label: {
+                    Text("再显示 \(count) 项")
+                        .padding(.horizontal, 8)
+                        .frame(minHeight: 32)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(SvnDockPlainButtonStyle())
             }
         }
     }
@@ -213,6 +369,8 @@ struct StatusListView: View {
             .foregroundStyle(.secondary)
             .padding(.leading, CGFloat(depth) * 18 + 18)
             .padding(.vertical, 5)
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
     }
 
 }
@@ -266,12 +424,27 @@ private struct StatusTreeEntryRowView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        HStack(spacing: 2) {
+        HStack(spacing: 4) {
             expansionControl
             StatusEntryRow(entry: entry)
         }
-        .padding(.leading, CGFloat(depth) * 18)
-        .contentShape(Rectangle())
+        .padding(.horizontal, 10)
+        .padding(.vertical, 12)
+        .background(
+            store.selectedEntryIDs.contains(entry.id) ? SvnDockTheme.selection : SvnDockTheme.surface,
+            in: RoundedRectangle(cornerRadius: 10)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(
+                    store.selectedEntryIDs.contains(entry.id)
+                        ? SvnDockTheme.accent.opacity(0.2) : SvnDockTheme.border,
+                    lineWidth: 1
+                )
+                .allowsHitTesting(false)
+        }
+        .padding(.leading, CGFloat(depth) * 16)
+        .contentShape(RoundedRectangle(cornerRadius: 10))
         .simultaneousGesture(
             TapGesture(count: 2).onEnded {
                 if store.canExpandDirectory(entry) {
@@ -294,12 +467,11 @@ private struct StatusTreeEntryRowView: View {
                     ? "chevron.down"
                     : "chevron.right")
                     .font(.caption.weight(.semibold))
-                    .frame(width: 16, height: 20)
+                    .frame(width: 32, height: 32)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(SvnDockPlainButtonStyle())
             .help(store.isDirectoryExpanded(entry) ? "收起目录" : "展开目录")
-        } else {
-            Color.clear.frame(width: 16, height: 20)
         }
     }
 
@@ -330,12 +502,21 @@ private struct StatusTreeEntryRowView: View {
         }
 
         if entry.status.isChange {
-            if entry.nodeKind == .file {
+            if entry.nodeKind == .file && entry.status != .missing {
                 Button("在窗口中查看差异") {
                     openDiffWindow()
                 }
             }
-            if entry.status == .added {
+            if entry.status == .missing {
+                Button("清理缺失的添加记录…") {
+                    store.selectedEntryIDs = [entry.id]
+                    store.requestMissingAdditionCleanup(for: entry)
+                }
+                Button("还原已纳管文件…", role: .destructive) {
+                    store.selectedEntryIDs = [entry.id]
+                    store.requestRevertConfirmation()
+                }
+            } else if entry.status == .added {
                 Button("取消添加…") {
                     store.selectedEntryIDs = [entry.id]
                     store.requestUnscheduleAddConfirmation(for: entry)
@@ -384,6 +565,7 @@ private struct StatusTreeEntryRowView: View {
         guard entry.nodeKind == .file,
               entry.status != .unversioned,
               entry.status != .ignored,
+              entry.status != .missing,
               entry.status != .external else { return }
         store.selectedEntryIDs = [entry.id]
         openWindow(value: SvnDockDiffRequest(
@@ -398,44 +580,46 @@ private struct StatusEntryRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: entry.status.symbolName)
-                .foregroundStyle(entry.status.tint)
-                .frame(width: 18)
+            SvnDockFileIcon(entry: entry, size: 38)
 
-            Image(systemName: entry.nodeKind == .directory ? "folder.fill" : "doc.fill")
-                .foregroundStyle(entry.nodeKind == .directory ? .blue : .secondary)
-                .frame(width: 17)
-
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.fileName)
-                    .lineLimit(1)
-                HStack(spacing: 5) {
-                    Text(entry.status.displayName)
-                        .foregroundStyle(entry.status.tint)
-                    if !entry.parentPath.isEmpty {
-                        Text(entry.parentPath)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                    }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(entry.fileName)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(SvnDockTheme.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    SvnDockStatusPill(status: entry.status)
+                        .fixedSize()
+                }
+                HStack(spacing: 6) {
+                    Text(entry.parentPath.isEmpty ? "/" : entry.parentPath)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     if let changelist = entry.changelist {
                         Text(changelist)
-                            .padding(.horizontal, 4)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                            .lineLimit(1)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(SvnDockTheme.secondaryText.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
+                    }
+                    if let repositoryStatus = entry.repositoryStatus, repositoryStatus != .clean {
+                        Image(systemName: "arrow.down.circle.fill")
+                            .foregroundStyle(repositoryStatus.tint)
+                            .help("仓库端：\(repositoryStatus.displayName)")
                     }
                 }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 6)
-
-            if let repositoryStatus = entry.repositoryStatus, repositoryStatus != .clean {
-                Image(systemName: "arrow.down.circle.fill")
-                    .foregroundStyle(repositoryStatus.tint)
-                    .help("仓库端：\(repositoryStatus.displayName)")
+                .font(.system(size: 11))
+                .foregroundStyle(SvnDockTheme.secondaryText)
+                if entry.missingDescendantCount > 0 {
+                    Text("含 \(entry.missingDescendantCount) 个缺失子项")
+                        .font(.system(size: 10))
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                }
             }
         }
-        .padding(.vertical, 3)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(entry.relativePath)，\(entry.status.displayName)")

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -7,6 +8,8 @@ struct HistoryInspectorView: View {
     @State private var retainedEntries: [SvnDockLogEntry] = []
     @State private var retainedTargetID: String?
     @State private var isRequestingMore = false
+    @State private var selectedRevision: Int?
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -19,6 +22,7 @@ struct HistoryInspectorView: View {
             retainedTargetID = targetID
             retainedEntries = store.historyEntries
             isRequestingMore = false
+            selectedRevision = nil
         }
         .onChange(of: store.historyEntries) { _, entries in
             guard !entries.isEmpty else { return }
@@ -67,9 +71,9 @@ struct HistoryInspectorView: View {
                         Image(systemName: "arrow.clockwise")
                     }
                 }
-                .frame(width: 16, height: 16)
+                .frame(width: 32, height: 32)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(SvnDockPlainButtonStyle())
             .disabled(store.selectedWorkingCopy == nil || store.isLoadingHistory)
             .help("重新载入提交历史")
         }
@@ -124,22 +128,48 @@ struct HistoryInspectorView: View {
                 Divider()
             }
 
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 0) {
-                    ForEach(Array(displayedEntries.enumerated()), id: \.element.id) { index, entry in
+            VSplitView {
+                List(selection: $selectedRevision) {
+                    ForEach(displayedEntries) { entry in
                         HistoryEntryRow(entry: entry)
-                        if index < displayedEntries.count - 1 {
-                            Divider()
-                                .padding(.leading, 16)
-                        }
+                            .tag(entry.revision)
+                            .onTapGesture(count: 2) {
+                                selectedRevision = entry.revision
+                                if let request = revisionRequest { openWindow(value: request) }
+                            }
+                            .contextMenu {
+                                Button("在独立窗口中查看提交详情") {
+                                    selectedRevision = entry.revision
+                                    if let request = revisionRequest { openWindow(value: request) }
+                                }
+                                Button("复制版本号") { copy("r\(entry.revision)") }
+                                Button("复制提交说明") { copy(entry.message) }
+                            }
                     }
                 }
-                .padding(.vertical, 4)
+                .listStyle(.plain)
+                .frame(minHeight: 120, idealHeight: 180, maxHeight: revisionRequest == nil ? .infinity : 240)
+
+                if let request = revisionRequest {
+                    HistoryRevisionView(store: store, request: request)
+                        .id(request)
+                        .frame(minHeight: 320)
+                }
             }
 
             Divider()
             historyFooter
         }
+    }
+
+    private var revisionRequest: SvnDockRevisionRequest? {
+        guard let selectedRevision, let target = store.historyTarget else { return nil }
+        return SvnDockRevisionRequest(workingCopyID: target.workingCopy.id, revision: selectedRevision)
+    }
+
+    private func copy(_ text: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
     }
 
     private func historyErrorBanner(_ message: String) -> some View {
@@ -164,6 +194,7 @@ struct HistoryInspectorView: View {
     private var historyFooter: some View {
         HStack(spacing: 10) {
             Text("已显示 \(displayedEntries.count) 条")
+            if selectedRevision == nil { Text("选择提交以预览差异").lineLimit(1) }
             Spacer()
 
             if store.isLoadingHistory {
@@ -171,14 +202,18 @@ struct HistoryInspectorView: View {
                     .controlSize(.small)
                 Text(isRequestingMore ? "正在加载更多…" : "正在刷新…")
             } else if store.canLoadMoreHistory {
-                Button("加载更多") {
+                Button {
                     isRequestingMore = true
                     Task {
                         await store.loadMoreHistory()
                         isRequestingMore = false
                     }
+                } label: {
+                    Text("加载更多")
+                        .padding(.horizontal, 8)
+                        .frame(height: 26)
                 }
-                .buttonStyle(.borderless)
+                .buttonStyle(SvnDockPlainButtonStyle())
             }
         }
         .font(.caption)
@@ -232,10 +267,9 @@ private struct HistoryEntryRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
-                Text("r\(entry.revision)")
+                Text(verbatim: "r\(entry.revision)")
                     .font(.system(.callout, design: .monospaced).weight(.semibold))
                     .foregroundStyle(.tint)
-                    .textSelection(.enabled)
 
                 Label(author, systemImage: "person.circle")
                     .lineLimit(1)
@@ -250,11 +284,10 @@ private struct HistoryEntryRow: View {
 
             Text(message)
                 .font(.callout)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+                .lineLimit(2)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 11)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)

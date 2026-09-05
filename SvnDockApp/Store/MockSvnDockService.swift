@@ -1,4 +1,5 @@
 import Foundation
+import SvnDockCore
 
 /// Deterministic data source for previews and UI tests. The shipping app should
 /// inject the SvnDockCore-backed service from `SvnDockApp.swift`.
@@ -77,6 +78,44 @@ actor MockSvnDockService: SvnDockServicing {
         return Array(Self.exampleHistory.prefix(limit))
     }
 
+    func revisionDetails(revision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SVNRevisionDetails {
+        await briefDelay()
+        let historical = Self.exampleHistory.first { $0.revision == revision }
+        return SVNRevisionDetails(
+            repositoryRootURL: URL(string: "https://svn.example.com/project")!,
+            entry: SVNLogEntry(revision: revision, author: historical?.author ?? "xiaok",
+                               date: historical?.date ?? Date(timeIntervalSince1970: 1_788_573_600),
+                               message: historical?.message ?? "完善支付接口文档与参数校验\n补充中文说明，整理错误返回。"),
+            changes: [
+                .init(path: "/trunk/docs/API.md", action: .modified, kind: .file),
+                .init(path: "/trunk/src/payment.ts", action: .modified, kind: .file),
+                .init(path: "/trunk/docs/使用说明.md", action: .added, kind: .file),
+                .init(path: "/trunk/docs/legacy.md", action: .deleted, kind: .file),
+                .init(path: "/trunk/src/client.ts", action: .added, kind: .file,
+                      copyFromPath: "/trunk/src/request.ts", copyFromRevision: max(0, revision - 1), isMove: true),
+                .init(path: "/trunk/assets/logo.png", action: .modified, kind: .file),
+                .init(path: "/trunk/docs", action: .modified, kind: .directory)
+            ]
+        )
+    }
+
+    func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL,
+                      in workingCopy: SvnDockWorkingCopy) async throws -> String {
+        await briefDelay()
+        if change.kind == .directory {
+            return "Property changes on: \(change.path)\nAdded: svn:ignore\n## -0,0 +1 ##\n+*.tmp\n"
+        }
+        if change.path.hasSuffix(".png") { return "Cannot display: file marked as a binary type.\nsvn:mime-type = image/png\n" }
+        switch change.action {
+        case .added:
+            if change.comparesCopySource { return "" }
+            return "@@ -0,0 +1,2 @@\n+# 使用说明\n+新增支付接口使用指南。\n"
+        case .deleted: return "@@ -1,2 +0,0 @@\n-# 旧版接口\n-本接口已弃用。\n"
+        default:
+            return "--- \(change.path)\t(revision \(revision - 1))\n+++ \(change.path)\t(revision \(revision))\n@@ -4,3 +4,4 @@\n ## 支付接口\n-旧版参数说明\n+补充中文参数说明\n+新增错误码与处理建议\n 示例：\n@@ -28,2 +29,2 @@\n-返回通用错误\n+返回明确的参数校验结果\n 请求结束。\n"
+        }
+    }
+
     func update(workingCopies: [SvnDockWorkingCopy]) async throws {
         await operationDelay()
     }
@@ -122,6 +161,15 @@ actor MockSvnDockService: SvnDockServicing {
             }
         }
         entriesByWorkingCopyID[workingCopy.id] = entries
+    }
+
+    func cleanupMissingAdditions(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
+        await briefDelay()
+        entriesByWorkingCopyID[workingCopy.id]?.removeAll { entry in
+            entry.status == .missing && relativePaths.contains { target in
+                entry.relativePath == target || entry.relativePath.hasPrefix(target + "/")
+            }
+        }
     }
 
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {
@@ -280,7 +328,7 @@ actor MockSvnDockService: SvnDockServicing {
         """
         --- \(relativePath) (base)
         +++ \(relativePath) (working copy)
-        @@ -18,6 +18,9 @@
+        @@ -18,4 +18,6 @@
          struct WorkingCopyView: View {
              let workingCopy: WorkingCopy
         -    var showsStatus = false

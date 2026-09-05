@@ -21,6 +21,15 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Register multiple SVN working copies with no application-imposed limit.
 - View local status, filter changed paths, inspect text diffs and browse
   repository history.
+- Switch between unified, side-by-side and raw diffs with actual file line
+  numbers, hunk navigation, automatic wrapping, full-patch copying and 10–20 pt
+  text sizing. The inspector and standalone window share the same viewer.
+- Expand commit diffs with **放大查看** (Shift-Command-F) to read changes and
+  navigate files. **返回提交** or Escape returns to the draft with its message
+  and file selection preserved.
+- Select a history entry to browse its changed paths and historical diffs, or
+  double-click for a larger commit detail window. Added/deleted/replaced paths,
+  copy/move ancestry, directory properties and binary output are supported.
 - Run Update, Commit, Add, Revert, Resolve, Cleanup and safe `svn:ignore`
   workflows.
 - Use Finder contextual menus for frequent operations.
@@ -31,6 +40,20 @@ SvnDock does not invoke Git or intentionally modify `.git`.
   shell.
 - Leave authentication to the installed SVN client and its configuration;
   SvnDock does not accept or persist passwords.
+
+Large commits use a temporary targets file and remain a single SVN transaction.
+Missing files are excluded from the commit checklist: restore the file, cancel
+its pending addition, or schedule its deletion as appropriate before retrying.
+Committing a directory still includes its descendants, which may contain missing
+files. SvnDock does not automatically change their add/delete schedules.
+
+If a directory was added locally, never committed, then deleted from disk, use
+**Clean uncommitted addition records** in the missing-items banner (or the
+directory's context menu). SvnDock verifies that the selected roots are missing
+pending additions before cancelling their schedules recursively. It does not
+delete disk contents or commit repository changes. Missing versioned items block
+the cleanup; select only the intended pending additions in that case. Missing
+subtrees are grouped by default; use **Show details** or search to inspect them.
 
 ## Compatibility
 

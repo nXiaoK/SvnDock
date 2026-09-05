@@ -24,6 +24,9 @@ final class SvnDockStore: ObservableObject {
     @Published var searchQuery = "" {
         didSet { rebuildStatusPresentation(resetLimit: true, debounce: true) }
     }
+    @Published var showsMissingDetails = false {
+        didSet { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+    }
     @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
     @Published private(set) var filteredEntryCount = 0
     @Published private(set) var isFilteringStatusEntries = false
@@ -85,6 +88,7 @@ final class SvnDockStore: ObservableObject {
     private var directoryTreeGeneration = UUID()
     private var directoryLoadTasks: [SvnDockStatusEntry.ID: Task<Void, Never>] = [:]
     private var historyLoadGeneration: UUID?
+    private var diffLoadGeneration = UUID()
     private var historyLoadTask: Task<Void, Never>?
     private var historyNeedsReload = false
     private var isFinderQueueRecoveryPaused = false
@@ -125,6 +129,8 @@ final class SvnDockStore: ObservableObject {
     }
 
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
+    var missingEntryCount: Int { statusSnapshot.missingEntries.count }
+    var groupedMissingCount: Int { statusSnapshot.groupedMissingCount }
 
     var hasMoreFilteredEntries: Bool {
         displayedEntries.count < filteredEntryCount
@@ -691,9 +697,42 @@ final class SvnDockStore: ObservableObject {
         pendingUnscheduleAdd = PendingUnscheduleAdd(
             workingCopy: workingCopy,
             relativePaths: selected.map(\.relativePath),
-            finderClaim: finderClaim
+            finderClaim: finderClaim,
+            missingOnly: false
         )
         isPresentingUnscheduleAddConfirmation = true
+    }
+
+    func requestMissingAdditionCleanup(for entry: SvnDockStatusEntry? = nil, allMissing: Bool = false) {
+        guard !isInteractionBlocked, let workingCopy = selectedWorkingCopy else { return }
+        let selected: [SvnDockStatusEntry]
+        if allMissing {
+            selected = statusSnapshot.missingEntries
+        } else if let entry, let current = statusEntry(withID: entry.id), current.status == .missing {
+            selected = [current]
+        } else {
+            selected = selectedStatusEntries { $0.status == .missing }
+        }
+        guard !selected.isEmpty else { return }
+        pendingUnscheduleAdd = PendingUnscheduleAdd(
+            workingCopy: workingCopy,
+            relativePaths: selected.map(\.relativePath),
+            finderClaim: nil,
+            missingOnly: true
+        )
+        isPresentingUnscheduleAddConfirmation = true
+    }
+
+    var isConfirmingMissingAdditionCleanup: Bool { pendingUnscheduleAdd?.missingOnly == true }
+
+    var unscheduleAddConfirmationMessage: String {
+        guard let request = pendingUnscheduleAdd else { return "" }
+        let paths = request.relativePaths.prefix(3).joined(separator: "\n")
+        let summary = request.relativePaths.count > 3 ? paths + "\n等 \(request.relativePaths.count) 个项目" : paths
+        if request.missingOnly {
+            return "将取消缺失项目尚未提交的添加计划，目录包含其子项。不会恢复文件、删除磁盘内容或提交仓库变更。若发现已纳管或状态已变化的项目，本次清理将停止。\n\n\(summary)"
+        }
+        return "文件和目录会保留在磁盘上，但将恢复为未纳管状态，不会包含在下次提交中。\n\n\(summary)"
     }
 
     func cancelUnscheduleAddConfirmation() {
@@ -742,10 +781,11 @@ final class SvnDockStore: ObservableObject {
         var succeeded = false
         do {
             try Task.checkCancellation()
-            try await service.unscheduleAdd(
-                relativePaths: request.relativePaths,
-                in: request.workingCopy
-            )
+            if request.missingOnly {
+                try await service.cleanupMissingAdditions(relativePaths: request.relativePaths, in: request.workingCopy)
+            } else {
+                try await service.unscheduleAdd(relativePaths: request.relativePaths, in: request.workingCopy)
+            }
             succeeded = true
         } catch is CancellationError {
             if let executingClaim {
@@ -766,8 +806,8 @@ final class SvnDockStore: ObservableObject {
             _ = await acknowledgeFinderClaim(executingClaim, outcome: .completed)
         }
         activeOperation = nil
-        if succeeded, selectedWorkingCopyID == request.workingCopy.id {
-            await reloadSelectedWorkingCopy()
+        if selectedWorkingCopyID == request.workingCopy.id {
+            await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
         }
         await processPendingFinderCommands()
     }
@@ -1343,13 +1383,16 @@ final class SvnDockStore: ObservableObject {
            !(await waitForFinderRoutingToFinish()) {
             return false
         }
+        let generation = UUID()
+        diffLoadGeneration = generation
         guard
             selectedEntryIDs.count == 1,
             let workingCopy = selectedWorkingCopy,
             let entry = primarySelectedEntry,
             entry.nodeKind == .file,
             entry.status != .unversioned,
-            entry.status != .ignored
+            entry.status != .ignored,
+            entry.status != .missing
         else {
             diffText = ""
             isLoadingDiff = false
@@ -1358,20 +1401,30 @@ final class SvnDockStore: ObservableObject {
 
         let expectedEntryID = entry.id
         isLoadingDiff = true
-        defer { isLoadingDiff = false }
+        diffText = ""
+        defer {
+            if diffLoadGeneration == generation { isLoadingDiff = false }
+        }
+
+        func isCurrentRequest() -> Bool {
+            !Task.isCancelled && diffLoadGeneration == generation
+                && selectedWorkingCopyID == workingCopy.id
+                && selectedEntryIDs.count == 1
+                && primarySelectedEntry?.id == expectedEntryID
+        }
 
         do {
             let loadedDiff = try await service.diff(
                 relativePath: entry.relativePath,
                 in: workingCopy
             )
-            guard primarySelectedEntry?.id == expectedEntryID else { return false }
+            guard isCurrentRequest() else { return false }
             diffText = loadedDiff
             return true
         } catch is CancellationError {
             return false
         } catch {
-            guard primarySelectedEntry?.id == expectedEntryID else { return false }
+            guard isCurrentRequest() else { return false }
             diffText = ""
             present(error, title: "无法读取差异")
             return false
@@ -1390,6 +1443,22 @@ final class SvnDockStore: ObservableObject {
             relativePath: request.relativePath,
             in: workingCopy
         )
+    }
+
+    func revisionDetails(for request: SvnDockRevisionRequest) async throws -> SVNRevisionDetails {
+        guard let copy = workingCopies.first(where: { $0.id == request.workingCopyID }) else {
+            throw SvnDockServiceError.unavailable("该工作副本已不在登记列表中。")
+        }
+        return try await service.revisionDetails(revision: request.revision, in: copy)
+    }
+
+    func revisionDiff(for request: SvnDockRevisionRequest, change: SVNChangedPath,
+                      repositoryRoot: URL) async throws -> String {
+        guard let copy = workingCopies.first(where: { $0.id == request.workingCopyID }) else {
+            throw SvnDockServiceError.unavailable("该工作副本已不在登记列表中。")
+        }
+        return try await service.revisionDiff(revision: request.revision, change: change,
+                                              repositoryRoot: repositoryRoot, in: copy)
     }
 
     func showHistoryForSelection(
@@ -1937,7 +2006,8 @@ final class SvnDockStore: ObservableObject {
 
         let normalizedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let filter = statusFilter
-        let sourceEntries = statusSnapshot.entries
+        let sourceEntries = showsMissingDetails || !normalizedQuery.isEmpty
+            ? statusSnapshot.entries : statusSnapshot.groupedEntries
 
         if filter == .all, normalizedQuery.isEmpty {
             applyFilteredStatusEntries(sourceEntries, generation: generation)
@@ -2482,6 +2552,7 @@ private struct PendingUnscheduleAdd: Sendable {
     let workingCopy: SvnDockWorkingCopy
     let relativePaths: [String]
     let finderClaim: FinderCommandClaim?
+    let missingOnly: Bool
 }
 
 private struct PendingRevert: Sendable {

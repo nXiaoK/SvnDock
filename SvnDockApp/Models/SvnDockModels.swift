@@ -135,6 +135,19 @@ struct SvnDockDiffRequest: Codable, Hashable, Sendable {
     }
 }
 
+struct SvnDockRevisionRequest: Codable, Hashable, Sendable, Identifiable {
+    let workingCopyID: UUID
+    let revision: Int
+    let preferredPath: String?
+
+    init(workingCopyID: UUID, revision: Int, preferredPath: String? = nil) {
+        self.workingCopyID = workingCopyID
+        self.revision = revision
+        self.preferredPath = preferredPath
+    }
+    var id: String { "\(workingCopyID)::\(revision)" }
+}
+
 enum SvnDockStatusKind: String, CaseIterable, Hashable, Sendable {
     case modified
     case added
@@ -175,9 +188,9 @@ enum SvnDockStatusKind: String, CaseIterable, Hashable, Sendable {
 
     var canCommit: Bool {
         switch self {
-        case .modified, .added, .deleted, .replaced, .missing:
+        case .modified, .added, .deleted, .replaced:
             true
-        case .conflicted, .unversioned, .ignored, .external, .obstructed, .clean:
+        case .missing, .conflicted, .unversioned, .ignored, .external, .obstructed, .clean:
             false
         }
     }
@@ -197,6 +210,7 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
     var lockOwner: String?
     var fileSize: Int64?
     var modifiedAt: Date?
+    var missingDescendantCount = 0
 
     init(
         workingCopyID: UUID,
@@ -233,7 +247,7 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
     }
 
     var parentPath: String {
-        let value = URL(fileURLWithPath: relativePath).deletingLastPathComponent().path
+        let value = (relativePath as NSString).deletingLastPathComponent
         return value == "." || value == "/" ? "" : value
     }
 }
@@ -246,13 +260,39 @@ struct SvnDockStatusSnapshot: Sendable {
     static let empty = SvnDockStatusSnapshot(entries: [])
 
     let entries: [SvnDockStatusEntry]
+    let groupedEntries: [SvnDockStatusEntry]
+    let missingEntries: [SvnDockStatusEntry]
+    let groupedMissingCount: Int
     let committableEntries: [SvnDockStatusEntry]
     let counts: SvnDockStatusCounts
 
     private let entryIndex: [SvnDockStatusEntry.ID: Int]
 
     init(entries unsortedEntries: [SvnDockStatusEntry]) {
-        let entries = unsortedEntries.sorted(by: Self.statusSort)
+        var enrichedEntries = unsortedEntries
+        let missingIndices = Dictionary(unsortedEntries.enumerated()
+            .filter { $0.element.status == .missing }
+            .map { ($0.element.id, $0.offset) }, uniquingKeysWith: { first, _ in first })
+        var groupedIDs = Set<SvnDockStatusEntry.ID>()
+        for index in enrichedEntries.indices { enrichedEntries[index].missingDescendantCount = 0 }
+        // Keep the full snapshot for operations/search, but coalesce missing
+        // subtrees in the default list. No disk access or per-row SVN calls.
+        for entry in unsortedEntries where entry.status == .missing {
+            var parent = (entry.relativePath as NSString).deletingLastPathComponent
+            var rootIndex: Int?
+            while !parent.isEmpty && parent != "/" {
+                if let index = missingIndices["\(entry.workingCopyID.uuidString)::\(parent)"] {
+                    enrichedEntries[index].nodeKind = .directory
+                    rootIndex = index
+                }
+                parent = (parent as NSString).deletingLastPathComponent
+            }
+            if let rootIndex {
+                enrichedEntries[rootIndex].missingDescendantCount += 1
+                groupedIDs.insert(entry.id)
+            }
+        }
+        let entries = enrichedEntries.sorted(by: Self.statusSort)
         var entryIndex: [SvnDockStatusEntry.ID: Int] = [:]
         var committableEntries: [SvnDockStatusEntry] = []
         var counts = SvnDockStatusCounts.zero
@@ -278,6 +318,9 @@ struct SvnDockStatusSnapshot: Sendable {
         }
 
         self.entries = entries
+        self.groupedEntries = entries.filter { !groupedIDs.contains($0.id) }
+        self.missingEntries = entries.filter { $0.status == .missing }
+        self.groupedMissingCount = groupedIDs.count
         self.entryIndex = entryIndex
         self.committableEntries = committableEntries
         self.counts = counts
