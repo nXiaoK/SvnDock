@@ -228,6 +228,29 @@ final class SVNCommandBuilderTests: XCTestCase {
         ))
     }
 
+    func testPhysicalRootAliasKeepsDeletedAndMissingPathsInsideWorkingCopy() throws {
+        let root = URL(fileURLWithPath: "/private/tmp", isDirectory: true)
+            .appendingPathComponent("SvnDock-path-alias-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("deleted.txt")
+        try Data("before deletion".utf8).write(to: file)
+        let copy = WorkingCopy(localPath: root)
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let before = try builder.makeInvocation(for: .diff(paths: [file.path]), in: copy)
+        try FileManager.default.removeItem(at: file)
+        let after = try builder.makeInvocation(for: .diff(paths: [file.path]), in: copy)
+        XCTAssertEqual(before.arguments, after.arguments)
+        XCTAssertEqual(after.arguments.last, "deleted.txt")
+
+        let missing = root.appendingPathComponent("missing-directory/child.txt")
+        let invocation = try builder.makeInvocation(for: .revert(paths: [missing.path], depth: .empty), in: copy)
+        XCTAssertEqual(invocation.arguments.last, "missing-directory/child.txt")
+        for outside in [root.path + "-sibling/file.txt", root.path + "/../outside.txt"] {
+            XCTAssertThrowsError(try builder.makeInvocation(for: .diff(paths: [outside]), in: copy))
+        }
+    }
+
     func testOperationMustBelongToWorkingCopy() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
         let workingCopy = WorkingCopy(localPath: rootURL)

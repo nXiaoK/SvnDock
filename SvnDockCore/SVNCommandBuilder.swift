@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 public enum SVNCommandBuilderError: Error, LocalizedError, Equatable, Sendable {
     case executableIsNotAbsoluteFileURL
@@ -351,17 +352,27 @@ public struct SVNCommandBuilder: Sendable {
         to arguments: inout [String],
         files: inout [ProcessArgumentFile]
     ) {
-        let fileTargets = targets.filter { !$0.contains("\n") && !$0.contains("\r") }
-        if !fileTargets.isEmpty {
+        var contents = Data()
+        var literalTargets: [String] = []
+        for target in targets {
+            if target.contains("\n") || target.contains("\r") {
+                literalTargets.append(target)
+            } else {
+                contents.append(contentsOf: [0x2e, 0x2f]) // ./
+                contents.append(contentsOf: target.utf8)
+                contents.append(0x0a)
+            }
+        }
+        if !contents.isEmpty {
             arguments.append("--targets")
             files.append(ProcessArgumentFile(
                 argumentIndex: arguments.count,
-                contents: Data((fileTargets.map { "./" + $0 }.joined(separator: "\n") + "\n").utf8)
+                contents: contents
             ))
             arguments.append("") // Replaced with a private file path by ProcessRunner.
         }
         arguments.append("--")
-        arguments.append(contentsOf: targets.filter { $0.contains("\n") || $0.contains("\r") })
+        arguments.append(contentsOf: literalTargets)
     }
 
     func normalizedLocalPaths(_ paths: [String], in workingCopy: WorkingCopy) throws -> [String] {
@@ -400,36 +411,54 @@ public struct SVNCommandBuilder: Sendable {
             return emptyMeansRoot ? ["."] : []
         }
 
+        let rootComponents = root.pathComponents
+        // Foundation sometimes simplifies /private/tmp to /tmp only when the
+        // complete path exists. Retain the same root's physical spelling too,
+        // so deleting a selected file cannot suddenly make it appear outside
+        // the working copy. Resolve the root once, never every selected file.
+        let physicalRootComponents: [String]? = root.path.withCString { path in
+            guard let resolved = realpath(path, nil) else { return nil }
+            defer { free(resolved) }
+            return ["/"] + String(cString: resolved).split(separator: "/").map(String.init)
+        }
         return try paths.map { path in
-            try validate(argument: path)
-            guard !path.isEmpty else {
-                throw SVNCommandBuilderError.invalidArgument("path cannot be empty")
-            }
+            // Foundation's URL normalization creates autoreleased objects.
+            // Release them per path instead of retaining tens of thousands
+            // of temporary objects until the caller's outer pool drains.
+            try autoreleasepool {
+                try validate(argument: path)
+                guard !path.isEmpty else {
+                    throw SVNCommandBuilderError.invalidArgument("path cannot be empty")
+                }
 
-            let candidate: URL
-            if path.hasPrefix("/") {
-                candidate = URL(fileURLWithPath: path).standardizedFileURL
-            } else {
-                candidate = root.appendingPathComponent(path).standardizedFileURL
-            }
+                let candidate: URL
+                if path.hasPrefix("/") {
+                    candidate = URL(fileURLWithPath: path).standardizedFileURL
+                } else {
+                    candidate = root.appendingPathComponent(path).standardizedFileURL
+                }
 
-            let rootComponents = root.pathComponents
-            let candidateComponents = candidate.pathComponents
-            guard candidateComponents.count >= rootComponents.count,
-                  Array(candidateComponents.prefix(rootComponents.count)) == rootComponents else {
-                throw SVNCommandBuilderError.pathOutsideWorkingCopy(path)
-            }
+                let candidateComponents = candidate.pathComponents
+                let rootComponentCount: Int
+                if candidateComponents.starts(with: rootComponents) {
+                    rootComponentCount = rootComponents.count
+                } else if let physicalRootComponents, candidateComponents.starts(with: physicalRootComponents) {
+                    rootComponentCount = physicalRootComponents.count
+                } else {
+                    throw SVNCommandBuilderError.pathOutsideWorkingCopy(path)
+                }
 
-            let relativeComponents = candidateComponents.dropFirst(rootComponents.count)
-            let relativePath = relativeComponents.isEmpty
-                ? "."
-                : relativeComponents.joined(separator: "/")
-            // In SVN syntax, `@` introduces a peg revision even when it is a
-            // literal filename character. A trailing empty peg keeps the full
-            // preceding string as the actual path (`name@host` -> `name@host@`).
-            return escapePegRevision && relativePath.contains("@")
-                ? relativePath + "@"
-                : relativePath
+                let relativeComponents = candidateComponents.dropFirst(rootComponentCount)
+                let relativePath = relativeComponents.isEmpty
+                    ? "."
+                    : relativeComponents.joined(separator: "/")
+                // In SVN syntax, `@` introduces a peg revision even when it is a
+                // literal filename character. A trailing empty peg keeps the full
+                // preceding string as the actual path (`name@host` -> `name@host@`).
+                return escapePegRevision && relativePath.contains("@")
+                    ? relativePath + "@"
+                    : relativePath
+            }
         }
     }
 
