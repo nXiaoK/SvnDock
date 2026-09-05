@@ -7,6 +7,9 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Explicit server-update checks show incoming content and property paths in a
+  separate snapshot, with timestamps, stale-result indicators and retry feedback.
+  Working-copy headers distinguish repository URLs, local paths and root baselines.
 - Read-only previews for unversioned UTF-8 files, local directory property diffs,
   persistent diff reading preferences and multi-selection action summaries.
 - Working-copy-specific commit drafts survive closing and restarting, with path

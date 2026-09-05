@@ -69,6 +69,8 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var historyErrorMessage: String?
 
     @Published private(set) var activeOperation: SvnDockOperationState?
+    @Published private var remoteStatusByWorkingCopyID: [UUID: SvnDockRemoteStatusState] = [:]
+    private var remoteStatusGeneration: [UUID: UUID] = [:]
     @Published var presentedError: SvnDockUserFacingError?
     @Published var isPresentingCommit = false
     @Published var isPresentingDirectoryImporter = false
@@ -152,6 +154,48 @@ final class SvnDockStore: ObservableObject {
         workingCopies.first { $0.id == selectedWorkingCopyID }
     }
 
+    var selectedRemoteStatus: SvnDockRemoteStatusState {
+        guard let id = selectedWorkingCopyID else { return SvnDockRemoteStatusState() }
+        return remoteStatusByWorkingCopyID[id] ?? SvnDockRemoteStatusState()
+    }
+
+    func checkSelectedRemoteStatus() async {
+        guard !isInteractionBlocked, let copy = selectedWorkingCopy else { return }
+        let generation = UUID()
+        remoteStatusGeneration[copy.id] = generation
+        var state = remoteStatusByWorkingCopyID[copy.id] ?? SvnDockRemoteStatusState()
+        state.isChecking = true
+        state.lastError = nil
+        remoteStatusByWorkingCopyID[copy.id] = state
+        activeOperation = SvnDockOperationState(kind: .checkingRemote, detail: copy.name)
+        do {
+            let snapshot = try await service.checkRemoteStatus(for: copy)
+            try Task.checkCancellation()
+            guard remoteStatusGeneration[copy.id] == generation,
+                  workingCopies.contains(where: { $0.id == copy.id && $0.rootURL == copy.rootURL }) else {
+                activeOperation = nil
+                return
+            }
+            state.snapshot = snapshot
+            state.isStale = false
+        } catch {
+            state.isStale = state.snapshot != nil
+            state.lastError = error is CancellationError ? "检查已取消。" : error.localizedDescription
+        }
+        state.isChecking = false
+        if remoteStatusGeneration[copy.id] == generation {
+            remoteStatusByWorkingCopyID[copy.id] = state
+        }
+        activeOperation = nil
+        await processPendingFinderCommands()
+    }
+
+    private func invalidateRemoteStatus(for id: UUID) {
+        guard var state = remoteStatusByWorkingCopyID[id] else { return }
+        state.isStale = state.snapshot != nil
+        remoteStatusByWorkingCopyID[id] = state
+    }
+
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
     var selectedEntries: [SvnDockStatusEntry] { selectedStatusEntries { _ in true } }
     var statusCounts: SvnDockStatusCounts { statusSnapshot.counts }
@@ -192,7 +236,7 @@ final class SvnDockStore: ObservableObject {
         }
         guard let kind = activeOperation?.kind else { return false }
         switch kind {
-        case .refreshing:
+        case .refreshing, .checkingRemote:
             return false
         case .loading, .updating, .committing, .adding, .unschedulingAdd, .deleting,
              .reverting, .cleaning, .resolving, .ignoring:
@@ -428,6 +472,12 @@ final class SvnDockStore: ObservableObject {
             let loadedEntries = try await loadStatusSnapshot(for: workingCopy)
             guard selectedWorkingCopyID == expectedID else { return }
             apply(loadedEntries, to: expectedID)
+            invalidateRemoteStatus(for: expectedID)
+            let metadata = try? await service.refreshWorkingCopyMetadata(for: workingCopy)
+            guard selectedWorkingCopyID == expectedID,
+                  let index = workingCopies.firstIndex(where: { $0.id == expectedID }) else { return }
+            workingCopies[index].repositoryURL = metadata?.repositoryURL
+            workingCopies[index].revision = metadata?.revision
         }
     }
 
@@ -572,6 +622,7 @@ final class SvnDockStore: ObservableObject {
         }
         let copies = workingCopies.filter { workingCopyIDs.contains($0.id) }
         guard !copies.isEmpty else { return false }
+        for copy in copies { invalidateRemoteStatus(for: copy.id) }
 
         let detail = copies.count == 1 ? copies[0].name : "\(copies.count) 个工作副本"
         let succeeded = await perform(
@@ -643,6 +694,7 @@ final class SvnDockStore: ObservableObject {
             finderClaim: pendingCommitClaim
         )
         pendingCommitClaim = nil
+        invalidateRemoteStatus(for: workingCopy.id)
         activeOperation = SvnDockOperationState(
             kind: .committing,
             detail: workingCopy.name
@@ -2254,6 +2306,7 @@ final class SvnDockStore: ObservableObject {
         switch kind {
         case .loading: "载入失败"
         case .refreshing: "刷新失败"
+        case .checkingRemote: "检查服务器失败"
         case .updating: "更新失败"
         case .committing: "提交失败"
         case .adding: "添加失败"

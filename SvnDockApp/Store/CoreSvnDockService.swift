@@ -171,6 +171,40 @@ actor CoreSvnDockService: SvnDockServicing {
         return SvnDockStatusSnapshot(entries: uiEntries)
     }
 
+    func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy {
+        var copy = coreWorkingCopy(for: workingCopy)
+        let info = try await loadInfo(for: copy)
+        copy.repositoryURL = info.url
+        copy.repositoryRootURL = info.repositoryRootURL
+        copy.repositoryUUID = info.repositoryUUID
+        copy.revision = info.revision
+        // Do not resurrect a registration removed while the read was running.
+        if coreWorkingCopies[copy.id]?.localPath == copy.localPath {
+            coreWorkingCopies[copy.id] = copy
+        }
+        return makeUIWorkingCopy(copy)
+    }
+
+    func checkRemoteStatus(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockRemoteStatusSnapshot {
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        let result = try await run(.status(SVNStatusOptions(showRemoteUpdates: true)), in: coreCopy)
+        let entries = try SVNXMLParser.parseStatus(
+            result.standardOutput, workingCopyURL: coreCopy.localPath, resolveNodeKinds: false
+        )
+        let changes = entries.compactMap { entry -> SvnDockRemoteStatusEntry? in
+            let status = entry.repositoryStatus ?? .none
+            let property = entry.repositoryPropertyStatus ?? .none
+            let contentChanged = status != .normal && status != .none
+            let propertiesChanged = property != .normal && property != .none
+            guard contentChanged || propertiesChanged else { return nil }
+            return SvnDockRemoteStatusEntry(
+                relativePath: relativePath(for: entry.fileURL(relativeTo: coreCopy), root: coreCopy.localPath),
+                status: mapStatus(status), propertiesChanged: propertiesChanged
+            )
+        }
+        return SvnDockRemoteStatusSnapshot(entries: changes)
+    }
+
     func directoryChildren(
         relativePath: String,
         in workingCopy: SvnDockWorkingCopy

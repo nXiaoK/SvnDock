@@ -435,6 +435,7 @@ enum SvnDockInspectorTab: String, CaseIterable, Identifiable {
 enum SvnDockOperationKind: Hashable, Sendable {
     case loading
     case refreshing
+    case checkingRemote
     case updating
     case committing
     case adding
@@ -449,6 +450,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
         switch self {
         case .loading: "正在载入工作副本…"
         case .refreshing: "正在刷新状态…"
+        case .checkingRemote: "正在检查服务器…"
         case .updating: "正在更新…"
         case .committing: "正在提交…"
         case .adding: "正在添加…"

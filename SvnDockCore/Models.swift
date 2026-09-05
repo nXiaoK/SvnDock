@@ -204,6 +204,7 @@ public struct StatusEntry: Identifiable, Codable, Hashable, Sendable {
     public let status: SVNStatus
     public let propertyStatus: SVNStatus
     public let repositoryStatus: SVNStatus?
+    public let repositoryPropertyStatus: SVNStatus?
     public let revision: Int?
     public let isCopied: Bool
     public let isSwitched: Bool
@@ -219,6 +220,7 @@ public struct StatusEntry: Identifiable, Codable, Hashable, Sendable {
         status: SVNStatus,
         propertyStatus: SVNStatus = .none,
         repositoryStatus: SVNStatus? = nil,
+        repositoryPropertyStatus: SVNStatus? = nil,
         revision: Int? = nil,
         isCopied: Bool = false,
         isSwitched: Bool = false,
@@ -232,6 +234,7 @@ public struct StatusEntry: Identifiable, Codable, Hashable, Sendable {
         self.status = status
         self.propertyStatus = propertyStatus
         self.repositoryStatus = repositoryStatus
+        self.repositoryPropertyStatus = repositoryPropertyStatus
         self.revision = revision
         self.isCopied = isCopied
         self.isSwitched = isSwitched

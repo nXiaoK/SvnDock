@@ -11,6 +11,8 @@ protocol SvnDockServicing: Sendable {
     func unregisterWorkingCopy(id: UUID) async throws
 
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot
+    func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy
+    func checkRemoteStatus(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockRemoteStatusSnapshot
     func directoryChildren(
         relativePath: String,
         in workingCopy: SvnDockWorkingCopy
@@ -55,6 +57,16 @@ protocol SvnDockServicing: Sendable {
         in workingCopy: SvnDockWorkingCopy
     ) async throws
     func cleanup(workingCopy: SvnDockWorkingCopy) async throws
+}
+
+extension SvnDockServicing {
+    func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy {
+        workingCopy
+    }
+
+    func checkRemoteStatus(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockRemoteStatusSnapshot {
+        throw SvnDockServiceError.unavailable("当前服务不支持检查服务器更新。")
+    }
 }
 
 enum SvnDockServiceError: LocalizedError {

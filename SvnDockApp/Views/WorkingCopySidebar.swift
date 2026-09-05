@@ -7,7 +7,7 @@ struct WorkingCopySidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text("代码仓库")
+                Text("工作副本")
                     .font(.system(size: 12, weight: .semibold))
                 Spacer()
                 Button {
@@ -79,7 +79,7 @@ struct WorkingCopySidebar: View {
                 Button {
                     store.requestDirectoryImport()
                 } label: {
-                    sidebarAction("添加仓库", symbol: "plus.circle")
+                    sidebarAction("添加工作副本", symbol: "plus.circle")
                 }
                 .disabled(store.isInteractionBlocked)
 
@@ -107,7 +107,7 @@ struct WorkingCopySidebar: View {
                     }
                     .disabled(store.selectedWorkingCopy == nil || store.isInteractionBlocked)
                 } label: {
-                    sidebarAction("仓库操作", symbol: "ellipsis.circle")
+                    sidebarAction("工作副本操作", symbol: "ellipsis.circle")
                 }
                 .menuStyle(.button)
                 .buttonStyle(SvnDockPlainButtonStyle())

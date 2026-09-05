@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -5,6 +6,7 @@ struct SvnDockRootView: View {
     @ObservedObject var store: SvnDockStore
 
     @FocusState private var isSearchFocused: Bool
+    @State private var isRemoteStatusPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -37,6 +39,7 @@ struct SvnDockRootView: View {
             Task { await store.handleFinderURL(url) }
         }
         .onChange(of: store.selectedWorkingCopyID) {
+            isRemoteStatusPresented = false
             let selectedID = store.selectedWorkingCopyID
             Task { await store.selectedWorkingCopyDidChange(to: selectedID) }
         }
@@ -181,7 +184,7 @@ struct SvnDockRootView: View {
     }
 
     private var commandBar: some View {
-        HStack(spacing: 24) {
+        HStack(spacing: 18) {
             HStack(spacing: 12) {
                 Image(systemName: "externaldrive.fill")
                     .font(.system(size: 28, weight: .medium))
@@ -189,13 +192,20 @@ struct SvnDockRootView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("SvnDock")
                         .font(.system(size: 19, weight: .semibold))
-                    Text("简单、从容地管理每一次变更")
-                        .font(.system(size: 11))
-                        .foregroundStyle(SvnDockTheme.secondaryText)
                 }
             }
             Spacer(minLength: 12)
-            HStack(spacing: 12) {
+            HStack(spacing: 8) {
+                command("刷新本地", symbol: "arrow.clockwise",
+                        disabled: store.selectedWorkingCopy == nil || store.isInteractionBlocked) {
+                    Task { await store.reloadSelectedWorkingCopy() }
+                }
+                command("检查服务器", symbol: "network",
+                        disabled: store.selectedWorkingCopy == nil || store.isInteractionBlocked
+                            || store.selectedRemoteStatus.isChecking) {
+                    isRemoteStatusPresented = true
+                    Task { await store.checkSelectedRemoteStatus() }
+                }
                 command("更新", symbol: "arrow.triangle.2.circlepath",
                         disabled: store.selectedWorkingCopy == nil || store.isInteractionBlocked) {
                     Task { await store.updateSelectedWorkingCopy() }
@@ -209,10 +219,6 @@ struct SvnDockRootView: View {
                     Task { await store.showHistoryForSelection() }
                 }
                 Menu {
-                    Button("刷新工作副本状态") {
-                        Task { await store.reloadSelectedWorkingCopy() }
-                    }
-                    .disabled(store.selectedWorkingCopy == nil || store.isInteractionBlocked)
                     Button("清理工作副本…") {
                         Task { await store.cleanupSelectedWorkingCopy() }
                     }
@@ -267,7 +273,7 @@ struct SvnDockRootView: View {
             .svnDockSurface(cornerRadius: 12)
         }
         .padding(.horizontal, 22)
-        .frame(height: 74)
+        .frame(height: 66)
         .background(LinearGradient(
             colors: [SvnDockTheme.sidebar.opacity(0.8), SvnDockTheme.subtleSurface],
             startPoint: .leading, endPoint: .trailing
@@ -291,58 +297,62 @@ struct SvnDockRootView: View {
                 .font(.system(size: 11))
                 .foregroundStyle(SvnDockTheme.secondaryText)
         }
-        .frame(width: 48, height: 54)
+        .frame(width: title.count > 4 ? 68 : 48, height: 54)
         .contentShape(Rectangle())
     }
 
     private var workingCopyHeader: some View {
         HStack(spacing: 16) {
             SvnDockFolderIcon(size: 31)
-            VStack(alignment: .leading, spacing: 5) {
-                Text(store.selectedWorkingCopy?.name ?? "选择工作副本")
-                    .font(.system(size: 19, weight: .semibold))
-                Text(store.selectedWorkingCopy?.rootURL.path(percentEncoded: false) ?? "添加本地 SVN 目录，开始管理变更")
-                    .font(.system(size: 12))
-                    .foregroundStyle(SvnDockTheme.secondaryText)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 12) {
+                    Text(store.selectedWorkingCopy?.name ?? "选择工作副本")
+                        .font(.system(size: 19, weight: .semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let copy = store.selectedWorkingCopy {
+                        revisionLabel(copy)
+                    }
+                }
+                if let copy = store.selectedWorkingCopy {
+                    identityLine(copy.repositoryURL?.absoluteString ?? "仓库地址尚未读取",
+                                 symbol: "network", copyLabel: "复制仓库地址",
+                                 canCopy: copy.repositoryURL != nil)
+                    identityLine(copy.rootURL.path(percentEncoded: false),
+                                 symbol: "folder", copyLabel: "复制本地路径")
+                } else {
+                    Text("添加本地 SVN 目录，开始管理变更")
+                        .font(.system(size: 12))
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                }
             }
             Spacer(minLength: 12)
             if let copy = store.selectedWorkingCopy {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 18) {
-                        revisionLabel(copy)
-                        if let refreshedAt = copy.lastRefreshedAt {
-                            Text("最近刷新  \(refreshedAt.formatted(date: .abbreviated, time: .shortened))")
-                                .font(.system(size: 11))
-                                .foregroundStyle(SvnDockTheme.secondaryText)
-                        }
-                    }
-                    revisionLabel(copy)
-                }
-                Divider().frame(height: 32)
-                VStack(alignment: .leading, spacing: 5) {
-                    HStack(spacing: 8) {
+                Divider().frame(height: 54)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 6) {
                         if store.isBusy {
                             ProgressView().controlSize(.small)
                         } else {
-                            Circle()
-                                .fill(copy.counts.conflicts > 0 ? SvnDockTheme.red : SvnDockTheme.green)
-                                .frame(width: 9, height: 9)
+                            Image(systemName: copy.counts.conflicts > 0 ? "exclamationmark.triangle" : "internaldrive")
+                                .foregroundStyle(copy.counts.conflicts > 0 ? SvnDockTheme.red : SvnDockTheme.secondaryText)
                         }
-                        Text(store.activeOperation?.kind.displayName
-                             ?? (copy.counts.conflicts > 0 ? "存在待解决冲突" : "工作副本已载入"))
+                        Text(copy.localStatusSummary)
                             .font(.system(size: 12, weight: .medium))
                     }
-                    Text(copy.counts.conflicts > 0
-                         ? "\(copy.counts.conflicts) 个文件存在冲突"
-                         : "\(copy.counts.changed) 个文件发生变更")
-                        .font(.system(size: 11))
-                        .foregroundStyle(SvnDockTheme.secondaryText)
-                        .padding(.leading, 17)
+                    .help(copy.localStatusDetail)
+                    remoteStatusButton
+                    if let operation = store.activeOperation {
+                        Text(operation.kind.displayName)
+                            .font(.system(size: 10))
+                            .foregroundStyle(SvnDockTheme.secondaryText)
+                    } else if let refreshedAt = copy.lastRefreshedAt {
+                        Text("本地刷新 \(refreshedAt.formatted(date: .omitted, time: .shortened))")
+                            .font(.system(size: 10))
+                            .foregroundStyle(SvnDockTheme.secondaryText)
+                    }
                 }
-                .fixedSize()
+                .fixedSize(horizontal: true, vertical: false)
             } else if let operation = store.activeOperation {
                 ProgressView().controlSize(.small)
                 Text(operation.detail ?? operation.kind.displayName)
@@ -351,19 +361,62 @@ struct SvnDockRootView: View {
             }
         }
         .padding(.horizontal, 24)
-        .frame(height: 78)
+        .frame(height: 98)
         .background(SvnDockTheme.subtleSurface.opacity(0.5))
     }
 
     private func revisionLabel(_ copy: SvnDockWorkingCopy) -> some View {
         HStack(spacing: 7) {
-            Text("当前版本").foregroundStyle(SvnDockTheme.secondaryText)
+            Text("根目录基线").foregroundStyle(SvnDockTheme.secondaryText)
             Text(verbatim: copy.revision.map { "r\($0)" } ?? "—")
                 .foregroundStyle(SvnDockTheme.accent)
                 .fontWeight(.semibold)
         }
         .font(.system(size: 12))
         .fixedSize()
+        .help("这是工作副本根目录的基线修订号；子目录和文件可能处于不同修订。")
+    }
+
+    private func identityLine(_ value: String, symbol: String, copyLabel: String,
+                              canCopy: Bool = true) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol).frame(width: 13)
+            Text(verbatim: value)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+        .font(.system(size: 11))
+        .foregroundStyle(SvnDockTheme.secondaryText)
+        .help(value)
+        .contextMenu {
+            Button(copyLabel) {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(value, forType: .string)
+            }
+            .disabled(!canCopy)
+        }
+    }
+
+    private var remoteStatusButton: some View {
+        Button {
+            isRemoteStatusPresented = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: store.selectedRemoteStatus.lastError == nil ? "network" : "exclamationmark.triangle")
+                Text(store.selectedRemoteStatus.summary)
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+            }
+            .font(.system(size: 11))
+            .foregroundStyle(SvnDockTheme.accent)
+            .padding(.vertical, 3)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SvnDockPlainButtonStyle())
+        .help("查看服务器检查时间与受影响路径；本地刷新不会检查服务器。")
+        .popover(isPresented: $isRemoteStatusPresented, arrowEdge: .bottom) {
+            RemoteStatusPopover(store: store)
+        }
     }
 
     private func resumeFinderQueueAfterPresentation() {

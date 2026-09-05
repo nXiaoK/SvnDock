@@ -277,6 +277,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
         var status: SVNStatus?
         var propertyStatus: SVNStatus = .none
         var repositoryStatus: SVNStatus?
+        var repositoryPropertyStatus: SVNStatus?
         var revision: Int?
         var isCopied = false
         var isSwitched = false
@@ -330,6 +331,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
         case "repos-status":
             guard currentEntry != nil else { return }
             currentEntry?.repositoryStatus = SVNStatus(svnValue: attributeDict["item"] ?? "none")
+            currentEntry?.repositoryPropertyStatus = SVNStatus(svnValue: attributeDict["props"] ?? "none")
 
         case "commit":
             guard currentEntry != nil else { return }
@@ -380,6 +382,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
                     status: status,
                     propertyStatus: pending.propertyStatus,
                     repositoryStatus: pending.repositoryStatus,
+                    repositoryPropertyStatus: pending.repositoryPropertyStatus,
                     revision: pending.revision,
                     isCopied: pending.isCopied,
                     isSwitched: pending.isSwitched,

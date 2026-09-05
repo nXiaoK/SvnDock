@@ -19,6 +19,10 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 ## Highlights
 
 - Register multiple SVN working copies with no application-imposed limit.
+- Distinguish the local folder, repository URL and root-directory baseline.
+  **检查服务器** explicitly checks incoming content and property changes without
+  updating files or changing local status/Finder badges. Results retain their
+  check time and are marked stale after local refresh or a write workflow.
 - Choose launch at login and menu bar visibility independently in Settings.
   The menu bar offers working-copy status, navigation, refresh, update, commit,
   history and quick access to Finder and Settings, even after closing the main window.
