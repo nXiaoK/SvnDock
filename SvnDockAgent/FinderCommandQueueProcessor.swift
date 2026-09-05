@@ -93,11 +93,6 @@ public struct FinderCommandQueueProcessor: Sendable {
         "com.svndock.command-handoff"
     )
 
-    private struct OwnedCommand: Sendable {
-        let claim: FinderCommandClaim
-        let validated: ValidatedFinderCommand
-    }
-
     private enum HandoffDisposition: Sendable {
         case handedOff
         case quarantined
@@ -145,7 +140,7 @@ public struct FinderCommandQueueProcessor: Sendable {
             return QueueProcessingSummary(failed: 1)
         }
 
-        var grouped: [UUID: [OwnedCommand]] = [:]
+        var grouped: [UUID: [FinderCommandClaim]] = [:]
         var initial = QueueProcessingSummary()
 
         for id in ids {
@@ -194,9 +189,10 @@ public struct FinderCommandQueueProcessor: Sendable {
                     claim.command,
                     registeredRoots: roots
                 )
-                grouped[command.registeredRoot.id, default: []].append(
-                    OwnedCommand(claim: claim, validated: command)
-                )
+                // Only the root ID is needed for grouping. Selected URL
+                // arrays are validated again at execution time, so retaining
+                // every preflight result would duplicate the whole backlog.
+                grouped[command.registeredRoot.id, default: []].append(claim)
             } catch let error as AgentQueueStoreError {
                 recordFailure(
                     requestID: id,
@@ -241,15 +237,15 @@ public struct FinderCommandQueueProcessor: Sendable {
     }
 
     private func processBackgroundCommands(
-        _ commands: [OwnedCommand]
+        _ commands: [FinderCommandClaim]
     ) async -> QueueProcessingSummary {
         var summary = QueueProcessingSummary()
 
-        for owned in commands {
-            let requestID = owned.claim.command.id
+        for claim in commands {
+            let requestID = claim.command.id
 
             if Task.isCancelled {
-                if await releaseBeforeExecution(owned.claim) {
+                if await releaseBeforeExecution(claim) {
                     summary.skipped += 1
                 } else {
                     summary.quarantined += 1
@@ -260,11 +256,11 @@ public struct FinderCommandQueueProcessor: Sendable {
 
             let executionTime = Date()
             if let lifecycleError = Self.lifecycleError(
-                for: owned.claim.command,
+                for: claim.command,
                 now: executionTime
             ) {
                 if await reject(
-                    owned.claim,
+                    claim,
                     because: lifecycleError,
                     now: executionTime
                 ) {
@@ -280,7 +276,7 @@ public struct FinderCommandQueueProcessor: Sendable {
                 // Registry membership and symlink boundaries are re-evaluated
                 // immediately before changing the working copy.
                 currentCommand = try validator.validate(
-                    owned.claim.command,
+                    claim.command,
                     registeredRoots: store.loadRegisteredRoots()
                 )
             } catch let error as AgentQueueStoreError {
@@ -291,7 +287,7 @@ public struct FinderCommandQueueProcessor: Sendable {
                     forcedCategory: .registryUnavailable,
                     forcedRetryable: true
                 )
-                if await releaseBeforeExecution(owned.claim) {
+                if await releaseBeforeExecution(claim) {
                     summary.failed += 1
                 } else {
                     summary.quarantined += 1
@@ -300,7 +296,7 @@ public struct FinderCommandQueueProcessor: Sendable {
                 continue
             } catch {
                 if await reject(
-                    owned.claim,
+                    claim,
                     because: error,
                     now: Date(),
                     forcedCategory: .invalidRequest
@@ -314,10 +310,10 @@ public struct FinderCommandQueueProcessor: Sendable {
 
             let executing: FinderCommandClaim
             do {
-                executing = try await coordinator.markExecuting(owned.claim)
+                executing = try await coordinator.markExecuting(claim)
             } catch {
                 recordFailure(requestID: requestID, error: error, now: Date())
-                if await quarantine(owned.claim) {
+                if await quarantine(claim) {
                     summary.quarantined += 1
                 }
                 summary.failed += 1
