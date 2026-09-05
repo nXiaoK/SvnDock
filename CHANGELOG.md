@@ -7,6 +7,11 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Session operation records retain the latest 30 Update and Commit outcomes,
+  with per-working-copy details and credential redaction before display or copying.
+  Multi-copy updates continue after individual failures; cancellation stops the
+  remaining copies. Uncertain commit outcomes retain drafts and advise checking
+  repository history before retrying.
 - Explicit server-update checks show incoming content and property paths in a
   separate snapshot, with timestamps, stale-result indicators and retry feedback.
   Working-copy headers distinguish repository URLs, local paths and root baselines.

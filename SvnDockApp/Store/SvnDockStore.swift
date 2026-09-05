@@ -69,6 +69,7 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var historyErrorMessage: String?
 
     @Published private(set) var activeOperation: SvnDockOperationState?
+    @Published private(set) var operationRecords: [SvnDockOperationRecord] = []
     @Published private var remoteStatusByWorkingCopyID: [UUID: SvnDockRemoteStatusState] = [:]
     private var remoteStatusGeneration: [UUID: UUID] = [:]
     @Published var presentedError: SvnDockUserFacingError?
@@ -194,6 +195,10 @@ final class SvnDockStore: ObservableObject {
         guard var state = remoteStatusByWorkingCopyID[id] else { return }
         state.isStale = state.snapshot != nil
         remoteStatusByWorkingCopyID[id] = state
+    }
+
+    private func recordOperation(_ record: SvnDockOperationRecord) {
+        operationRecords = SvnDockOperationRecord.prepending(record, to: operationRecords)
     }
 
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
@@ -625,12 +630,32 @@ final class SvnDockStore: ObservableObject {
         for copy in copies { invalidateRemoteStatus(for: copy.id) }
 
         let detail = copies.count == 1 ? copies[0].name : "\(copies.count) 个工作副本"
+        var allSucceeded = true
         let succeeded = await perform(
             kind: .updating,
             detail: detail,
             allowDuringFinderRouting: allowDuringFinderRouting
         ) { [self] in
-            try await service.update(workingCopies: copies)
+            for copy in copies {
+                try Task.checkCancellation()
+                let startedAt = Date()
+                do {
+                    try await service.update(workingCopies: [copy])
+                    try Task.checkCancellation()
+                    recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
+                                          outcome: .success, summary: "更新命令完成，请检查本地状态与冲突"))
+                } catch is CancellationError {
+                    recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
+                                          outcome: .uncertain, summary: "更新已中断，本地文件可能已部分更新",
+                                          detail: "请刷新该工作副本的状态，检查冲突后再继续。未自动重试。"))
+                    throw CancellationError()
+                } catch {
+                    allSucceeded = false
+                    recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
+                                          outcome: .failure, summary: "更新未完成，请检查本地状态",
+                                          detail: error.localizedDescription))
+                }
+            }
         }
 
         if let selectedWorkingCopyID, workingCopyIDs.contains(selectedWorkingCopyID) {
@@ -638,7 +663,7 @@ final class SvnDockStore: ObservableObject {
                 allowDuringFinderRouting: allowDuringFinderRouting
             )
         }
-        return succeeded
+        return succeeded && allSucceeded
     }
 
     func requestCommit(
@@ -706,6 +731,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func executeCommit(_ request: PendingCommitExecution) async {
+        let startedAt = Date()
         let executingClaim: FinderCommandClaim?
         do {
             executingClaim = try await markFinderClaimExecuting(request.finderClaim)
@@ -719,6 +745,7 @@ final class SvnDockStore: ObservableObject {
         }
 
         var succeeded = false
+        var commitError: Error?
         do {
             try Task.checkCancellation()
             try await service.commit(
@@ -728,10 +755,12 @@ final class SvnDockStore: ObservableObject {
             )
             succeeded = true
         } catch is CancellationError {
+            commitError = CancellationError()
             if let executingClaim {
                 await quarantineExecutedFinderClaim(executingClaim)
             }
         } catch {
+            commitError = error
             if let executingClaim {
                 await quarantineExecutedFinderClaim(executingClaim)
             }
@@ -749,11 +778,37 @@ final class SvnDockStore: ObservableObject {
         if succeeded, !Task.isCancelled {
             commitDraftStore.remove(for: request.workingCopy)
         }
+        let outcome: SvnDockOperationRecord.Outcome
+        if succeeded, !Task.isCancelled {
+            outcome = .success
+        } else if let error = commitError as? SVNSelectedCommitError,
+                  Self.isPreflightFailure(error) {
+            outcome = .failure
+        } else if commitError is SVNCommandBuilderError {
+            outcome = .failure
+        } else {
+            outcome = .uncertain
+        }
+        let summary = outcome == .success ? "提交完成，可在历史中查看"
+            : outcome == .failure ? "提交前检查未通过，草稿已保留"
+            : "提交结果待确认，草稿已保留"
+        recordOperation(.init(workingCopy: request.workingCopy, actionTitle: "提交", startedAt: startedAt,
+                              outcome: outcome, summary: summary,
+                              detail: outcome == .uncertain
+                                ? "请先检查仓库历史与本地状态，确认是否已提交，再决定是否重试。\n\(commitError?.localizedDescription ?? "操作已中断。")"
+                                : commitError?.localizedDescription))
         activeOperation = nil
         if succeeded {
             await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
             isPresentingCommit = false
             await processPendingFinderCommands()
+        }
+    }
+
+    private static func isPreflightFailure(_ error: SVNSelectedCommitError) -> Bool {
+        switch error {
+        case .changedSelection, .missingParent, .externalWorkingCopy: true
+        case .commandFailed: false
         }
     }
 

@@ -9,6 +9,8 @@ struct AppRegressionSmoke {
         try ReviewInteractionRegressionChecks.contextSelectionPreservesScope()
         try WorkingCopyStatusRegressionChecks.run()
         try await RemoteStoreRegressionChecks.run()
+        try OperationRecordRegressionChecks.run()
+        try await OperationStoreRegressionChecks.run()
         try await StoreRegressionChecks.selectionCancelsDiff()
         try await StoreRegressionChecks.directoryRetryRejectsOldError()
         try await MissingDeletionRegressionChecks.run()

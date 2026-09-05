@@ -53,6 +53,11 @@ SvnDock does not invoke Git or intentionally modify `.git`.
   text in both light and dark appearances.
 - Run Update, Commit, Add, Revert, Resolve, Cleanup and safe `svn:ignore`
   workflows.
+- Review the latest 30 Update and Commit results from the bottom operation bar
+  during the current run, including per-working-copy outcomes and redacted
+  copyable details. Multi-copy updates continue after an individual failure.
+  Interrupted or unconfirmed commits retain the draft and require checking
+  repository history before a manual retry.
 - Use Finder contextual menus for frequent operations.
 - Display Finder badges from cached status without running SVN inside Finder.
 - Serialize mutations per working copy, including coordination between the app

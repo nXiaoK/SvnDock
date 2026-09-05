@@ -27,6 +27,8 @@ struct SvnDockRootView: View {
                 }
                 .frame(minWidth: 760, maxWidth: .infinity, maxHeight: .infinity)
             }
+            Divider().overlay(SvnDockTheme.border)
+            OperationRecordBar(store: store)
         }
         .background(SvnDockTheme.surface)
         .foregroundStyle(SvnDockTheme.text)
