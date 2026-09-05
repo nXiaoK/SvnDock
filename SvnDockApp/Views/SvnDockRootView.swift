@@ -31,8 +31,7 @@ struct SvnDockRootView: View {
         .tint(SvnDockTheme.accent)
         .frame(minWidth: 1080, minHeight: 680)
         .task {
-            await store.load()
-            await store.processPendingFinderCommands()
+            await store.startIfNeeded()
         }
         .onOpenURL { url in
             Task { await store.handleFinderURL(url) }

@@ -26,6 +26,7 @@ let package = Package(
             exclude: ["README.md", "Resources"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("ServiceManagement"),
                 .linkedFramework("SwiftUI")
             ]
         ),

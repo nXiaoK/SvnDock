@@ -7,6 +7,11 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Independent Settings switches for launch at login and menu bar visibility.
+  Login Items use macOS registration state with approval and error feedback.
+  The menu bar provides cached working-copy status, navigation, refresh,
+  update, commit, history, Finder, Settings and main-window access. Reopening
+  the main window preserves workspace state without duplicate startup scans.
 - Commit diffs expand into a focused reading layout with file navigation.
   Return or Escape restores the commit form, draft and file selection.
   Diff text size can be adjusted from 10 to 20 pt.

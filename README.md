@@ -19,6 +19,9 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 ## Highlights
 
 - Register multiple SVN working copies with no application-imposed limit.
+- Choose launch at login and menu bar visibility independently in Settings.
+  The menu bar offers working-copy status, navigation, refresh, update, commit,
+  history and quick access to Finder and Settings, even after closing the main window.
 - View local status, filter changed paths, inspect text diffs and browse
   repository history.
 - Single-click a file to update the diff inspector immediately; double-click
@@ -126,6 +129,20 @@ details.
 
 Keep only one discoverable copy of the app. If Finder retains an older extension
 instance, toggle the extension off and on before restarting Finder.
+
+## Startup and menu bar
+
+Open **SvnDock → Settings → 启动与菜单栏**. **登录时启动** registers the
+current app with macOS Login Items and displays its actual system status. If
+approval is needed, use the provided link to System Settings. Keep the app in
+a stable location, such as `/Applications`, before enabling login startup.
+
+**显示菜单栏图标** is off by default and remembers your choice. Its menu uses
+the last loaded working-copy status; **刷新状态** requests a fresh scan. Menu
+actions share the main window's operation guards, and **提交…** opens the
+existing commit form. Closing and reopening the main window preserves the
+current workspace without starting another registration load. No periodic
+background scan is added.
 
 ## Development
 

@@ -88,6 +88,8 @@ final class SvnDockStore: ObservableObject {
     private var finalizingFinderCommandIDs: Set<UUID> = []
     private var rejectedFinderCommandIDs: Set<UUID> = []
     private var suppressedSelectionReloadID: UUID?
+    private var startupTask: Task<Void, Never>?
+    private var hasStarted = false
     private var pendingUnscheduleAdd: PendingUnscheduleAdd?
     private var pendingMissingDeletion: PendingMissingDeletion?
     private var pendingRevert: PendingRevert?
@@ -266,6 +268,21 @@ final class SvnDockStore: ObservableObject {
         await reloadSelectedWorkingCopy()
     }
 
+    /// Menu actions also work when the main window and its selection observer
+    /// are absent. Suppress that observer if a window opens during this scan.
+    func selectWorkingCopyFromMenu(_ id: UUID) async {
+        guard !isSidebarNavigationBlocked,
+              workingCopies.contains(where: { $0.id == id }),
+              selectedWorkingCopyID != id else { return }
+
+        suppressedSelectionReloadID = id
+        selectedWorkingCopyID = id
+        clearHistory()
+        clearStatusEntries()
+        selectedEntryIDs = []
+        await reloadSelectedWorkingCopy()
+    }
+
     func requestDirectoryImport() {
         guard !isBusy, !hasBlockingPresentation else { return }
         isPresentingDirectoryImporter = true
@@ -331,10 +348,31 @@ final class SvnDockStore: ObservableObject {
         }
     }
 
-    func load() async {
-        guard await waitForFinderRoutingToFinish() else { return }
+    /// Loading belongs to the shared store rather than any one window. An
+    /// unstructured task survives SwiftUI cancelling a disappearing view's
+    /// task, and reopening a window preserves the current selection and draft.
+    func startIfNeeded() async {
+        if let startupTask {
+            await startupTask.value
+            return
+        }
+        guard !hasStarted else { return }
+
+        let task = Task { [self] in
+            defer { startupTask = nil }
+            guard await load() else { return }
+            hasStarted = true
+            await processPendingFinderCommands()
+        }
+        startupTask = task
+        await task.value
+    }
+
+    @discardableResult
+    func load() async -> Bool {
+        guard await waitForFinderRoutingToFinish() else { return false }
         _ = await prepareFinderQueueIfNeeded()
-        await perform(kind: .loading) { [self] in
+        return await perform(kind: .loading) { [self] in
             let loadedCopies = try await service.loadRegisteredWorkingCopies()
             workingCopies = loadedCopies.sorted(by: Self.copySort)
 

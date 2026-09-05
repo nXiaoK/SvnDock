@@ -4,14 +4,22 @@ import SvnDockCore
 @main
 struct SvnDockApplication: App {
     @StateObject private var store: SvnDockStore
+    @StateObject private var preferences = SvnDockPreferences()
+    @StateObject private var mainWindow = SvnDockMainWindowController()
 
     init() {
         _store = StateObject(wrappedValue: SvnDockAppEnvironment.makeStore())
     }
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: SvnDockMainWindowController.sceneID) {
             SvnDockRootView(store: store)
+                .background {
+                    SvnDockMainWindowReader(controller: mainWindow)
+                        .frame(width: 0, height: 0)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                }
         }
         .defaultSize(width: 1_400, height: 860)
         .windowToolbarStyle(.unifiedCompact)
@@ -42,8 +50,17 @@ struct SvnDockApplication: App {
         .defaultSize(width: 1_240, height: 800)
 
         Settings {
-            SvnDockSettingsView()
+            SvnDockSettingsView(preferences: preferences)
         }
+
+        MenuBarExtra("SvnDock", systemImage: "externaldrive",
+                     isInserted: Binding(
+                        get: { preferences.showsMenuBarIcon },
+                        set: { preferences.setShowsMenuBarIcon($0) }
+                     )) {
+            SvnDockMenuBarContent(store: store, mainWindow: mainWindow)
+        }
+        .menuBarExtraStyle(.menu)
     }
 }
 
@@ -243,20 +260,14 @@ private struct SvnDockCommands: Commands {
     }
 }
 
-private struct SvnDockSettingsView: View {
+private struct SvnDockMenuBarContent: View {
+    @ObservedObject var store: SvnDockStore
+    let mainWindow: SvnDockMainWindowController
+    @Environment(\.openWindow) private var openWindow
+
     var body: some View {
-        Form {
-            LabeledContent("SVN 可执行文件") {
-                Text("自动检测 Homebrew 与系统路径")
-                    .foregroundStyle(.secondary)
-            }
-            LabeledContent("Finder 集成") {
-                Text("在“系统设置 → 通用 → 登录项与扩展 → Finder 扩展”中启用")
-                    .foregroundStyle(.secondary)
-            }
+        SvnDockMenuBarView(store: store) {
+            mainWindow.show(using: openWindow)
         }
-        .formStyle(.grouped)
-        .padding()
-        .frame(width: 520, height: 210)
     }
 }

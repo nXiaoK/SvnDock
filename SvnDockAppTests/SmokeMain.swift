@@ -9,6 +9,8 @@ struct AppRegressionSmoke {
         try await MissingStatusRegressionChecks.run()
         try await MissingRevertRegressionChecks.run()
         try await RegistrationRegressionChecks.run()
+        try await PreferencesRegressionChecks.run()
+        try await MenuBarStoreRegressionChecks.run()
         try ViewsRegressionChecks.snapshotStorageAndGrouping()
         try ViewsRegressionChecks.diffPresentationPreservesRows()
         try await ViewsRegressionChecks.clearedDiffDiscardsPresentation()
