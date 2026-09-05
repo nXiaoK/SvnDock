@@ -34,6 +34,8 @@ SvnDock does not invoke Git or intentionally modify `.git`.
   a changed path to preview its historical diff. Double-click either list to
   open a larger commit detail window. Added/deleted/replaced paths,
   copy/move ancestry, directory properties and binary output are supported.
+  Selected history entries and paths use a soft blue background with readable
+  text in both light and dark appearances.
 - Run Update, Commit, Add, Revert, Resolve, Cleanup and safe `svn:ignore`
   workflows.
 - Use Finder contextual menus for frequent operations.

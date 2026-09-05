@@ -131,8 +131,11 @@ struct HistoryInspectorView: View {
             VSplitView {
                 List(selection: $selectedRevision) {
                     ForEach(displayedEntries) { entry in
-                        HistoryEntryRow(entry: entry)
+                        HistoryEntryRow(entry: entry, isSelected: selectedRevision == entry.revision)
                             .tag(entry.revision)
+                            .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                            .listRowSeparator(.hidden)
+                            .listRowBackground(Color.clear)
                             .contextMenu {
                                 Button("在独立窗口中查看提交详情") {
                                     selectedRevision = entry.revision
@@ -267,13 +270,14 @@ struct HistoryInspectorView: View {
 
 private struct HistoryEntryRow: View {
     let entry: SvnDockLogEntry
+    let isSelected: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 12) {
                 Text(verbatim: "r\(entry.revision)")
                     .font(.system(.callout, design: .monospaced).weight(.semibold))
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(isSelected ? SvnDockTheme.text : SvnDockTheme.accent)
 
                 Label(author, systemImage: "person.circle")
                     .lineLimit(1)
@@ -284,15 +288,17 @@ private struct HistoryEntryRow: View {
                     .lineLimit(1)
             }
             .font(.caption)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(isSelected ? SvnDockTheme.text.opacity(0.8) : SvnDockTheme.secondaryText)
 
             Text(message)
                 .font(.callout)
                 .lineLimit(2)
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 6)
+        .foregroundStyle(SvnDockTheme.text)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .svnDockCardSelection(isSelected: isSelected)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("版本 \(entry.revision)，\(author)，\(date)，\(message)")

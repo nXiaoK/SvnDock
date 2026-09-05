@@ -2,6 +2,20 @@ import AppKit
 import SwiftUI
 
 extension View {
+    /// Draw a soft selection using the same palette as the workspace cards.
+    func svnDockCardSelection(isSelected: Bool) -> some View {
+        background(
+            isSelected ? SvnDockTheme.selection : .clear,
+            in: RoundedRectangle(cornerRadius: 8)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(isSelected ? SvnDockTheme.accent.opacity(0.24) : .clear)
+                .allowsHitTesting(false)
+        }
+        .svnDockCardSelection()
+    }
+
     /// Apply to a custom card inside a native List. The card draws selection;
     /// AppKit still owns selection, keyboard navigation, and accessibility.
     func svnDockCardSelection() -> some View {

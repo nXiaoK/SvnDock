@@ -24,6 +24,8 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- History selection uses soft blue cards and readable text in light and dark
+  appearances, matching the workspace while retaining native list interaction.
 - History entries and their changed paths update the embedded preview on a
   single click, while double-click still opens a larger commit detail window.
 - Missing versioned files and directories can be scheduled for SVN deletion

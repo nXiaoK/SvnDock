@@ -153,9 +153,12 @@ struct HistoryRevisionView: View {
                 ScrollViewReader { proxy in
                     List(selection: Binding(get: { model.selectedPath }, set: { model.select($0) })) {
                         ForEach(model.displayedChanges) { change in
-                            HistoryChangedPathRow(change: change)
+                            HistoryChangedPathRow(change: change, isSelected: model.selectedPath == change.path)
                                 .tag(change.path)
                                 .id(change.path)
+                                .listRowInsets(EdgeInsets(top: 2, leading: 8, bottom: 2, trailing: 8))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
                                 .contextMenu {
                                     Button("复制仓库路径") { copy(change.path) }
                                     if let source = change.copyFromPath {
@@ -299,25 +302,29 @@ struct HistoryRevisionView: View {
 
 private struct HistoryChangedPathRow: View {
     let change: SVNChangedPath
+    let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 8) {
             Text(actionLabel)
                 .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(tint)
+                .foregroundStyle(isSelected ? SvnDockTheme.text : tint)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 3)
                 .background(tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 4))
             Image(systemName: change.kind == .directory ? "folder" : "doc.text")
-                .foregroundStyle(.secondary)
+                .foregroundStyle(isSelected ? SvnDockTheme.text.opacity(0.8) : SvnDockTheme.secondaryText)
             Text(change.path)
                 .font(.system(size: 12))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .help(change.path)
         }
+        .foregroundStyle(SvnDockTheme.text)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.vertical, 2)
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .svnDockCardSelection(isSelected: isSelected)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(actionLabel)，\(change.path)")
@@ -337,10 +344,10 @@ private struct HistoryChangedPathRow: View {
     private var tint: Color {
         if change.isMove || change.comparesCopySource { return .purple }
         return switch change.action {
-        case .added: .green
-        case .deleted: .red
+        case .added: SvnDockTheme.green
+        case .deleted: SvnDockTheme.red
         case .replaced: .orange
-        default: .blue
+        default: SvnDockTheme.accent
         }
     }
 }

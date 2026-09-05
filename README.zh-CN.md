@@ -27,6 +27,7 @@ SvnDock 是一款原生 macOS SVN 客户端，专注多工作副本管理与 Fin
 - 单击历史记录即更新下方变更文件，单击变更文件即切换历史差异；双击可在独立窗口
   放大查看。支持
   新增、删除、替换、复制／移动来源和目录属性。[使用说明](Docs/History-Review.md)。
+  历史记录和变更文件使用柔和的蓝色选中背景，并在浅色与深色模式下保持文字清晰。
 - 支持 Update、Commit、Add、Revert、Resolve、Cleanup，以及安全合并
   `svn:ignore` 规则。
 - 通过 Finder 右键菜单执行常用操作。
