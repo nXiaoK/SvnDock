@@ -21,6 +21,9 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Register multiple SVN working copies with no application-imposed limit.
 - View local status, filter changed paths, inspect text diffs and browse
   repository history.
+- Single-click a file to update the diff inspector immediately; double-click
+  to open its diff in a separate window. Command/Shift multiselection and
+  keyboard navigation remain available.
 - Switch between unified, side-by-side and raw diffs with actual file line
   numbers, hunk navigation, automatic wrapping, full-patch copying and 10–20 pt
   text sizing. The inspector and standalone window share the same viewer.

@@ -4,6 +4,8 @@ import SwiftUI
 struct StatusListView: View {
     @ObservedObject var store: SvnDockStore
 
+    @Environment(\.openWindow) private var openWindow
+
     private var statusCounts: [SvnDockStatusFilter: Int] {
         let counts = store.statusCounts
         return [.all: store.entries.count, .changed: counts.changed,
@@ -93,6 +95,21 @@ struct StatusListView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                // Native primary actions preserve immediate List selection,
+                // including Command/Shift clicks and keyboard navigation.
+                // A row-level double-tap gesture consumes those mouse events.
+                .contextMenu(forSelectionType: SvnDockStatusEntry.ID.self) { _ in
+                    EmptyView()
+                } primaryAction: { entryIDs in
+                    guard !store.isInteractionBlocked, entryIDs.count == 1 else { return }
+                    store.selectedEntryIDs = entryIDs
+                    guard let entry = store.primarySelectedEntry else { return }
+                    if store.canExpandDirectory(entry) {
+                        store.toggleDirectoryExpansion(for: entry)
+                    } else {
+                        openDiffWindow(for: entry)
+                    }
+                }
                 .disabled(store.isInteractionBlocked)
             }
 
@@ -307,7 +324,12 @@ struct StatusListView: View {
     private func statusTreeRow(_ row: StatusTreeRow) -> some View {
         switch row.kind {
         case let .entry(entry):
-            StatusTreeEntryRowView(store: store, entry: entry, depth: row.depth)
+            StatusTreeEntryRowView(
+                store: store,
+                entry: entry,
+                depth: row.depth,
+                openDiffWindow: openDiffWindow(for:)
+            )
                 .svnDockCardSelection()
                 .tag(entry.id)
                 .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 8, trailing: 12))
@@ -363,6 +385,18 @@ struct StatusListView: View {
             .listRowBackground(Color.clear)
     }
 
+    private func openDiffWindow(for entry: SvnDockStatusEntry) {
+        guard entry.nodeKind == .file,
+              entry.status != .unversioned,
+              entry.status != .ignored,
+              entry.status != .missing,
+              entry.status != .external else { return }
+        store.selectedEntryIDs = [entry.id]
+        openWindow(value: SvnDockDiffRequest(
+            workingCopyID: entry.workingCopyID,
+            relativePath: entry.relativePath
+        ))
+    }
 }
 
 private struct StatusTreeRow: Identifiable {
@@ -410,8 +444,7 @@ private struct StatusTreeEntryRowView: View {
     @ObservedObject var store: SvnDockStore
     let entry: SvnDockStatusEntry
     let depth: Int
-
-    @Environment(\.openWindow) private var openWindow
+    let openDiffWindow: (SvnDockStatusEntry) -> Void
 
     var body: some View {
         HStack(spacing: 4) {
@@ -435,15 +468,6 @@ private struct StatusTreeEntryRowView: View {
         }
         .padding(.leading, CGFloat(depth) * 16)
         .contentShape(RoundedRectangle(cornerRadius: 10))
-        .simultaneousGesture(
-            TapGesture(count: 2).onEnded {
-                if store.canExpandDirectory(entry) {
-                    store.toggleDirectoryExpansion(for: entry)
-                } else {
-                    openDiffWindow()
-                }
-            }
-        )
         .contextMenu { entryContextMenu }
     }
 
@@ -494,7 +518,7 @@ private struct StatusTreeEntryRowView: View {
         if entry.status.isChange {
             if entry.nodeKind == .file && entry.status != .missing {
                 Button("在窗口中查看差异") {
-                    openDiffWindow()
+                    openDiffWindow(entry)
                 }
             }
             if entry.status == .missing {
@@ -549,19 +573,6 @@ private struct StatusTreeEntryRowView: View {
         NSWorkspace.shared.activateFileViewerSelecting([
             root.appending(path: entry.relativePath)
         ])
-    }
-
-    private func openDiffWindow() {
-        guard entry.nodeKind == .file,
-              entry.status != .unversioned,
-              entry.status != .ignored,
-              entry.status != .missing,
-              entry.status != .external else { return }
-        store.selectedEntryIDs = [entry.id]
-        openWindow(value: SvnDockDiffRequest(
-            workingCopyID: entry.workingCopyID,
-            relativePath: entry.relativePath
-        ))
     }
 }
 

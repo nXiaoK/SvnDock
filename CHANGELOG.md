@@ -24,6 +24,8 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- File rows update the diff inspector on a single click. Native list actions
+  preserve double-click opening, directory expansion and Command/Shift selection.
 - Custom buttons respond across their full visible bounds, including padding,
   with consistent hover, pressed and disabled feedback.
 - Diff panes fill their available space from the top. Equal-width columns and
