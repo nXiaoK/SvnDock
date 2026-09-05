@@ -41,6 +41,11 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Leave authentication to the installed SVN client and its configuration;
   SvnDock does not accept or persist passwords.
 
+Changing a preview selection cancels obsolete diff work. Large status and diff
+views reuse their data, and Finder reuses unchanged cached snapshots. See the
+[code audit and measured performance results](Docs/Audit-2026-09/README.md)
+for the workloads, verification and remaining memory limits.
+
 Large commits use a temporary targets file and remain a single SVN transaction.
 Missing files are excluded from the commit checklist: restore the file, cancel
 its pending addition, or schedule its deletion as appropriate before retrying.

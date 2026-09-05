@@ -1,0 +1,116 @@
+{
+  "xml": {
+    "baseline": {
+      "runs": [
+        {
+          "seconds": 0.763059125,
+          "rss_bytes": 10682368
+        },
+        {
+          "seconds": 0.737337292,
+          "rss_bytes": 11255808
+        },
+        {
+          "seconds": 0.736171041,
+          "rss_bytes": 10420224
+        }
+      ],
+      "median_seconds": 0.737337292,
+      "median_peak_rss_bytes": 10682368
+    },
+    "current": {
+      "runs": [
+        {
+          "seconds": 0.186783708,
+          "rss_bytes": 10633216
+        },
+        {
+          "seconds": 0.181602125,
+          "rss_bytes": 10108928
+        },
+        {
+          "seconds": 0.180506416,
+          "rss_bytes": 9961472
+        }
+      ],
+      "median_seconds": 0.181602125,
+      "median_peak_rss_bytes": 10108928
+    }
+  },
+  "diff": {
+    "baseline": {
+      "runs": [
+        {
+          "seconds": 0.143731541,
+          "rss_bytes": 100646912
+        },
+        {
+          "seconds": 0.142920042,
+          "rss_bytes": 106807296
+        },
+        {
+          "seconds": 0.144576583,
+          "rss_bytes": 101171200
+        }
+      ],
+      "median_seconds": 0.143731541,
+      "median_peak_rss_bytes": 101171200
+    },
+    "current": {
+      "runs": [
+        {
+          "seconds": 0.050002792,
+          "rss_bytes": 78413824
+        },
+        {
+          "seconds": 0.049444,
+          "rss_bytes": 79314944
+        },
+        {
+          "seconds": 0.05230775,
+          "rss_bytes": 68943872
+        }
+      ],
+      "median_seconds": 0.050002792,
+      "median_peak_rss_bytes": 78413824
+    }
+  },
+  "targets": {
+    "baseline": {
+      "runs": [
+        {
+          "seconds": 1.492649042,
+          "rss_bytes": 161071104
+        },
+        {
+          "seconds": 1.487530792,
+          "rss_bytes": 167067648
+        },
+        {
+          "seconds": 1.509262,
+          "rss_bytes": 166150144
+        }
+      ],
+      "median_seconds": 1.492649042,
+      "median_peak_rss_bytes": 166150144
+    },
+    "final": {
+      "runs": [
+        {
+          "seconds": 1.216951417,
+          "rss_bytes": 30638080
+        },
+        {
+          "seconds": 1.23147075,
+          "rss_bytes": 30556160
+        },
+        {
+          "seconds": 1.217750958,
+          "rss_bytes": 30556160
+        }
+      ],
+      "median_seconds": 1.217750958,
+      "median_peak_rss_bytes": 30556160
+    }
+  }
+}

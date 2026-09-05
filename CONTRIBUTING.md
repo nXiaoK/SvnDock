@@ -46,6 +46,11 @@ plutil -lint \
 Real SVN integration checks must use a disposable repository and working copy.
 Never point a destructive test at a production working copy.
 
+On Command Line Tools installations without XCTest, the App and Finder
+regressions can also run with `bash Scripts/test-app-regressions.sh` and
+`bash Scripts/test-finder-regressions.sh`. These execute the regression checks
+without launching the GUI; they do not replace the full XCTest suite.
+
 ## Pull requests
 
 1. Create a branch from `main`.
