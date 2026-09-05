@@ -63,6 +63,40 @@ public struct UnifiedDiffHunk: Hashable, Sendable {
         self.heading = heading
         self.rows = rows
     }
+
+    /// Unified patches list all removals before all insertions in a change
+    /// block. Expanding aligned pairs one at a time would scramble that order.
+    public var unifiedRows: [UnifiedDiffRow] {
+        var result: [UnifiedDiffRow] = []
+        var changes: [UnifiedDiffRow] = []
+        func flush() {
+            for row in changes where row.oldText != nil {
+                result.append(UnifiedDiffRow(
+                    oldLineNumber: row.oldLineNumber, newLineNumber: nil,
+                    oldText: row.oldText, newText: nil, kind: .deletion,
+                    oldHasTrailingNewline: row.oldHasTrailingNewline
+                ))
+            }
+            for row in changes where row.newText != nil {
+                result.append(UnifiedDiffRow(
+                    oldLineNumber: nil, newLineNumber: row.newLineNumber,
+                    oldText: nil, newText: row.newText, kind: .addition,
+                    newHasTrailingNewline: row.newHasTrailingNewline
+                ))
+            }
+            changes.removeAll(keepingCapacity: true)
+        }
+        for row in rows {
+            if row.kind == .context {
+                flush()
+                result.append(row)
+            } else {
+                changes.append(row)
+            }
+        }
+        flush()
+        return result
+    }
 }
 
 public struct UnifiedDiffDocument: Hashable, Sendable {
@@ -76,16 +110,21 @@ public struct UnifiedDiffDocument: Hashable, Sendable {
     /// that output lets the UI fall back to its existing plain-text viewer.
     public let fallbackText: String?
 
+    /// Property changes accompanying text hunks must remain visible as well.
+    public let propertyChanges: String?
+
     public init(
         oldFilePath: String?,
         newFilePath: String?,
         hunks: [UnifiedDiffHunk],
-        fallbackText: String?
+        fallbackText: String?,
+        propertyChanges: String? = nil
     ) {
         self.oldFilePath = oldFilePath
         self.newFilePath = newFilePath
         self.hunks = hunks
         self.fallbackText = fallbackText
+        self.propertyChanges = propertyChanges
     }
 
     public var rows: [UnifiedDiffRow] {
@@ -99,10 +138,16 @@ public enum UnifiedDiffParser {
         var oldFilePath: String?
         var newFilePath: String?
         var hunks: [UnifiedDiffHunk] = []
+        var propertyChanges: String?
         var index = 0
 
         while index < lines.count {
             let line = lines[index]
+
+            if line.hasPrefix("Property changes on: ") {
+                propertyChanges = lines[index...].joined(separator: "\n")
+                break
+            }
 
             if line.hasPrefix("--- ") {
                 oldFilePath = filePath(fromHeader: line)
@@ -122,6 +167,14 @@ public enum UnifiedDiffParser {
             }
 
             let result = parseHunk(lines, startingAt: index + 1, header: header)
+            guard result.isComplete else {
+                // A truncated/malformed patch must never look like a complete
+                // comparison with some changes silently omitted.
+                return UnifiedDiffDocument(
+                    oldFilePath: oldFilePath, newFilePath: newFilePath,
+                    hunks: [], fallbackText: text
+                )
+            }
             if !result.rows.isEmpty {
                 hunks.append(UnifiedDiffHunk(
                     oldStart: header.oldStart,
@@ -139,7 +192,8 @@ public enum UnifiedDiffParser {
             oldFilePath: oldFilePath,
             newFilePath: newFilePath,
             hunks: hunks,
-            fallbackText: hunks.isEmpty ? text : nil
+            fallbackText: hunks.isEmpty ? text : nil,
+            propertyChanges: propertyChanges
         )
     }
 }
@@ -168,15 +222,14 @@ private extension UnifiedDiffParser {
     struct HunkResult {
         let rows: [UnifiedDiffRow]
         let nextIndex: Int
+        let isComplete: Bool
     }
 
     static func splitLines(_ text: String) -> [String] {
-        text.split(separator: "\n", omittingEmptySubsequences: false).map { line in
-            if line.last == "\r" {
-                return String(line.dropLast())
-            }
-            return String(line)
-        }
+        // CRLF is a single Swift Character, so splitting on the LF Character
+        // alone fails to separate Windows lines. Normalize before splitting.
+        text.replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
     }
 
     static func filePath(fromHeader line: String) -> String {
@@ -383,6 +436,9 @@ private extension UnifiedDiffParser {
         }
 
         flushChangeBlock()
-        return HunkResult(rows: rows, nextIndex: index)
+        return HunkResult(
+            rows: rows, nextIndex: index,
+            isComplete: oldConsumed == header.oldCount && newConsumed == header.newCount
+        )
     }
 }

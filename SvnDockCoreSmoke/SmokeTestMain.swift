@@ -7,6 +7,8 @@ struct SvnDockCoreSmokeTestMain {
     static func main() async throws {
         try commandBuilderChecks()
         try parserChecks()
+        try diffRegressionChecks()
+        try await HistoryRevisionSmoke.run()
         try locatorCheck()
         try await processRunnerCheck()
         try await schedulerCheck()
@@ -14,6 +16,7 @@ struct SvnDockCoreSmokeTestMain {
         if let path = ProcessInfo.processInfo.environment["SVNDOCK_INTEGRATION_WC"],
            !path.isEmpty {
             try await realSVNWorkingCopyCheck(at: URL(fileURLWithPath: path, isDirectory: true))
+            try await realSVNMissingAdditionCheck(at: URL(fileURLWithPath: path, isDirectory: true))
         }
         if let path = ProcessInfo.processInfo.environment["SVNDOCK_RESOLVE_WC"],
            !path.isEmpty {
@@ -49,6 +52,34 @@ struct SvnDockCoreSmokeTestMain {
         )
         try check(!commit.arguments.contains(commitMessage), "commit message argv privacy")
         try check(commit.standardInput == Data(commitMessage.utf8), "commit message stdin")
+        let largePaths = (0..<60_372).map { "assets/file-\($0).txt" }
+        let largeCommit = try builder.makeInvocation(
+            for: .commit(paths: largePaths, message: commitMessage, keepLocks: false),
+            in: workingCopy
+        )
+        try check(largeCommit.arguments.count < 10, "large commit bounded argv")
+        try check(
+            largeCommit.argumentFiles.first?.contents
+                == Data((largePaths.map { "./" + $0 }.joined(separator: "\n") + "\n").utf8),
+            "large commit preserves every target"
+        )
+        let specialCommit = try builder.makeInvocation(
+            for: .commit(
+                paths: ["-option", "测试 space@x.txt", "line\nbreak.txt", "carriage\rreturn.txt"],
+                message: commitMessage,
+                keepLocks: true
+            ),
+            in: workingCopy
+        )
+        try check(
+            specialCommit.argumentFiles.first?.contents == Data("./-option\n./测试 space@x.txt@\n".utf8),
+            "commit targets preserve Unicode, spaces, dash and peg escaping"
+        )
+        try check(
+            Array(specialCommit.arguments.suffix(3)) == ["--", "line\nbreak.txt", "carriage\rreturn.txt"],
+            "line breaks cannot inject extra file targets"
+        )
+        try check(specialCommit.arguments.contains("--no-unlock"), "commit preserves locks")
 
         let pegSafe = try builder.makeInvocation(
             for: .add(
@@ -238,6 +269,55 @@ struct SvnDockCoreSmokeTestMain {
         )
     }
 
+    private static func diffRegressionChecks() throws {
+        let patch = """
+        --- docs/API.md\t(revision 2)
+        +++ docs/API.md\t(working copy)
+        @@ -4,6 +4,9 @@
+        \u{20}
+         ---
+        \u{20}
+        +
+        +新增中文说明
+        +
+         ## 中文
+        \u{20}
+         ### 目标
+        @@ -106,7 +109,7 @@
+         - `theme` (`light` / `dark`)
+         - `lang` (例如 `zh` / `en`)
+         - `ui_mode` (固定 `embedded`)
+        -
+        +替换后的说明
+         示例：
+         ```text
+         https://pay.example.com/pay?user_id=123&theme=light&lang=zh&ui_mode=embedded
+        """
+        for text in [patch, patch.replacingOccurrences(of: "\n", with: "\r\n")] {
+            let document = UnifiedDiffParser.parse(text)
+            try check(document.hunks.count == 2, "LF/CRLF retain both screenshot hunks")
+            try check(document.hunks.map { $0.rows.count } == [9, 7], "all screenshot rows retained")
+            try check(document.hunks[0].rows[4].newLineNumber == 8, "inserted Chinese line number")
+            try check(document.hunks[1].rows[3].kind == .change, "second hunk replacement")
+            try check(document.hunks[1].rows.last?.oldLineNumber == 112, "old final file line number")
+            try check(document.hunks[1].rows.last?.newLineNumber == 115, "new final file line number")
+        }
+        let replacement = UnifiedDiffParser.parse("@@ -1,2 +1,2 @@\n-old 1\n-old 2\n+new 1\n+new 2\n\\ No newline at end of file\n")
+        let rows = replacement.hunks[0].unifiedRows
+        try check(rows.map(\.kind) == [.deletion, .deletion, .addition, .addition], "unified replacement block order")
+        try check(rows.map { $0.oldText ?? $0.newText ?? "" } == ["old 1", "old 2", "new 1", "new 2"], "unified content order")
+        try check(rows.last?.newHasTrailingNewline == false, "unified no-newline annotation")
+        let properties = "Property changes on: docs/API.md\n___________________________________________________________________\nAdded: svn:keywords\n## -0,0 +1 ##\n+Id\n"
+        let combined = UnifiedDiffParser.parse(patch + "\n" + properties)
+        try check(combined.hunks.count == 2 && combined.propertyChanges == properties, "text plus properties retained")
+        let binary = "Cannot display: file marked as a binary type.\nsvn:mime-type = application/octet-stream\n"
+        try check(UnifiedDiffParser.parse(binary).fallbackText == binary, "binary fallback retained")
+        let truncated = "@@ -1 +1 @@\n-old\n+new\n@@ -9,2 +9,2 @@\n-only one line\n"
+        let incomplete = UnifiedDiffParser.parse(truncated)
+        try check(incomplete.hunks.isEmpty && incomplete.fallbackText == truncated, "truncated hunks use complete raw fallback")
+        print("Diff regression checks passed: multiple hunks, file line numbers, CRLF, replacement ordering, newline markers, properties and binary fallback")
+    }
+
     private static func locatorCheck() throws {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("SvnDockLocatorSmoke-(UUID().uuidString)", isDirectory: true)
@@ -271,6 +351,88 @@ struct SvnDockCoreSmokeTestMain {
         ))
         try check(result.succeeded, "process exit")
         try check(result.standardOutput == input, "stdin/stdout round trip")
+
+        let fileInput = Data("temporary file\n".utf8)
+        let combined = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/bin/cat"),
+            arguments: ["", "-"],
+            standardInput: input,
+            argumentFiles: [ProcessArgumentFile(argumentIndex: 0, contents: fileInput)]
+        ))
+        try check(combined.succeeded && combined.standardOutput == fileInput + input, "argument file plus stdin")
+        let filePath = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+            arguments: ["%s", ""],
+            argumentFiles: [ProcessArgumentFile(argumentIndex: 1, contents: fileInput)]
+        ))
+        let fileURL = URL(fileURLWithPath: filePath.standardOutputString)
+        try check(filePath.succeeded && !filePath.standardOutputString.isEmpty, "temporary argument path")
+        try check(
+            !FileManager.default.fileExists(atPath: fileURL.deletingLastPathComponent().path),
+            "argument file directory cleaned after exit"
+        )
+
+        for arguments in [Array(repeating: "x", count: 60_372), [String(repeating: "x", count: 2_000_000)]] {
+            do {
+                _ = try await ProcessRunner().run(ProcessInvocation(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                    arguments: arguments
+                ))
+                throw SmokeFailure("oversized process should fail before launch")
+            } catch ProcessRunnerError.invalidInvocation {
+                // Must return a Swift error rather than aborting the app.
+            }
+        }
+
+        let temporaryRoot = FileManager.default.temporaryDirectory
+        func argumentDirectories() throws -> Set<String> {
+            Set(try FileManager.default.contentsOfDirectory(atPath: temporaryRoot.path)
+                .filter { $0.hasPrefix("SvnDock-process-") })
+        }
+        let beforeFailure = try argumentDirectories()
+        do {
+            _ = try await ProcessRunner().run(ProcessInvocation(
+                executableURL: temporaryRoot.appendingPathComponent("nonexistent-\(UUID().uuidString)"),
+                arguments: [""],
+                argumentFiles: [ProcessArgumentFile(argumentIndex: 0, contents: fileInput)]
+            ))
+            throw SmokeFailure("expected launch failure")
+        } catch ProcessRunnerError.launchFailed {
+            // Expected.
+        }
+        let afterFailure = try argumentDirectories()
+        try check(afterFailure == beforeFailure, "argument file cleaned after launch failure")
+
+        let marker = temporaryRoot.appendingPathComponent("SvnDock-cancel-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: marker) }
+        let task = Task {
+            try await ProcessRunner().run(ProcessInvocation(
+                executableURL: URL(fileURLWithPath: "/bin/sh"),
+                arguments: ["-c", "printf '%s' \"$1\" > \"$2\"; exec /bin/sleep 30", "fixture", "", marker.path],
+                argumentFiles: [ProcessArgumentFile(argumentIndex: 3, contents: fileInput)]
+            ))
+        }
+        defer { task.cancel() }
+        var cancelledFilePath = ""
+        for _ in 0..<200 {
+            cancelledFilePath = (try? String(contentsOf: marker, encoding: .utf8)) ?? ""
+            if !cancelledFilePath.isEmpty { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            throw SmokeFailure("expected cancelled process")
+        } catch is CancellationError {
+            // Expected.
+        }
+        try check(!cancelledFilePath.isEmpty, "cancel fixture launched")
+        try check(
+            !FileManager.default.fileExists(
+                atPath: URL(fileURLWithPath: cancelledFilePath).deletingLastPathComponent().path
+            ),
+            "argument file cleaned after cancellation"
+        )
     }
 
     private static func schedulerCheck() async throws {
@@ -899,6 +1061,98 @@ struct SvnDockCoreSmokeTestMain {
         )
         try check(commitResult.succeeded, "real svn commit via stdin")
 
+        // A missing scheduled addition must not prevent an unrelated selected
+        // file from being committed, nor be silently reverted by that commit.
+        let missing = root.appendingPathComponent("missing-add.txt")
+        let selected = root.appendingPathComponent("-selected 测试@x.txt")
+        try Data("missing soon".utf8).write(to: missing)
+        try Data("selected file".utf8).write(to: selected)
+        let addSelection = try await runner.run(builder.makeInvocation(
+            for: .add(paths: [missing.path, selected.path], parents: false, force: false, depth: nil),
+            in: workingCopy
+        ))
+        try check(addSelection.succeeded, "real svn add commit selection fixtures: \(addSelection.standardErrorString)")
+        try FileManager.default.removeItem(at: missing)
+        let missingCommit = try await runner.run(builder.makeInvocation(
+            for: .commit(paths: [missing.path], message: "missing file", keepLocks: false),
+            in: workingCopy
+        ))
+        try check(
+            !missingCommit.succeeded && missingCommit.standardErrorString.contains("E155010"),
+            "real svn reproduces missing addition failure without crashing"
+        )
+        let selectedCommit = try await runner.run(builder.makeInvocation(
+            for: .commit(paths: [selected.path], message: "只提交选中的文件", keepLocks: false),
+            in: workingCopy
+        ))
+        try check(selectedCommit.succeeded, "real svn selected special filename: \(selectedCommit.standardErrorString)")
+        let selectedLog = try await runner.run(builder.makeInvocation(
+            for: .log(paths: [selected.path], limit: 1), in: workingCopy
+        ))
+        let selectedHistory = try SVNXMLParser.parseLog(selectedLog.standardOutput)
+        try check(selectedHistory.first?.message == "只提交选中的文件", "real svn UTF-8 commit message")
+        let selectionStatus = try await runner.run(builder.makeInvocation(
+            for: .status(SVNStatusOptions()), in: workingCopy
+        ))
+        let selectionEntries = try SVNXMLParser.parseStatus(selectionStatus.standardOutput, workingCopyURL: root)
+        try check(
+            selectionEntries.contains { $0.path.hasSuffix("missing-add.txt") && $0.status == .missing },
+            "single file commit leaves missing addition unchanged"
+        )
+        let unscheduleMissing = try await runner.run(builder.makeInvocation(
+            for: .revert(paths: [missing.path], depth: .empty), in: workingCopy
+        ))
+        try check(unscheduleMissing.succeeded, "clean disposable missing addition fixture")
+
+        // Opt-in stress coverage: only use a disposable repository, as with
+        // SVNDOCK_INTEGRATION_WC itself. Normal smoke runs create no SVN data.
+        if let value = ProcessInfo.processInfo.environment["SVNDOCK_LARGE_COMMIT_COUNT"],
+           let count = Int(value), (4_097...100_000).contains(count) {
+            let directory = root.appendingPathComponent("large-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            var paths = [directory.path]
+            for index in 0..<count {
+                // Keep directory fan-out representative of a source tree.
+                // On case-insensitive macOS volumes SVN scans a file's parent
+                // to verify its case; one flat 60k-file directory makes that
+                // scan quadratic independently of the process argv transport.
+                let group = directory.appendingPathComponent("group-\(index / 100)", isDirectory: true)
+                if index % 100 == 0 {
+                    try FileManager.default.createDirectory(at: group, withIntermediateDirectories: false)
+                    paths.append(group.path)
+                }
+                let file = group.appendingPathComponent("file-\(index).txt")
+                try Data("\(index)\n".utf8).write(to: file)
+                paths.append(file.path)
+            }
+            let largeAdd = try await runner.run(builder.makeInvocation(
+                for: .add(paths: [directory.path], parents: false, force: false, depth: .infinity),
+                in: workingCopy
+            ))
+            try check(largeAdd.succeeded, "real svn large add")
+            let previousLog = try await runner.run(builder.makeInvocation(
+                for: .log(paths: [], limit: 1), in: workingCopy
+            ))
+            let previous = try SVNXMLParser.parseLog(previousLog.standardOutput).first?.revision ?? 0
+            let largeCommit = try await runner.run(builder.makeInvocation(
+                for: .commit(paths: paths, message: "large atomic commit", keepLocks: false),
+                in: workingCopy
+            ))
+            try check(largeCommit.succeeded, "real svn large commit: \(largeCommit.standardErrorString)")
+            let largeLog = try await runner.run(builder.makeInvocation(
+                for: .log(paths: [directory.path], limit: 1), in: workingCopy
+            ))
+            let revision = try SVNXMLParser.parseLog(largeLog.standardOutput).first
+            try check(revision?.message == "large atomic commit", "large commit log message")
+            try check(revision?.revision == previous + 1, "large commit creates exactly one revision")
+            let largeStatus = try await runner.run(builder.makeInvocation(
+                for: .status(SVNStatusOptions(paths: [directory.path])), in: workingCopy
+            ))
+            let largeEntries = try SVNXMLParser.parseStatus(largeStatus.standardOutput, workingCopyURL: root)
+            try check(largeStatus.succeeded && largeEntries.isEmpty, "all large commit targets are clean")
+            print("Real SVN commit passed: \(count) files in one transaction")
+        }
+
         let logResult = try await runner.run(
             builder.makeInvocation(
                 for: .log(paths: [file.path], limit: 5),
@@ -979,6 +1233,82 @@ struct SvnDockCoreSmokeTestMain {
             )
         )
         try check(revertResult.succeeded, "real svn revert")
+    }
+
+    private static func realSVNMissingAdditionCheck(at root: URL) async throws {
+        let executable = try SVNExecutableLocator().locate()
+        let runner = ProcessRunner()
+        let builder = try SVNCommandBuilder(executableURL: executable)
+        let undo = try SVNAdditionUndo(executableURL: executable, runner: runner)
+        let workingCopy = WorkingCopy(localPath: root)
+        func run(_ operation: SVNOperationKind) async throws -> ProcessResult {
+            let result = try await runner.run(builder.makeInvocation(for: operation, in: workingCopy))
+            try check(result.succeeded, "missing-add fixture command: \(result.standardErrorString)")
+            return result
+        }
+        let container = root.appendingPathComponent("missing-add-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: false)
+        let count = Int(ProcessInfo.processInfo.environment["SVNDOCK_MISSING_ADDITION_COUNT"] ?? "600") ?? 600
+        guard (1...100_000).contains(count) else { throw SmokeFailure("invalid missing addition test count") }
+        var selectedPaths = [container.path]
+        for index in 0..<count {
+            let group = container.appendingPathComponent("group-\(index / 100)", isDirectory: true)
+            if index % 100 == 0 {
+                try FileManager.default.createDirectory(at: group, withIntermediateDirectories: false)
+                selectedPaths.append(group.path)
+            }
+            let file = group.appendingPathComponent("file-\(index).txt")
+            try Data("temporary addition".utf8).write(to: file)
+            selectedPaths.append(file.path)
+        }
+        _ = try await run(.add(paths: [container.path], parents: false, force: false, depth: .infinity))
+        try FileManager.default.removeItem(at: container)
+        let targets = try undo.targets(for: selectedPaths, in: workingCopy)
+        try check(targets == [container.lastPathComponent], "missing subtree collapses to one root")
+
+        // A missing versioned file must block the complete mixed selection.
+        let versioned = root.appendingPathComponent("versioned-\(UUID().uuidString).txt")
+        try Data("committed file".utf8).write(to: versioned)
+        _ = try await run(.add(paths: [versioned.path], parents: false, force: false, depth: nil))
+        _ = try await run(.commit(paths: [versioned.path], message: "missing-add guard fixture", keepLocks: false))
+        try FileManager.default.removeItem(at: versioned)
+        do {
+            try await undo.run(targets: [container.path, versioned.path], in: workingCopy, missingOnly: true)
+            throw SmokeFailure("missing versioned file must block cleanup")
+        } catch SVNAdditionUndoError.notScheduledAddition {
+            // All validation must finish before any revert is performed.
+        }
+        let preservedInfo = try await run(.infoTargets(paths: [container.path]))
+        let preserved = try SVNXMLParser.parseInfo(preservedInfo.standardOutput)
+        try check(preserved.schedule == "add", "rejected cleanup preserves pending addition")
+        try check(!FileManager.default.fileExists(atPath: versioned.path), "cleanup does not restore missing versioned file")
+
+        let beforeLog = try await run(.log(paths: [], limit: 1))
+        let beforeRevision = try SVNXMLParser.parseLog(beforeLog.standardOutput).first?.revision
+        try await undo.run(targets: selectedPaths, in: workingCopy, missingOnly: true)
+        let afterStatus = try await run(.status(SVNStatusOptions()))
+        let entries = try SVNXMLParser.parseStatus(afterStatus.standardOutput, workingCopyURL: root)
+        try check(!entries.contains { $0.fileURL(relativeTo: workingCopy).path.hasPrefix(container.path) }, "all missing addition records removed")
+        try check(!FileManager.default.fileExists(atPath: container.path), "cleanup does not recreate deleted directory")
+        let afterLog = try await run(.log(paths: [], limit: 1))
+        let afterRevision = try SVNXMLParser.parseLog(afterLog.standardOutput).first?.revision
+        try check(beforeRevision == afterRevision, "missing addition cleanup creates no repository revision")
+        _ = try await run(.revert(paths: [versioned.path], depth: .empty))
+
+        // A file restored after opening the confirmation must be left intact.
+        let restored = root.appendingPathComponent("restored-add.txt")
+        try Data("keep me".utf8).write(to: restored)
+        _ = try await run(.add(paths: [restored.path], parents: false, force: false, depth: nil))
+        do {
+            try await undo.run(targets: [restored.path], in: workingCopy, missingOnly: true)
+            throw SmokeFailure("present file must block missing cleanup")
+        } catch SVNAdditionUndoError.notMissing {
+            // Expected.
+        }
+        try await undo.run(targets: [restored.path], in: workingCopy, missingOnly: false)
+        let retained = try Data(contentsOf: restored)
+        try check(retained == Data("keep me".utf8), "ordinary cancel-add preserves file contents")
+        print("Missing addition cleanup passed: \(count) files; versioned/restored guards and unchanged repository revision")
     }
 
     /// Exercises `svn resolve --accept working` against a disposable working

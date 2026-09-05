@@ -152,17 +152,20 @@ public struct SVNLogEntry: Identifiable, Codable, Hashable, Sendable {
     public let author: String?
     public let date: Date?
     public let message: String
+    public let changedPaths: [SVNChangedPath]
 
     public init(
         revision: Int,
         author: String?,
         date: Date?,
-        message: String
+        message: String,
+        changedPaths: [SVNChangedPath] = []
     ) {
         self.revision = revision
         self.author = author
         self.date = date
         self.message = message
+        self.changedPaths = changedPaths
     }
 
     public var id: Int { revision }
@@ -372,6 +375,7 @@ public enum SVNConflictChoice: String, Codable, Hashable, Sendable {
 public enum SVNOperationKind: Codable, Hashable, Sendable {
     case status(SVNStatusOptions)
     case info
+    case infoTargets(paths: [String])
     case update(revision: SVNRevision?)
     case commit(paths: [String], message: String, keepLocks: Bool)
     case add(paths: [String], parents: Bool, force: Bool, depth: SVNDepth?)
@@ -379,6 +383,9 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
     case cleanup
     case diff(paths: [String])
     case log(paths: [String], limit: Int)
+    case revisionLog(repositoryRoot: URL, revision: Int)
+    case revisionSummary(repositoryRoot: URL, revision: Int)
+    case revisionDiff(repositoryRoot: URL, revision: Int, change: SVNChangedPath)
     case resolve(paths: [String], accept: SVNConflictChoice)
     case properties(paths: [String])
     case setIgnore(path: String, patterns: [String])
@@ -387,7 +394,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
         switch self {
         case .update, .commit, .add, .revert, .cleanup, .resolve, .setIgnore:
             return true
-        case .status, .info, .diff, .log, .properties:
+        case .status, .info, .infoTargets, .diff, .log, .revisionLog, .revisionSummary, .revisionDiff, .properties:
             return false
         }
     }

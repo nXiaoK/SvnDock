@@ -41,8 +41,8 @@ public enum SVNCommandBuilderError: Error, LocalizedError, Equatable, Sendable {
 /// Builds an argv array for SVN. It never constructs a shell command string.
 ///
 /// Every selected path is normalized, checked to be within the working copy,
-/// and placed after `--` to prevent a filename beginning with `-` from being
-/// interpreted as an option.
+/// and passed after `--` or through a targets file to prevent a filename
+/// beginning with `-` from being interpreted as an option.
 public struct SVNCommandBuilder: Sendable {
     public let executableURL: URL
     public var nonInteractive: Bool
@@ -76,6 +76,7 @@ public struct SVNCommandBuilder: Sendable {
 
         var arguments: [String]
         var standardInput: Data? = nil
+        var argumentFiles: [ProcessArgumentFile] = []
 
         switch operation {
         case let .status(options):
@@ -106,6 +107,15 @@ public struct SVNCommandBuilder: Sendable {
             appendCommonOptions(to: &arguments)
             arguments.append(contentsOf: ["--", "."])
 
+        case let .infoTargets(paths):
+            arguments = ["info", "--xml", "--depth", "empty"]
+            appendCommonOptions(to: &arguments)
+            appendFileTargets(
+                try requiredSafePaths(paths, root: root, command: "info", escapePegRevision: true),
+                to: &arguments,
+                files: &argumentFiles
+            )
+
         case let .update(revision):
             arguments = ["update"]
             if let revision {
@@ -128,16 +138,21 @@ public struct SVNCommandBuilder: Sendable {
             arguments = ["commit", "--file", "/dev/stdin"]
             standardInput = Data(normalizedMessage.utf8)
             if keepLocks {
-                arguments.append("--keep-locks")
+                arguments.append("--no-unlock")
             }
             appendCommonOptions(to: &arguments)
-            arguments.append("--")
-            arguments.append(contentsOf: try safePaths(
+            let targets = try safePaths(
                 paths,
                 root: root,
                 emptyMeansRoot: true,
                 escapePegRevision: true
-            ))
+            )
+            // A single commit must remain one transaction even for tens of
+            // thousands of paths. A targets file avoids both Foundation's
+            // argument-count limit and the OS argument-byte limit.
+            // SVN splits targets files on CR/LF, so those unusual filenames
+            // must remain literal argv entries after the option terminator.
+            appendFileTargets(targets, to: &arguments, files: &argumentFiles)
 
         case let .add(paths, parents, force, depth):
             arguments = ["add"]
@@ -162,13 +177,18 @@ public struct SVNCommandBuilder: Sendable {
         case let .revert(paths, depth):
             arguments = ["revert", "--depth", depth.rawValue]
             appendCommonOptions(to: &arguments)
-            arguments.append("--")
-            arguments.append(contentsOf: try requiredSafePaths(
+            let targets = try requiredSafePaths(
                 paths,
                 root: root,
                 command: "revert",
                 escapePegRevision: true
-            ))
+            )
+            if targets.count > 1_000 || targets.reduce(0, { $0 + $1.utf8.count + 1 }) > 64_000 {
+                appendFileTargets(targets, to: &arguments, files: &argumentFiles)
+            } else {
+                arguments.append("--")
+                arguments.append(contentsOf: targets)
+            }
 
         case .cleanup:
             arguments = ["cleanup"]
@@ -189,6 +209,46 @@ public struct SVNCommandBuilder: Sendable {
                 emptyMeansRoot: true,
                 escapePegRevision: false
             ))
+
+        case let .revisionLog(repositoryRoot, revision):
+            try validateHistoryRevision(revision)
+            arguments = ["log", "--xml", "--verbose", "--revision", String(revision), "--limit", "1"]
+            appendCommonOptions(to: &arguments)
+            arguments.append(contentsOf: ["--", try repositoryTarget(repositoryRoot, revision: revision)])
+
+        case let .revisionSummary(repositoryRoot, revision):
+            try validateHistoryRevision(revision)
+            arguments = ["diff", "--summarize", "--xml", "--notice-ancestry",
+                         "--old", try repositoryTarget(repositoryRoot, revision: revision - 1),
+                         "--new", try repositoryTarget(repositoryRoot, revision: revision)]
+            appendCommonOptions(to: &arguments)
+
+        case let .revisionDiff(repositoryRoot, revision, change):
+            try validateHistoryRevision(revision)
+            let path = try SVNRepositoryPath.validate(change.path)
+            arguments = ["diff", "--internal-diff", "--depth", "empty"]
+            if change.comparesCopySource,
+               let sourcePath = change.copyFromPath, let sourceRevision = change.copyFromRevision {
+                guard sourceRevision >= 0, sourceRevision < revision else {
+                    throw SVNCommandBuilderError.invalidRevision(sourceRevision)
+                }
+                let source = try SVNRepositoryPath.validate(sourcePath)
+                arguments.append(contentsOf: [
+                    "--old", try repositoryTarget(repositoryRoot.appendingPathComponent(source), revision: sourceRevision),
+                    "--new", try repositoryTarget(repositoryRoot.appendingPathComponent(path), revision: revision)
+                ])
+                appendCommonOptions(to: &arguments)
+            } else {
+                // Anchoring both sides at repository roots also supports nodes
+                // missing on either side and paths that disappeared after N.
+                arguments.append(contentsOf: [
+                    "--notice-ancestry", "--show-copies-as-adds",
+                    "--old", try repositoryTarget(repositoryRoot, revision: revision - 1),
+                    "--new", try repositoryTarget(repositoryRoot, revision: revision)
+                ])
+                appendCommonOptions(to: &arguments)
+                arguments.append(contentsOf: ["--", path])
+            }
 
         case let .log(paths, limit):
             guard (1...10_000).contains(limit) else {
@@ -259,8 +319,11 @@ public struct SVNCommandBuilder: Sendable {
             executableURL: executableURL,
             arguments: arguments,
             currentDirectoryURL: root,
-            environment: ["LC_ALL": "C", "LANG": "C"],
-            standardInput: standardInput
+            // Keep diagnostics in English without forcing ASCII filenames or
+            // commit messages. macOS ships the en_US.UTF-8 locale.
+            environment: ["LC_ALL": "en_US.UTF-8", "LANG": "en_US.UTF-8"],
+            standardInput: standardInput,
+            argumentFiles: argumentFiles
         )
     }
 
@@ -268,6 +331,46 @@ public struct SVNCommandBuilder: Sendable {
         if nonInteractive {
             arguments.append("--non-interactive")
         }
+    }
+
+    private func validateHistoryRevision(_ revision: Int) throws {
+        guard revision > 0 else { throw SVNCommandBuilderError.invalidRevision(revision) }
+    }
+
+    private func repositoryTarget(_ url: URL, revision: Int) throws -> String {
+        guard let scheme = url.scheme, ["file", "http", "https", "svn", "svn+ssh"].contains(scheme),
+              url.query == nil, url.fragment == nil,
+              !url.absoluteString.contains("\0") else {
+            throw SVNCommandBuilderError.invalidArgument("Invalid SVN repository URL")
+        }
+        return url.absoluteString + "@" + String(revision)
+    }
+
+    private func appendFileTargets(
+        _ targets: [String],
+        to arguments: inout [String],
+        files: inout [ProcessArgumentFile]
+    ) {
+        let fileTargets = targets.filter { !$0.contains("\n") && !$0.contains("\r") }
+        if !fileTargets.isEmpty {
+            arguments.append("--targets")
+            files.append(ProcessArgumentFile(
+                argumentIndex: arguments.count,
+                contents: Data((fileTargets.map { "./" + $0 }.joined(separator: "\n") + "\n").utf8)
+            ))
+            arguments.append("") // Replaced with a private file path by ProcessRunner.
+        }
+        arguments.append("--")
+        arguments.append(contentsOf: targets.filter { $0.contains("\n") || $0.contains("\r") })
+    }
+
+    func normalizedLocalPaths(_ paths: [String], in workingCopy: WorkingCopy) throws -> [String] {
+        try requiredSafePaths(
+            paths,
+            root: workingCopy.localPath.standardizedFileURL,
+            command: "revert",
+            escapePegRevision: false
+        )
     }
 
     private func requiredSafePaths(

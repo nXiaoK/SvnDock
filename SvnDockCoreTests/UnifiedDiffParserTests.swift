@@ -138,6 +138,35 @@ final class UnifiedDiffParserTests: XCTestCase {
         XCTAssertEqual(Set(document.rows).count, 1)
     }
 
+    func testCRLFAndMixedLineEndingsKeepAllHunks() {
+        let document = UnifiedDiffParser.parse("--- 中文.md\r\n+++ 中文.md\r\n@@ -4 +4 @@\r\n-old\r\n+新行\r\n@@ -106 +109 @@\n-last\n+末行\n")
+        XCTAssertEqual(document.hunks.count, 2)
+        XCTAssertEqual(document.rows.map(\.newLineNumber), [4, 109])
+        XCTAssertEqual(document.rows.map(\.newText), ["新行", "末行"])
+    }
+
+    func testUnifiedReplacementKeepsAllRemovalsBeforeInsertions() {
+        let document = UnifiedDiffParser.parse("@@ -1,2 +1,2 @@\n-old 1\n-old 2\n+new 1\n+new 2\n\\ No newline at end of file\n")
+        let rows = document.hunks[0].unifiedRows
+        XCTAssertEqual(rows.map(\.kind), [.deletion, .deletion, .addition, .addition])
+        XCTAssertEqual(rows.map { $0.oldText ?? $0.newText }, ["old 1", "old 2", "new 1", "new 2"])
+        XCTAssertFalse(rows[3].newHasTrailingNewline)
+    }
+
+    func testPropertyChangesAreRetainedAlongsideText() {
+        let properties = "Property changes on: file.txt\nAdded: svn:keywords\n## -0,0 +1 ##\n+Id\n"
+        let document = UnifiedDiffParser.parse("@@ -1 +1 @@\n-old\n+new\n" + properties)
+        XCTAssertEqual(document.hunks.count, 1)
+        XCTAssertEqual(document.propertyChanges, properties)
+    }
+
+    func testIncompleteLaterHunkDoesNotSilentlyDisappear() {
+        let text = "@@ -1 +1 @@\n-old\n+new\n@@ -9,2 +9,2 @@\n-truncated\n"
+        let document = UnifiedDiffParser.parse(text)
+        XCTAssertTrue(document.hunks.isEmpty)
+        XCTAssertEqual(document.fallbackText, text)
+    }
+
     private func assertSendable<T: Sendable>(_ value: T) {
         _ = value
     }

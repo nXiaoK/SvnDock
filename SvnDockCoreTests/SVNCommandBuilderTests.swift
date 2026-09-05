@@ -172,6 +172,39 @@ final class SVNCommandBuilderTests: XCTestCase {
         XCTAssertTrue(invocation.arguments.contains("/dev/stdin"))
     }
 
+    func testLargeCommitUsesOneTargetsFile() throws {
+        let paths = (0..<60_372).map { "assets/file-\($0).txt" }
+        let invocation = try SVNCommandBuilder(executableURL: executableURL).makeInvocation(
+            for: .commit(paths: paths, message: "large commit", keepLocks: true),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertLessThan(invocation.arguments.count, 10)
+        XCTAssertTrue(invocation.arguments.contains("--no-unlock"))
+        let targets = try XCTUnwrap(invocation.argumentFiles.first)
+        XCTAssertEqual(invocation.argumentFiles.count, 1)
+        XCTAssertEqual(invocation.arguments[targets.argumentIndex - 1], "--targets")
+        XCTAssertEqual(
+            String(decoding: targets.contents, as: UTF8.self),
+            paths.map { "./" + $0 }.joined(separator: "\n") + "\n"
+        )
+        XCTAssertEqual(invocation.standardInput, Data("large commit".utf8))
+    }
+
+    func testCommitTargetsPreserveSpecialFilenames() throws {
+        let invocation = try SVNCommandBuilder(executableURL: executableURL).makeInvocation(
+            for: .commit(
+                paths: ["-option", "测试 space@x.txt", "line\nbreak.txt", "carriage\rreturn.txt"],
+                message: "special names",
+                keepLocks: false
+            ),
+            in: WorkingCopy(localPath: rootURL)
+        )
+
+        XCTAssertEqual(invocation.argumentFiles.first?.contents, Data("./-option\n./测试 space@x.txt@\n".utf8))
+        XCTAssertEqual(Array(invocation.arguments.suffix(3)), ["--", "line\nbreak.txt", "carriage\rreturn.txt"])
+    }
+
     func testTraversalOutsideWorkingCopyIsRejected() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
 

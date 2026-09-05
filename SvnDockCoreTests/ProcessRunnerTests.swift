@@ -44,6 +44,62 @@ final class ProcessRunnerTests: XCTestCase {
         XCTAssertNotEqual(result.terminationStatus, 0)
     }
 
+    func testReadsArgumentFileAndStandardInput() async throws {
+        let result = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/bin/cat"),
+            arguments: ["", "-"],
+            standardInput: Data("stdin".utf8),
+            argumentFiles: [ProcessArgumentFile(argumentIndex: 0, contents: Data("file\n".utf8))]
+        ))
+
+        XCTAssertTrue(result.succeeded)
+        XCTAssertEqual(result.standardOutputString, "file\nstdin")
+    }
+
+    func testRemovesArgumentFileAfterExit() async throws {
+        let result = try await ProcessRunner().run(ProcessInvocation(
+            executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+            arguments: ["%s", ""],
+            argumentFiles: [ProcessArgumentFile(argumentIndex: 1, contents: Data("targets".utf8))]
+        ))
+
+        XCTAssertTrue(result.succeeded)
+        let file = URL(fileURLWithPath: result.standardOutputString)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.deletingLastPathComponent().path))
+    }
+
+    func testRejectsExcessiveArgumentCountAndBytesWithoutCrashing() async throws {
+        for arguments in [Array(repeating: "x", count: 60_372), [String(repeating: "x", count: 2_000_000)]] {
+            do {
+                _ = try await ProcessRunner().run(ProcessInvocation(
+                    executableURL: URL(fileURLWithPath: "/usr/bin/true"),
+                    arguments: arguments
+                ))
+                XCTFail("Expected invalid invocation")
+            } catch let error as ProcessRunnerError {
+                guard case .invalidInvocation = error else {
+                    return XCTFail("Unexpected error: \(error)")
+                }
+            }
+        }
+    }
+
+    func testRejectsInvalidArgumentFileIndex() async throws {
+        do {
+            _ = try await ProcessRunner().run(ProcessInvocation(
+                executableURL: URL(fileURLWithPath: "/bin/cat"),
+                arguments: [],
+                argumentFiles: [ProcessArgumentFile(argumentIndex: 0, contents: Data())]
+            ))
+            XCTFail("Expected invalid invocation")
+        } catch let error as ProcessRunnerError {
+            guard case .invalidInvocation = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
     func testRejectsNULArgumentBeforeLaunch() async {
         do {
             _ = try await ProcessRunner().run(ProcessInvocation(

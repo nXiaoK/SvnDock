@@ -66,6 +66,12 @@ public enum SVNXMLParser {
         return delegate.entries
     }
 
+    public static func parseDiffSummary(_ data: Data) throws -> [SVNDiffSummaryEntry] {
+        let delegate = DiffSummaryXMLDelegate()
+        try parse(data, delegate: delegate)
+        return delegate.entries
+    }
+
     private static func parse(_ data: Data, delegate: XMLParserDelegate) throws {
         let parser = XMLParser(data: data)
         parser.delegate = delegate
@@ -156,12 +162,14 @@ private final class LogXMLDelegate: NSObject, XMLParserDelegate {
         var author: String?
         var date: Date?
         var message = ""
+        var changedPaths: [SVNChangedPath] = []
     }
 
     private(set) var entries: [SVNLogEntry] = []
     private(set) var hasEntryWithoutRevision = false
     private var currentEntry: PendingEntry?
     private var text = ""
+    private var pathAttributes: [String: String]?
 
     func parser(
         _ parser: XMLParser,
@@ -173,6 +181,8 @@ private final class LogXMLDelegate: NSObject, XMLParserDelegate {
         text = ""
         if elementName == "logentry" {
             currentEntry = PendingEntry(revision: attributeDict["revision"].flatMap(Int.init))
+        } else if elementName == "path" {
+            pathAttributes = attributeDict
         }
     }
 
@@ -187,6 +197,17 @@ private final class LogXMLDelegate: NSObject, XMLParserDelegate {
         qualifiedName qName: String?
     ) {
         switch elementName {
+        case "path":
+            if let attributes = pathAttributes {
+                currentEntry?.changedPaths.append(SVNChangedPath(
+                    path: text,
+                    action: SVNChangeAction(rawValue: attributes["action"] ?? "") ?? .unknown,
+                    kind: SVNNodeKind(svnValue: attributes["kind"]),
+                    copyFromPath: attributes["copyfrom-path"],
+                    copyFromRevision: attributes["copyfrom-rev"].flatMap(Int.init)
+                ))
+            }
+            pathAttributes = nil
         case "author":
             currentEntry?.author = text
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -208,12 +229,42 @@ private final class LogXMLDelegate: NSObject, XMLParserDelegate {
                 revision: revision,
                 author: pending.author,
                 date: pending.date,
-                message: pending.message
+                message: pending.message,
+                changedPaths: pending.changedPaths
             ))
             currentEntry = nil
         default:
             break
         }
+        text = ""
+    }
+}
+
+private final class DiffSummaryXMLDelegate: NSObject, XMLParserDelegate {
+    var entries: [SVNDiffSummaryEntry] = []
+    private var attributes: [String: String]?
+    private var text = ""
+
+    func parser(_ parser: XMLParser, didStartElement elementName: String, namespaceURI: String?,
+                qualifiedName qName: String?, attributes attributeDict: [String: String] = [:]) {
+        if elementName == "path" { attributes = attributeDict; text = "" }
+    }
+    func parser(_ parser: XMLParser, foundCharacters string: String) {
+        if attributes != nil { text += string }
+    }
+    func parser(_ parser: XMLParser, didEndElement elementName: String, namespaceURI: String?, qualifiedName qName: String?) {
+        guard elementName == "path", let attributes else { return }
+        let action: SVNChangeAction = switch attributes["item"] {
+        case "added": .added
+        case "deleted": .deleted
+        case "replaced": .replaced
+        default: .modified
+        }
+        entries.append(SVNDiffSummaryEntry(
+            url: text, action: action,
+            kind: SVNNodeKind(svnValue: attributes["kind"])
+        ))
+        self.attributes = nil
         text = ""
     }
 }

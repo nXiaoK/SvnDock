@@ -1,4 +1,17 @@
 import Foundation
+import Darwin
+
+/// A private temporary input file whose path replaces one argument at launch.
+/// The runner owns its lifetime, including cleanup after failure/cancellation.
+public struct ProcessArgumentFile: Hashable, Sendable {
+    public let argumentIndex: Int
+    public let contents: Data
+
+    public init(argumentIndex: Int, contents: Data) {
+        self.argumentIndex = argumentIndex
+        self.contents = contents
+    }
+}
 
 public struct ProcessInvocation: Hashable, Sendable {
     public let executableURL: URL
@@ -7,19 +20,22 @@ public struct ProcessInvocation: Hashable, Sendable {
     /// Values are merged over the app's inherited environment.
     public let environment: [String: String]
     public let standardInput: Data?
+    public let argumentFiles: [ProcessArgumentFile]
 
     public init(
         executableURL: URL,
         arguments: [String],
         currentDirectoryURL: URL? = nil,
         environment: [String: String] = [:],
-        standardInput: Data? = nil
+        standardInput: Data? = nil,
+        argumentFiles: [ProcessArgumentFile] = []
     ) {
         self.executableURL = executableURL
         self.arguments = arguments
         self.currentDirectoryURL = currentDirectoryURL
         self.environment = environment
         self.standardInput = standardInput
+        self.argumentFiles = argumentFiles
     }
 }
 
@@ -100,6 +116,20 @@ public struct ProcessRunner: ProcessRunning, Sendable {
     }
 
     private static func validate(_ invocation: ProcessInvocation) throws {
+        // Foundation can raise NSInvalidArgumentException here, which Swift
+        // do/catch cannot catch. Leave one slot for the executable (argv[0]).
+        guard invocation.arguments.count < 4_096 else {
+            throw ProcessRunnerError.invalidInvocation("too many command arguments; use a targets file")
+        }
+
+        var fileIndices = Set<Int>()
+        for file in invocation.argumentFiles {
+            guard invocation.arguments.indices.contains(file.argumentIndex),
+                  fileIndices.insert(file.argumentIndex).inserted else {
+                throw ProcessRunnerError.invalidInvocation("invalid or duplicate argument file index")
+            }
+        }
+
         guard invocation.executableURL.isFileURL,
               invocation.executableURL.path.hasPrefix("/") else {
             throw ProcessRunnerError.invalidInvocation("executable must be an absolute file URL")
@@ -134,19 +164,58 @@ public struct ProcessRunner: ProcessRunning, Sendable {
         let errorPipe = Pipe()
         let inputPipe = Pipe()
 
+        var temporaryDirectory: URL?
+        defer {
+            if let temporaryDirectory {
+                try? FileManager.default.removeItem(at: temporaryDirectory)
+            }
+        }
+        var arguments = invocation.arguments
+        if !invocation.argumentFiles.isEmpty {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SvnDock-process-\(UUID().uuidString)", isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(
+                    at: directory,
+                    withIntermediateDirectories: false,
+                    attributes: [.posixPermissions: 0o700]
+                )
+                temporaryDirectory = directory
+                for file in invocation.argumentFiles {
+                    let url = directory.appendingPathComponent("input-\(file.argumentIndex)")
+                    try file.contents.write(to: url, options: .withoutOverwriting)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+                    arguments[file.argumentIndex] = url.path
+                }
+            } catch {
+                throw ProcessRunnerError.launchFailed(error.localizedDescription)
+            }
+        }
+
+        let environment = ProcessInfo.processInfo.environment.merging(
+            invocation.environment,
+            uniquingKeysWith: { _, newValue in newValue }
+        )
+        let argumentBytes = arguments.reduce(invocation.executableURL.path.utf8.count + 1) {
+            $0 + $1.utf8.count + 1
+        }
+        let environmentBytes = environment.reduce(0) {
+            $0 + $1.key.utf8.count + $1.value.utf8.count + 2
+        }
+        let pointerBytes = (arguments.count + environment.count + 3) * MemoryLayout<UnsafeRawPointer>.size
+        let byteLimit = sysconf(_SC_ARG_MAX)
+        guard byteLimit <= 0 || argumentBytes + environmentBytes + pointerBytes < byteLimit else {
+            throw ProcessRunnerError.invalidInvocation("command arguments and environment exceed the system size limit")
+        }
+
         process.executableURL = invocation.executableURL
-        process.arguments = invocation.arguments
+        process.arguments = arguments
         process.currentDirectoryURL = invocation.currentDirectoryURL
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         process.standardInput = inputPipe
 
-        if !invocation.environment.isEmpty {
-            process.environment = ProcessInfo.processInfo.environment.merging(
-                invocation.environment,
-                uniquingKeysWith: { _, newValue in newValue }
-            )
-        }
+        process.environment = environment
 
         guard state.install(process) else {
             throw CancellationError()
