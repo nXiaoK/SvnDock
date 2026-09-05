@@ -30,8 +30,9 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Expand commit diffs with **放大查看** (Shift-Command-F) to read changes and
   navigate files. **返回提交** or Escape returns to the draft with its message
   and file selection preserved.
-- Select a history entry to browse its changed paths and historical diffs, or
-  double-click for a larger commit detail window. Added/deleted/replaced paths,
+- Single-click a history entry to update its changed paths, then single-click
+  a changed path to preview its historical diff. Double-click either list to
+  open a larger commit detail window. Added/deleted/replaced paths,
   copy/move ancestry, directory properties and binary output are supported.
 - Run Update, Commit, Add, Revert, Resolve, Cleanup and safe `svn:ignore`
   workflows.

@@ -133,10 +133,6 @@ struct HistoryInspectorView: View {
                     ForEach(displayedEntries) { entry in
                         HistoryEntryRow(entry: entry)
                             .tag(entry.revision)
-                            .onTapGesture(count: 2) {
-                                selectedRevision = entry.revision
-                                if let request = revisionRequest { openWindow(value: request) }
-                            }
                             .contextMenu {
                                 Button("在独立窗口中查看提交详情") {
                                     selectedRevision = entry.revision
@@ -148,6 +144,14 @@ struct HistoryInspectorView: View {
                     }
                 }
                 .listStyle(.plain)
+                // Let List handle clicks so selection updates before a double-click action.
+                .contextMenu(forSelectionType: Int.self) { _ in
+                    EmptyView()
+                } primaryAction: { revisions in
+                    guard revisions.count == 1, let revision = revisions.first else { return }
+                    selectedRevision = revision
+                    if let request = revisionRequest { openWindow(value: request) }
+                }
                 .frame(minHeight: 120, idealHeight: 180, maxHeight: revisionRequest == nil ? .infinity : 240)
 
                 if let request = revisionRequest {

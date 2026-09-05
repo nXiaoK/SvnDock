@@ -156,10 +156,6 @@ struct HistoryRevisionView: View {
                             HistoryChangedPathRow(change: change)
                                 .tag(change.path)
                                 .id(change.path)
-                                .onTapGesture(count: 2) {
-                                    model.select(change.path)
-                                    if !expanded { openExpanded(path: change.path) }
-                                }
                                 .contextMenu {
                                     Button("复制仓库路径") { copy(change.path) }
                                     if let source = change.copyFromPath {
@@ -172,6 +168,14 @@ struct HistoryRevisionView: View {
                         }
                     }
                     .listStyle(.plain)
+                    // A native primary action preserves single-click and keyboard selection.
+                    .contextMenu(forSelectionType: String.self) { _ in
+                        EmptyView()
+                    } primaryAction: { paths in
+                        guard paths.count == 1, let path = paths.first else { return }
+                        model.select(path)
+                        if !expanded { openExpanded(path: path) }
+                    }
                     .onChange(of: model.selectedPath) { _, path in
                         if let path { proxy.scrollTo(path) }
                     }
