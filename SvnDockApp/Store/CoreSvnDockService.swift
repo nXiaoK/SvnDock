@@ -59,12 +59,21 @@ actor CoreSvnDockService: SvnDockServicing {
     func registerWorkingCopy(at url: URL) async throws -> SvnDockWorkingCopy {
         let requestedURL = url.standardizedFileURL
         var workingCopy = SvnDockCore.WorkingCopy(localPath: requestedURL)
-        let info = try await loadInfo(for: workingCopy)
+        var info = try await loadInfo(for: workingCopy)
 
         if let rootURL = info.workingCopyRootURL {
+            let canonicalRoot = rootURL.standardizedFileURL
+            if canonicalRoot != requestedURL {
+                // `svn info` on a subdirectory describes that subdirectory's
+                // URL/revision. Registration always represents the WC root.
+                info = try await loadInfo(for: SvnDockCore.WorkingCopy(
+                    id: workingCopy.id,
+                    localPath: canonicalRoot
+                ))
+            }
             workingCopy = SvnDockCore.WorkingCopy(
                 id: workingCopy.id,
-                localPath: rootURL,
+                localPath: canonicalRoot,
                 repositoryURL: info.url,
                 repositoryRootURL: info.repositoryRootURL,
                 repositoryUUID: info.repositoryUUID,
@@ -91,15 +100,15 @@ actor CoreSvnDockService: SvnDockServicing {
             )
         }
 
-        coreWorkingCopies[workingCopy.id] = workingCopy
         _ = try await sharedStore.register(workingCopy)
+        coreWorkingCopies[workingCopy.id] = workingCopy
         postSharedStateChanged()
         return makeUIWorkingCopy(workingCopy)
     }
 
     func unregisterWorkingCopy(id: UUID) async throws {
-        let removedCopy = coreWorkingCopies.removeValue(forKey: id)
         _ = try await sharedStore.unregister(id: id)
+        let removedCopy = coreWorkingCopies.removeValue(forKey: id)
 
         if let removedCopy {
             try await removeBadges(

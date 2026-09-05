@@ -5,6 +5,7 @@ struct AppRegressionSmoke {
     static func main() async throws {
         try await StoreRegressionChecks.selectionCancelsDiff()
         try await StoreRegressionChecks.directoryRetryRejectsOldError()
+        try await RegistrationRegressionChecks.run()
         try ViewsRegressionChecks.snapshotStorageAndGrouping()
         try ViewsRegressionChecks.diffPresentationPreservesRows()
         try await ViewsRegressionChecks.clearedDiffDiscardsPresentation()
