@@ -79,6 +79,7 @@ final class SvnDockStore: ObservableObject {
     @Published var isPresentingIgnoreConfirmation = false
 
     private let service: any SvnDockServicing
+    let commitDraftStore: SvnDockCommitDraftStore
     private let finderQueueCoordinator: FinderCommandQueueCoordinator?
     private var finderConsumerLease: FinderCommandConsumerLease?
     private nonisolated(unsafe) var finderHandoffObserver: NSObjectProtocol?
@@ -119,9 +120,11 @@ final class SvnDockStore: ObservableObject {
 
     init(
         service: any SvnDockServicing,
-        finderSharedStore: FinderSharedStore? = nil
+        finderSharedStore: FinderSharedStore? = nil,
+        commitDraftStore: SvnDockCommitDraftStore? = nil
     ) {
         self.service = service
+        self.commitDraftStore = commitDraftStore ?? SvnDockCommitDraftStore()
         self.finderQueueCoordinator = finderSharedStore.flatMap {
             try? FinderCommandQueueCoordinator(directoryURL: $0.directoryURL)
         }
@@ -689,6 +692,9 @@ final class SvnDockStore: ObservableObject {
             _ = await acknowledgeFinderClaim(executingClaim, outcome: .completed)
         }
 
+        if succeeded, !Task.isCancelled {
+            commitDraftStore.remove(for: request.workingCopy)
+        }
         activeOperation = nil
         if succeeded {
             await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)

@@ -128,7 +128,7 @@ public struct SVNCommandBuilder: Sendable {
             appendCommonOptions(to: &arguments)
             arguments.append(contentsOf: ["--", "."])
 
-        case let .commit(paths, message, keepLocks):
+        case let .commit(paths, message, keepLocks, depth):
             let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedMessage.isEmpty else {
                 throw SVNCommandBuilderError.emptyCommitMessage
@@ -137,6 +137,9 @@ public struct SVNCommandBuilder: Sendable {
             // Keep commit text out of argv/process listings. Subversion reads
             // the log message from the process pipe exposed as `/dev/stdin`.
             arguments = ["commit", "--file", "/dev/stdin"]
+            if let depth {
+                arguments.append(contentsOf: ["--depth", depth.rawValue])
+            }
             standardInput = Data(normalizedMessage.utf8)
             if keepLocks {
                 arguments.append("--no-unlock")
@@ -207,10 +210,13 @@ public struct SVNCommandBuilder: Sendable {
             appendCommonOptions(to: &arguments)
             arguments.append(contentsOf: ["--", "."])
 
-        case let .diff(paths):
+        case let .diff(paths, depth):
             // Side-by-side presentation relies on Subversion's unified diff
             // grammar, regardless of any external diff command in user config.
             arguments = ["diff", "--internal-diff"]
+            if let depth {
+                arguments.append(contentsOf: ["--depth", depth.rawValue])
+            }
             appendCommonOptions(to: &arguments)
             arguments.append("--")
             // `svn diff` treats a local trailing `@` as part of the filename,

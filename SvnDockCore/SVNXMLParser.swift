@@ -280,6 +280,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
         var revision: Int?
         var isCopied = false
         var isSwitched = false
+        var isFileExternal: Bool?
         var isTreeConflicted = false
         var commitRevision: Int?
         var commitAuthor: String?
@@ -323,6 +324,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
             currentEntry?.revision = Self.integer(attributeDict["revision"])
             currentEntry?.isCopied = Self.boolean(attributeDict["copied"])
             currentEntry?.isSwitched = Self.boolean(attributeDict["switched"])
+            currentEntry?.isFileExternal = attributeDict["file-external"].map { Self.boolean($0) }
             currentEntry?.isTreeConflicted = Self.boolean(attributeDict["tree-conflicted"])
 
         case "repos-status":
@@ -381,6 +383,7 @@ private final class StatusXMLDelegate: NSObject, XMLParserDelegate {
                     revision: pending.revision,
                     isCopied: pending.isCopied,
                     isSwitched: pending.isSwitched,
+                    isFileExternal: pending.isFileExternal,
                     isTreeConflicted: pending.isTreeConflicted,
                     changelist: pending.changelist,
                     lastCommit: commit

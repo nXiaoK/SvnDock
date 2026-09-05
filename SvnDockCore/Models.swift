@@ -207,6 +207,8 @@ public struct StatusEntry: Identifiable, Codable, Hashable, Sendable {
     public let revision: Int?
     public let isCopied: Bool
     public let isSwitched: Bool
+    /// Optional so persisted status snapshots from older versions still decode.
+    public let isFileExternal: Bool?
     public let isTreeConflicted: Bool
     public let changelist: String?
     public let lastCommit: SVNCommitInfo?
@@ -220,6 +222,7 @@ public struct StatusEntry: Identifiable, Codable, Hashable, Sendable {
         revision: Int? = nil,
         isCopied: Bool = false,
         isSwitched: Bool = false,
+        isFileExternal: Bool? = nil,
         isTreeConflicted: Bool = false,
         changelist: String? = nil,
         lastCommit: SVNCommitInfo? = nil
@@ -232,6 +235,7 @@ public struct StatusEntry: Identifiable, Codable, Hashable, Sendable {
         self.revision = revision
         self.isCopied = isCopied
         self.isSwitched = isSwitched
+        self.isFileExternal = isFileExternal
         self.isTreeConflicted = isTreeConflicted
         self.changelist = changelist
         self.lastCommit = lastCommit
@@ -377,12 +381,12 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
     case info
     case infoTargets(paths: [String])
     case update(revision: SVNRevision?)
-    case commit(paths: [String], message: String, keepLocks: Bool)
+    case commit(paths: [String], message: String, keepLocks: Bool, depth: SVNDepth? = nil)
     case add(paths: [String], parents: Bool, force: Bool, depth: SVNDepth?)
     case delete(paths: [String])
     case revert(paths: [String], depth: SVNDepth)
     case cleanup
-    case diff(paths: [String])
+    case diff(paths: [String], depth: SVNDepth? = nil)
     case log(paths: [String], limit: Int)
     case revisionLog(repositoryRoot: URL, revision: Int)
     case revisionSummary(repositoryRoot: URL, revision: Int)

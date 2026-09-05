@@ -33,6 +33,9 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Expand commit diffs with **放大查看** (Shift-Command-F) to read changes and
   navigate files. **返回提交** or Escape returns to the draft with its message
   and file selection preserved.
+- Commit drafts retain their message, included paths and preview per working
+  copy across closing and restarting. Filter the checklist by path or show only
+  included items; new changes do not silently join a saved selection.
 - Single-click a history entry to update its changed paths, then single-click
   a changed path to preview its historical diff. Double-click either list to
   open a larger commit detail window. Added/deleted/replaced paths,
@@ -58,8 +61,14 @@ for the workloads, verification and remaining memory limits.
 Large commits use a temporary targets file and remain a single SVN transaction.
 Missing files are excluded from the commit checklist: restore the file, cancel
 its pending addition, or schedule its deletion as appropriate before retrying.
-Committing a directory still includes its descendants, which may contain missing
-files. SvnDock does not automatically change their add/delete schedules.
+Selected nodes commit at depth `empty`: directory properties do not include
+unselected child edits. Added children require their uncommitted parent
+directories to be selected. Directory deletion still removes the repository
+subtree, and copied directories retain the source tree and history; their
+unselected local child edits remain local. The checklist explains these tree
+operations. SVN status and required parent selections are rechecked under the
+working-copy lock before one commit transaction. File externals must be handled
+separately. SvnDock does not automatically change add/delete schedules.
 
 For an already-versioned file or directory deleted from disk, choose
 **标记为 SVN 删除…** (Schedule SVN deletion) in its context menu or inspector.

@@ -237,7 +237,7 @@ actor CoreSvnDockService: SvnDockServicing {
         in workingCopy: SvnDockWorkingCopy
     ) async throws -> String {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        let result = try await run(.diff(paths: [relativePath]), in: coreCopy)
+        let result = try await run(.diff(paths: [relativePath], depth: .empty), in: coreCopy)
         return result.standardOutputString
     }
 
@@ -299,10 +299,15 @@ actor CoreSvnDockService: SvnDockServicing {
         message: String
     ) async throws {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        _ = try await run(
-            .commit(paths: relativePaths, message: message, keepLocks: false),
-            in: coreCopy
-        )
+        let commit = try SVNSelectedCommit(executableURL: executableLocator.locate(), runner: processRunner)
+        let targets = try commit.targets(for: relativePaths, in: coreCopy)
+        let operationLock = crossProcessLock
+        try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                try Self.validateResolvedBoundary(relativePaths: targets, in: coreCopy)
+                try await commit.run(targets: targets, message: message, in: coreCopy)
+            }
+        }
     }
 
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws {

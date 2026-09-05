@@ -7,6 +7,8 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Working-copy-specific commit drafts survive closing and restarting, with path
+  filtering, inclusion filtering and explicit clearing of message and selection.
 - Independent Settings switches for launch at login and menu bar visibility.
   Login Items use macOS registration state with approval and error feedback.
   The menu bar provides cached working-copy status, navigation, refresh,
@@ -29,6 +31,9 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- Selected commits keep directory property changes shallow, validate required
+  added parents and current SVN status, and reject file externals before writing.
+  Directory copy/delete scope is explained without including unselected local edits.
 - History selection uses soft blue cards and readable text in light and dark
   appearances, matching the workspace while retaining native list interaction.
 - History entries and their changed paths update the embedded preview on a
