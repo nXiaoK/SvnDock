@@ -303,17 +303,25 @@ final class FinderSync: FIFinderSync {
     }
 
     private func reloadSharedState() {
-        let roots = state.reload()
-        let rootURLs = roots.compactMap(\.canonicalURL)
+        state.reload()
         // Finder monitors every registered root recursively. Registering each
         // descendant would be both redundant and prohibitively expensive for
         // large working copies.
         if Thread.isMainThread {
-            controller.directoryURLs = Set(rootURLs)
+            updateObservedDirectories()
         } else {
-            DispatchQueue.main.async {
-                FIFinderSyncController.default().directoryURLs = Set(rootURLs)
+            DispatchQueue.main.async { [weak self] in
+                self?.updateObservedDirectories()
             }
+        }
+    }
+
+    private func updateObservedDirectories() {
+        // Read the latest state after reaching the main queue so an older
+        // callback cannot restore roots removed by a newer reload.
+        let rootURLs = Set(state.registeredRoots().compactMap(\.canonicalURL))
+        if controller.directoryURLs != rootURLs {
+            controller.directoryURLs = rootURLs
         }
     }
 

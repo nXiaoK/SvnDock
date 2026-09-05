@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 enum SharedContainerError: LocalizedError {
@@ -36,7 +37,7 @@ enum SharedContainerError: LocalizedError {
 ///
 /// Files are intentionally small, bounded, and replace-only. The extension
 /// never touches `.svn`, invokes a process, or communicates with a repository.
-final class SharedContainer {
+final class SharedContainer: SharedStateLoading {
     static let appGroupInfoKey = "SvnDockAppGroupIdentifier"
     static let localSharedDirectoryInfoKey = "SvnDockLocalSharedDirectory"
     static let defaultAppGroupIdentifier = "group.com.svndock.shared"
@@ -263,26 +264,50 @@ final class SharedContainer {
     }
 }
 
-/// Thread-safe in-memory view used by Finder callbacks.
+protocol SharedStateLoading: AnyObject {
+    var registeredRootsURL: URL? { get }
+    var badgeSnapshotURL: URL? { get }
+    func loadRegisteredRoots() throws -> [RegisteredRoot]
+    func loadBadgeSnapshot() throws -> BadgeSnapshotDocument
+}
+
+/// Thread-safe in-memory view used by Finder callbacks. File revisions avoid
+/// reading and decoding the same snapshot for every directory/menu callback.
 final class SharedStateStore {
-    private let container: SharedContainer
+    private let container: any SharedStateLoading
     private let lock = NSLock()
+    // Keep file reads ordered without blocking the fast in-memory badge path.
+    private let reloadLock = NSLock()
     private var roots: [RegisteredRoot] = []
     private var badgeEntries: [String: BadgeKind] = [:]
+    private var rootsRevision: SharedFileRevision?
+    private var badgesRevision: SharedFileRevision?
 
-    init(container: SharedContainer) {
+    init(container: any SharedStateLoading) {
         self.container = container
     }
 
     @discardableResult
     func reload() -> [RegisteredRoot] {
-        let loadedRoots = (try? container.loadRegisteredRoots()) ?? []
-        let loadedBadges = (try? container.loadBadgeSnapshot().entries) ?? [:]
+        reloadLock.lock()
+        defer { reloadLock.unlock() }
+
+        // Inspect before reading. If an atomic replacement races the read,
+        // the next reload sees the new identity and refreshes again.
+        let currentRootsRevision = container.registeredRootsURL.flatMap(SharedFileRevision.init)
+        let currentBadgesRevision = container.badgeSnapshotURL.flatMap(SharedFileRevision.init)
+        let rootsChanged = currentRootsRevision == nil || currentRootsRevision != rootsRevision
+        let badgesChanged = currentBadgesRevision == nil || currentBadgesRevision != badgesRevision
+        let loadedRoots = rootsChanged ? (try? container.loadRegisteredRoots()) ?? [] : nil
+        let loadedBadges = badgesChanged ? (try? container.loadBadgeSnapshot().entries) ?? [:] : nil
+
         lock.lock()
-        roots = loadedRoots
-        badgeEntries = loadedBadges
-        lock.unlock()
-        return loadedRoots
+        defer { lock.unlock() }
+        if let loadedRoots { roots = loadedRoots }
+        if let loadedBadges { badgeEntries = loadedBadges }
+        rootsRevision = currentRootsRevision
+        badgesRevision = currentBadgesRevision
+        return roots
     }
 
     func registeredRoots() -> [RegisteredRoot] {
@@ -302,5 +327,33 @@ final class SharedStateStore {
         lock.lock()
         defer { lock.unlock() }
         return RegisteredRootResolver.deepestRoot(containing: url, among: roots)
+    }
+}
+
+/// Inode identity catches atomic replacement even when size and modification
+/// time are preserved. Nanosecond change times also cover in-place rewrites.
+private struct SharedFileRevision: Equatable {
+    let device: dev_t
+    let inode: ino_t
+    let size: off_t
+    let modifiedSeconds: Int
+    let modifiedNanoseconds: Int
+    let changedSeconds: Int
+    let changedNanoseconds: Int
+
+    init?(url: URL) {
+        var value = stat()
+        guard url.isFileURL,
+              lstat(url.path, &value) == 0,
+              (value.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+            return nil
+        }
+        device = value.st_dev
+        inode = value.st_ino
+        size = value.st_size
+        modifiedSeconds = value.st_mtimespec.tv_sec
+        modifiedNanoseconds = value.st_mtimespec.tv_nsec
+        changedSeconds = value.st_ctimespec.tv_sec
+        changedNanoseconds = value.st_ctimespec.tv_nsec
     }
 }

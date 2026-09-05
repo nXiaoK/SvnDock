@@ -33,7 +33,7 @@ enum RegisteredRootResolver {
     ) -> RegisteredRoot? {
         let path = url.standardizedFileURL.path
         return roots
-            .filter { contains(path: path, rootPath: $0.path) }
+            .lazy.filter { contains(path: path, rootPath: $0.path) }
             .max { $0.path.count < $1.path.count }
     }
 
