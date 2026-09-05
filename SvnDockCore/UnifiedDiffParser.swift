@@ -134,46 +134,59 @@ public struct UnifiedDiffDocument: Hashable, Sendable {
 
 public enum UnifiedDiffParser {
     public static func parse(_ text: String) -> UnifiedDiffDocument {
-        let lines = splitLines(text)
+        var lines = LineCursor(text)
         var oldFilePath: String?
         var newFilePath: String?
         var hunks: [UnifiedDiffHunk] = []
         var propertyChanges: String?
-        var index = 0
+        var hasFileSection = false
 
-        while index < lines.count {
-            let line = lines[index]
+        func fallback() -> UnifiedDiffDocument {
+            UnifiedDiffDocument(
+                oldFilePath: oldFilePath, newFilePath: newFilePath,
+                hunks: [], fallbackText: text
+            )
+        }
+
+        while let line = lines.current {
+            if line.hasPrefix("Index: ") || line.hasPrefix("diff --git ") {
+                // This model represents one file. A directory diff must retain
+                // its file boundaries in the plain-text viewer.
+                if hasFileSection { return fallback() }
+                hasFileSection = true
+            }
 
             if line.hasPrefix("Property changes on: ") {
-                propertyChanges = lines[index...].joined(separator: "\n")
+                propertyChanges = lines.remainingText.replacingOccurrences(of: "\r\n", with: "\n")
                 break
             }
 
             if line.hasPrefix("--- ") {
+                if oldFilePath != nil { return fallback() }
                 oldFilePath = filePath(fromHeader: line)
-                index += 1
+                lines.advance()
                 continue
             }
 
             if line.hasPrefix("+++ ") {
+                if newFilePath != nil { return fallback() }
                 newFilePath = filePath(fromHeader: line)
-                index += 1
+                lines.advance()
                 continue
             }
 
             guard let header = parseHunkHeader(line) else {
-                index += 1
+                if line.hasPrefix("@@") { return fallback() }
+                lines.advance()
                 continue
             }
 
-            let result = parseHunk(lines, startingAt: index + 1, header: header)
+            lines.advance()
+            let result = parseHunk(&lines, header: header)
             guard result.isComplete else {
                 // A truncated/malformed patch must never look like a complete
                 // comparison with some changes silently omitted.
-                return UnifiedDiffDocument(
-                    oldFilePath: oldFilePath, newFilePath: newFilePath,
-                    hunks: [], fallbackText: text
-                )
+                return fallback()
             }
             if !result.rows.isEmpty {
                 hunks.append(UnifiedDiffHunk(
@@ -185,7 +198,6 @@ public enum UnifiedDiffParser {
                     rows: result.rows
                 ))
             }
-            index = max(result.nextIndex, index + 1)
         }
 
         return UnifiedDiffDocument(
@@ -221,18 +233,48 @@ private extension UnifiedDiffParser {
 
     struct HunkResult {
         let rows: [UnifiedDiffRow]
-        let nextIndex: Int
         let isComplete: Bool
     }
 
-    static func splitLines(_ text: String) -> [String] {
-        // CRLF is a single Swift Character, so splitting on the LF Character
-        // alone fails to separate Windows lines. Normalize before splitting.
-        text.replacingOccurrences(of: "\r\n", with: "\n")
-            .components(separatedBy: "\n")
+    /// Reads slices of the original text without allocating a normalized copy
+    /// and a second copy of every line before constructing the output rows.
+    struct LineCursor {
+        private let text: String
+        private var nextIndex: String.Index
+        private(set) var current: Substring?
+
+        init(_ text: String) {
+            self.text = text
+            nextIndex = text.startIndex
+            advance()
+        }
+
+        var remainingText: Substring {
+            text[(current?.startIndex ?? text.endIndex)...]
+        }
+
+        mutating func advance() {
+            guard nextIndex < text.endIndex else {
+                current = nil
+                return
+            }
+            let start = nextIndex
+            if let newline = text.unicodeScalars[start...].firstIndex(of: "\n") {
+                var end = newline
+                if end > start {
+                    let previous = text.unicodeScalars.index(before: end)
+                    if text.unicodeScalars[previous] == "\r" { end = previous }
+                }
+                current = text[start..<end]
+                nextIndex = text.unicodeScalars.index(after: newline)
+            } else {
+                current = text[start...]
+                nextIndex = text.endIndex
+            }
+        }
     }
 
-    static func filePath(fromHeader line: String) -> String {
+    static func filePath(fromHeader line: Substring) -> String {
         var value = String(line.dropFirst(4))
 
         if let tab = value.firstIndex(of: "\t") {
@@ -246,7 +288,7 @@ private extension UnifiedDiffParser {
         return value
     }
 
-    static func parseHunkHeader(_ line: String) -> HunkHeader? {
+    static func parseHunkHeader(_ line: Substring) -> HunkHeader? {
         guard line.hasPrefix("@@") else { return nil }
 
         let descriptorStart = line.index(line.startIndex, offsetBy: 2)
@@ -301,12 +343,14 @@ private extension UnifiedDiffParser {
             count = parsedCount
         }
 
+        // The parser increments the line number after every consumed row.
+        // Reject ranges that would overflow instead of crashing on patch text.
+        guard count <= Int.max - start else { return nil }
         return (start, count)
     }
 
     static func parseHunk(
-        _ lines: [String],
-        startingAt startIndex: Int,
+        _ lines: inout LineCursor,
         header: HunkHeader
     ) -> HunkResult {
         var rows: [UnifiedDiffRow] = []
@@ -317,7 +361,6 @@ private extension UnifiedDiffParser {
         var oldConsumed = 0
         var newConsumed = 0
         var lastParsedLine: LastParsedLine?
-        var index = startIndex
 
         func flushChangeBlock() {
             let rowCount = max(pendingDeletions.count, pendingAdditions.count)
@@ -376,12 +419,11 @@ private extension UnifiedDiffParser {
             }
         }
 
-        parsingLines: while index < lines.count {
-            let line = lines[index]
+        parsingLines: while let line = lines.current {
 
             if line == "\\ No newline at end of file" {
                 markLastLineWithoutTrailingNewline()
-                index += 1
+                lines.advance()
                 continue
             }
 
@@ -411,7 +453,7 @@ private extension UnifiedDiffParser {
                 newLineNumber += 1
                 oldConsumed += 1
                 newConsumed += 1
-                index += 1
+                lines.advance()
             case "-":
                 guard oldConsumed < header.oldCount else {
                     break parsingLines
@@ -420,7 +462,7 @@ private extension UnifiedDiffParser {
                 lastParsedLine = .deletion(pendingIndex: pendingDeletions.count - 1)
                 oldLineNumber += 1
                 oldConsumed += 1
-                index += 1
+                lines.advance()
             case "+":
                 guard newConsumed < header.newCount else {
                     break parsingLines
@@ -429,7 +471,7 @@ private extension UnifiedDiffParser {
                 lastParsedLine = .addition(pendingIndex: pendingAdditions.count - 1)
                 newLineNumber += 1
                 newConsumed += 1
-                index += 1
+                lines.advance()
             default:
                 break parsingLines
             }
@@ -437,7 +479,7 @@ private extension UnifiedDiffParser {
 
         flushChangeBlock()
         return HunkResult(
-            rows: rows, nextIndex: index,
+            rows: rows,
             isComplete: oldConsumed == header.oldCount && newConsumed == header.newCount
         )
     }

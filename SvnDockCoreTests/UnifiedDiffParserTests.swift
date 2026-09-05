@@ -167,6 +167,36 @@ final class UnifiedDiffParserTests: XCTestCase {
         XCTAssertEqual(document.fallbackText, text)
     }
 
+    func testMalformedLaterHeaderFallsBackToEntirePatch() {
+        let text = "@@ -1 +1 @@\n-old\n+new\n@@ invalid @@\n-hidden\n+change\n"
+        let document = UnifiedDiffParser.parse(text)
+        XCTAssertTrue(document.hunks.isEmpty)
+        XCTAssertEqual(document.fallbackText, text)
+    }
+
+    func testLineNumberOverflowFallsBackWithoutCrashing() {
+        for range in ["\(Int.max)", "\(Int.max - 1),2"] {
+            let text = "@@ -\(range) +1 @@\n-old\n+new\n"
+            let document = UnifiedDiffParser.parse(text)
+            XCTAssertTrue(document.hunks.isEmpty)
+            XCTAssertEqual(document.fallbackText, text)
+        }
+    }
+
+    func testMultipleFilesKeepTheirBoundariesInPlainText() {
+        let text = "--- first.txt\n+++ first.txt\n@@ -1 +1 @@\n-one\n+two\n"
+            + "--- second.txt\n+++ second.txt\n@@ -1 +1 @@\n-three\n+four\n"
+        let document = UnifiedDiffParser.parse(text)
+        XCTAssertTrue(document.hunks.isEmpty)
+        XCTAssertEqual(document.fallbackText, text)
+    }
+
+    func testLineCursorPreservesUnicodeEmptyContentAndLoneCarriageReturns() {
+        let document = UnifiedDiffParser.parse("\n@@ -1,2 +1,2 @@\r\n-\r\n-旧\r字\r\n+\r\n+新👨‍👩‍👧‍👦\r\n")
+        XCTAssertEqual(document.rows.map(\.oldText), ["", "旧\r字"])
+        XCTAssertEqual(document.rows.map(\.newText), ["", "新👨‍👩‍👧‍👦"])
+    }
+
     private func assertSendable<T: Sendable>(_ value: T) {
         _ = value
     }
