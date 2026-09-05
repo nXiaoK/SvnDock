@@ -273,7 +273,9 @@ protocol SharedStateLoading: AnyObject {
 
 /// Thread-safe in-memory view used by Finder callbacks. File revisions avoid
 /// reading and decoding the same snapshot for every directory/menu callback.
-final class SharedStateStore {
+/// Snapshot access is protected by `lock`; all loader access and file revision
+/// comparisons are serialized by `reloadLock`.
+final class SharedStateStore: @unchecked Sendable {
     private let container: any SharedStateLoading
     private let lock = NSLock()
     // Keep file reads ordered without blocking the fast in-memory badge path.
