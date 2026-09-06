@@ -1,9 +1,14 @@
 import Darwin
 import Foundation
 
+#if SVNDOCK_LOCAL_SIGNED_BUILD && SVNDOCK_PORTABLE_SIGNED_BUILD
+#error("Choose either a current-account local build or a portable ad-hoc build, not both.")
+#endif
+
 enum SharedContainerError: LocalizedError {
     case invalidApplicationGroupConfiguration
     case invalidLocalSharedDirectoryConfiguration
+    case invalidPortableAccountDirectory
     case missingApplicationGroup(String)
     case unsupportedSchema(file: String, version: Int)
     case invalidRootDocument
@@ -17,6 +22,8 @@ enum SharedContainerError: LocalizedError {
             return "The Release build is missing a valid SvnDockAppGroupIdentifier."
         case .invalidLocalSharedDirectoryConfiguration:
             return "The local signed build is missing a valid absolute SvnDockLocalSharedDirectory path."
+        case .invalidPortableAccountDirectory:
+            return "Unable to resolve the signed-in account's private directory for the portable Finder extension."
         case .missingApplicationGroup(let identifier):
             return "The App Group container is unavailable: \(identifier)"
         case .unsupportedSchema(let file, let version):
@@ -66,7 +73,16 @@ final class SharedContainer: SharedStateLoading {
         let resolvedConfigurationError: SharedContainerError?
         let resolvedLocalSharedDirectoryURL: URL?
 
-        #if SVNDOCK_LOCAL_SIGNED_BUILD
+        #if SVNDOCK_PORTABLE_SIGNED_BUILD
+        resolvedIdentifier = configuredIdentifier ?? Self.defaultAppGroupIdentifier
+        do {
+            resolvedLocalSharedDirectoryURL = try Self.portableSignedDirectory()
+            resolvedConfigurationError = nil
+        } catch {
+            resolvedLocalSharedDirectoryURL = nil
+            resolvedConfigurationError = .invalidPortableAccountDirectory
+        }
+        #elseif SVNDOCK_LOCAL_SIGNED_BUILD
         let configuredLocalPath = (bundle.object(
             forInfoDictionaryKey: Self.localSharedDirectoryInfoKey
         ) as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -124,6 +140,40 @@ final class SharedContainer: SharedStateLoading {
         localSharedDirectoryURL
             ?? containerURL?.appendingPathComponent(Self.relativeDirectory, isDirectory: true)
     }
+
+    #if SVNDOCK_PORTABLE_SIGNED_BUILD
+    /// Mirrors the Core resolver while retaining the Finder/Core dependency
+    /// boundary. NSHomeDirectory may point into the extension's sandbox; the
+    /// account database supplies the home matched by its narrow entitlement.
+    static func portableSignedDirectory() throws -> URL {
+        let realUserID = getuid()
+        let effectiveUserID = geteuid()
+        guard realUserID != 0, realUserID == effectiveUserID else {
+            throw SharedContainerError.invalidPortableAccountDirectory
+        }
+        var account = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 64 * 1_024)
+        let accountHome: String? = buffer.withUnsafeMutableBufferPointer { storage in
+            guard getpwuid_r(realUserID, &account, storage.baseAddress, storage.count, &result) == 0,
+                  let home = result?.pointee.pw_dir else { return nil }
+            return String(cString: home)
+        }
+        return try portableSignedDirectory(accountHome: accountHome, realUserID: realUserID, effectiveUserID: effectiveUserID)
+    }
+
+    static func portableSignedDirectory(accountHome: String?, realUserID: uid_t, effectiveUserID: uid_t) throws -> URL {
+        guard realUserID != 0, realUserID == effectiveUserID,
+              let accountHome, accountHome.hasPrefix("/"), !accountHome.contains("\0") else {
+            throw SharedContainerError.invalidPortableAccountDirectory
+        }
+        let home = URL(fileURLWithPath: accountHome, isDirectory: true).standardizedFileURL
+        guard home.path != "/", home.path != "/var/empty", home.path != "/dev/null" else {
+            throw SharedContainerError.invalidPortableAccountDirectory
+        }
+        return home.appendingPathComponent(Self.relativeDirectory, isDirectory: true)
+    }
+    #endif
 
     var registeredRootsURL: URL? {
         sharedDirectoryURL?.appendingPathComponent(Self.rootsFileName, isDirectory: false)

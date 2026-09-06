@@ -1,6 +1,10 @@
 import Darwin
 import Foundation
 
+#if SVNDOCK_LOCAL_SIGNED_BUILD && SVNDOCK_PORTABLE_SIGNED_BUILD
+#error("Choose either a current-account local build or a portable ad-hoc build, not both.")
+#endif
+
 public enum FinderSharedSchema {
     public static let currentVersion = 1
     public static let registeredRootsFileName = "registered-roots.json"
@@ -159,6 +163,7 @@ public enum FinderSharedStoreError: Error, LocalizedError, Equatable, Sendable {
     case directoryIsNotAbsoluteFileURL
     case appGroupContainerUnavailable(String)
     case invalidLocalSharedDirectory(String)
+    case invalidPortableAccountDirectory
     case pathIsNotAbsolute(String)
     case badgePathOutsideWorkingCopy(path: String, root: String)
     case badgeRootNotRegistered(String)
@@ -177,6 +182,8 @@ public enum FinderSharedStoreError: Error, LocalizedError, Equatable, Sendable {
             return "The App Group container is unavailable: \(identifier)"
         case let .invalidLocalSharedDirectory(key):
             return "The local signed build is missing a valid absolute \(key) path."
+        case .invalidPortableAccountDirectory:
+            return "Unable to resolve the signed-in account's private directory. Run SvnDock as a regular desktop account, not as root or through sudo."
         case let .pathIsNotAbsolute(path):
             return "Finder shared data contains a non-absolute path: \(path)"
         case let .badgePathOutsideWorkingCopy(path, root):
@@ -234,6 +241,41 @@ public enum FinderSharedStoreLocation {
         }
 
         return URL(fileURLWithPath: configured, isDirectory: true).standardizedFileURL
+    }
+    #endif
+
+    #if SVNDOCK_PORTABLE_SIGNED_BUILD
+    /// Account-independent ad-hoc distribution. Read the account database,
+    /// never environment variables or a sandbox container's synthetic home.
+    public static func portableSignedDirectory() throws -> URL {
+        let realUserID = getuid()
+        let effectiveUserID = geteuid()
+        guard realUserID != 0, realUserID == effectiveUserID else {
+            throw FinderSharedStoreError.invalidPortableAccountDirectory
+        }
+        var account = passwd()
+        var result: UnsafeMutablePointer<passwd>?
+        var buffer = [CChar](repeating: 0, count: 64 * 1_024)
+        let accountHome: String? = buffer.withUnsafeMutableBufferPointer { storage in
+            guard getpwuid_r(realUserID, &account, storage.baseAddress, storage.count, &result) == 0,
+                  let home = result?.pointee.pw_dir else { return nil }
+            return String(cString: home)
+        }
+        return try portableSignedDirectory(accountHome: accountHome, realUserID: realUserID, effectiveUserID: effectiveUserID)
+    }
+
+    // Internal seam for testing two account homes without changing either
+    // process identity or environment, and without writing to real user data.
+    static func portableSignedDirectory(accountHome: String?, realUserID: uid_t, effectiveUserID: uid_t) throws -> URL {
+        guard realUserID != 0, realUserID == effectiveUserID,
+              let accountHome, accountHome.hasPrefix("/"), !accountHome.contains("\0") else {
+            throw FinderSharedStoreError.invalidPortableAccountDirectory
+        }
+        let home = URL(fileURLWithPath: accountHome, isDirectory: true).standardizedFileURL
+        guard home.path != "/", home.path != "/var/empty", home.path != "/dev/null" else {
+            throw FinderSharedStoreError.invalidPortableAccountDirectory
+        }
+        return home.appendingPathComponent("Library/Application Support/SvnDock", isDirectory: true)
     }
     #endif
 }

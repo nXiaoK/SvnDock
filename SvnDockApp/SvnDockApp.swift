@@ -112,7 +112,11 @@ private enum SvnDockAppEnvironment {
     private static func sharedDirectoryURL(
         appGroupIdentifier: String
     ) throws -> URL {
-        #if SVNDOCK_LOCAL_SIGNED_BUILD
+        #if SVNDOCK_PORTABLE_SIGNED_BUILD
+        // Distributed ad-hoc builds resolve the recipient's account home at
+        // runtime. No CI runner path is accepted from the sealed bundle.
+        return try FinderSharedStoreLocation.portableSignedDirectory()
+        #elseif SVNDOCK_LOCAL_SIGNED_BUILD
         // The reproducible Command Line Tools build is ad-hoc signed and has
         // no provisioned App Group. Its sealed Info.plist pins one private
         // Application Support directory shared with the local Finder build.
