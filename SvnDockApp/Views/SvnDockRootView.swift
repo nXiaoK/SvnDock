@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+
 import UniformTypeIdentifiers
 
 struct SvnDockRootView: View {
@@ -159,6 +160,7 @@ struct SvnDockRootView: View {
             Text(store.pendingIgnoreMessage)
         }
         .modifier(UnscheduleAddPresentationModifier(store: store))
+        .modifier(IgnoreRemovalPresentationModifier(store: store))
         .modifier(MissingDeletionPresentationModifier(store: store))
     }
 
@@ -405,6 +407,25 @@ struct SvnDockRootView: View {
     }
 }
 
+private struct IgnoreRemovalPresentationModifier: ViewModifier {
+    @ObservedObject var store: SvnDockStore
+
+    func body(content: Content) -> some View {
+        content
+            .alert("取消 SVN 忽略？", isPresented: $store.isPresentingIgnoreRemovalConfirmation) {
+                Button("保留忽略", role: .cancel) { store.cancelIgnoreRemoval() }
+                Button("移除规则并取消忽略") { store.confirmIgnoreRemoval() }
+            } message: {
+                Text(store.pendingIgnoreRemovalMessage)
+            }
+            .onChange(of: store.isPresentingIgnoreRemovalConfirmation) {
+                if !store.isPresentingIgnoreRemovalConfirmation {
+                    store.cancelIgnoreRemoval()
+                    Task { await store.processPendingFinderCommands() }
+                }
+            }
+    }
+}
 private struct MissingDeletionPresentationModifier: ViewModifier {
     @ObservedObject var store: SvnDockStore
 

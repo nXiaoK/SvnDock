@@ -62,10 +62,25 @@ protocol SvnDockServicing: Sendable {
         _ rules: [SvnDockIgnoreRule],
         in workingCopy: SvnDockWorkingCopy
     ) async throws
+    func ignoredEntries(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry]
+    func prepareIgnoreRemoval(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRemovalPlan
+    func removeIgnoreRule(_ plan: SvnDockIgnoreRemovalPlan, in workingCopy: SvnDockWorkingCopy) async throws
     func cleanup(workingCopy: SvnDockWorkingCopy) async throws
 }
 
 extension SvnDockServicing {
+    func ignoredEntries(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] {
+        throw SvnDockServiceError.unavailable("当前服务不支持查看已忽略项目。")
+    }
+
+    func prepareIgnoreRemoval(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRemovalPlan {
+        throw SvnDockServiceError.unavailable("当前服务不支持移除忽略规则。")
+    }
+
+    func removeIgnoreRule(_ plan: SvnDockIgnoreRemovalPlan, in workingCopy: SvnDockWorkingCopy) async throws {
+        throw SvnDockServiceError.unavailable("当前服务不支持移除忽略规则。")
+    }
+
     func historyPage(
         for workingCopy: SvnDockWorkingCopy,
         relativePaths: [String],

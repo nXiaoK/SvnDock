@@ -14,6 +14,17 @@ and cleanup entry points. Registration and badge snapshots use
 `FinderSharedStore`, so the app and Finder Sync extension share one source of
 truth.
 
+The workspace's **已忽略** filter loads ignored items on demand using SVN's
+status output. Ignored directories remain single rows, without scanning their
+contents. These rows are separate from ordinary change and commit counts.
+Right-click **取消忽略…** reviews the matching rules in the direct parent's
+`svn:ignore` property. Removing a wildcard affects all current and future
+matching names in that directory; SVN has no per-file negative ignore rule.
+The service preserves unrelated rules and rejects a confirmation if the
+property changed in the meantime. Inherited `svn:global-ignores` and client
+configuration are not edited. A successful removal selects the restored item
+under **未纳管**; the parent property change still needs a commit.
+
 ## Xcode target settings
 
 The repository-level `project.yml` already applies these settings when the

@@ -776,6 +776,148 @@ actor CoreSvnDockService: SvnDockServicing {
         }
     }
 
+    func ignoredEntries(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] {
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        let entries = try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                // SVN traverses versioned directories; ignored directories stay
+                // single rows. Never enumerate their disk descendants here.
+                try await Self.ignoredStatus(paths: [], depth: nil, in: coreCopy, builder: builder, runner: runner)
+            }
+        }
+        return try entries.filter { $0.status == .ignored }.map { entry in
+            let target = try builder.normalizedLocalPaths([entry.path], in: coreCopy, command: "status")[0]
+            let file = coreCopy.localPath.appendingPathComponent(target)
+            // lstat-style attributes describe a link itself without visiting
+            // its destination, which may lie outside the working copy.
+            let attributes = try? FileManager.default.attributesOfItem(atPath: file.path)
+            let kind = attributes?[.type] as? FileAttributeType
+            return SvnDockStatusEntry(
+                workingCopyID: coreCopy.id, relativePath: target,
+                nodeKind: kind == .typeDirectory ? .directory : .file,
+                isSymbolicLink: kind == .typeSymbolicLink, status: .ignored
+            )
+        }.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+    }
+
+    func prepareIgnoreRemoval(for entry: SvnDockStatusEntry, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRemovalPlan {
+        guard entry.workingCopyID == workingCopy.id, entry.status == .ignored else {
+            throw SvnDockServiceError.invalidIgnoreTarget("所选项目不属于当前工作副本的已忽略列表，请刷新后重试。")
+        }
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        return try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                try await Self.ignoreRemovalPlan(target: entry.relativePath, in: coreCopy, builder: builder, runner: runner)
+            }
+        }
+    }
+
+    func removeIgnoreRule(_ plan: SvnDockIgnoreRemovalPlan, in workingCopy: SvnDockWorkingCopy) async throws {
+        let coreCopy = coreWorkingCopy(for: workingCopy)
+        guard plan.workingCopyID == coreCopy.id,
+              plan.workingCopyRootURL.standardizedFileURL == coreCopy.localPath.standardizedFileURL else {
+            throw SvnDockIgnoreRemovalError.stalePlan
+        }
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        try await scheduler.enqueue(for: coreCopy.id) {
+            try await operationLock.withLock(for: coreCopy.id) {
+                let current = try await Self.ignoreRemovalPlan(target: plan.targetRelativePath, in: coreCopy, builder: builder, runner: runner)
+                guard current.parentRelativePath == plan.parentRelativePath,
+                      current.originalPropertyValue == plan.originalPropertyValue,
+                      current.patterns == plan.patterns,
+                      current.updatedPropertyValue == plan.updatedPropertyValue else {
+                    throw SvnDockIgnoreRemovalError.stalePlan
+                }
+                try Self.validateResolvedBoundary(relativePaths: [current.parentRelativePath, current.targetRelativePath], in: coreCopy)
+                // Reuse the validated propset target/argv, supplying the exact
+                // remaining property bytes (including blank lines and CRLF).
+                // An empty svn:ignore value is valid and affects no other property.
+                let template = try builder.makeInvocation(for: .setIgnore(path: current.parentRelativePath, patterns: ["placeholder"]), in: coreCopy)
+                let invocation = ProcessInvocation(
+                    executableURL: template.executableURL, arguments: template.arguments,
+                    currentDirectoryURL: template.currentDirectoryURL, environment: template.environment,
+                    standardInput: Data(current.updatedPropertyValue.utf8), argumentFiles: template.argumentFiles
+                )
+                try Task.checkCancellation()
+                let written = try await runner.run(invocation)
+                guard written.succeeded else { throw SVNProcessFailure(result: written) }
+                let verified: [SvnDockCore.StatusEntry]
+                do {
+                    try Self.validateResolvedBoundary(relativePaths: [current.parentRelativePath, current.targetRelativePath], in: coreCopy)
+                    verified = try await Self.ignoredStatus(paths: [current.targetRelativePath], depth: .empty, in: coreCopy, builder: builder, runner: runner)
+                } catch {
+                    throw SvnDockIgnoreRemovalError.verificationUnavailable(error.localizedDescription)
+                }
+                let targetStatus = Self.statusEntry(for: current.targetRelativePath, entries: verified, in: coreCopy)?.status
+                if targetStatus == .ignored {
+                    throw SvnDockIgnoreRemovalError.stillIgnored
+                }
+                guard targetStatus == .unversioned else {
+                    throw SvnDockIgnoreRemovalError.verificationUnavailable("目标未返回明确的未纳管状态，可能已被移动、删除或由其它客户端修改。")
+                }
+            }
+        }
+    }
+
+    private static func ignoredStatus(paths: [String], depth: SVNDepth?, in copy: SvnDockCore.WorkingCopy,
+                                      builder: SVNCommandBuilder, runner: any ProcessRunning) async throws -> [SvnDockCore.StatusEntry] {
+        let template = try builder.makeInvocation(for: .status(SVNStatusOptions(includeIgnored: true, depth: depth, paths: paths)), in: copy)
+        var arguments = template.arguments
+        arguments.insert("--ignore-externals", at: 1)
+        let result = try await runner.run(ProcessInvocation(executableURL: template.executableURL, arguments: arguments,
+            currentDirectoryURL: template.currentDirectoryURL, environment: template.environment,
+            standardInput: template.standardInput, argumentFiles: template.argumentFiles))
+        guard result.succeeded else { throw SVNProcessFailure(result: result) }
+        return try SVNXMLParser.parseStatus(result.standardOutput, workingCopyURL: copy.localPath, resolveNodeKinds: false)
+    }
+
+    private static func ignoreRemovalPlan(target requested: String, in copy: SvnDockCore.WorkingCopy,
+                                         builder: SVNCommandBuilder, runner: any ProcessRunning) async throws -> SvnDockIgnoreRemovalPlan {
+        let target = try builder.normalizedLocalPaths([requested], in: copy, command: "remove ignore")[0]
+        guard target != "." else { throw SvnDockIgnoreRemovalError.unsupportedSource }
+        let directory = (target as NSString).deletingLastPathComponent
+        let parent = directory.isEmpty ? "." : directory
+        try validateResolvedBoundary(relativePaths: [parent, target], in: copy)
+        _ = try validatedDirectoryURL(for: parent, in: copy)
+        let info = try await runner.run(builder.makeInvocation(for: .infoTargets(paths: [parent]), in: copy))
+        guard info.succeeded else { throw SvnDockIgnoreRemovalError.unsupportedSource }
+        let infos = try SVNXMLParser.parseInfos(info.standardOutput)
+        guard let parentInfo = infos.first(where: { absoluteURL(for: $0.path, in: copy) == absoluteURL(for: parent, in: copy) }),
+              parentInfo.kind == .directory,
+              parentInfo.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL == copy.localPath.resolvingSymlinksInPath().standardizedFileURL else {
+            throw SvnDockServiceError.invalidIgnoreTarget("忽略规则父目录不属于当前工作副本，请在所属工作副本单独处理。")
+        }
+        let properties = try await runner.run(builder.makeInvocation(for: .properties(paths: [parent]), in: copy))
+        guard properties.succeeded else { throw SVNProcessFailure(result: properties) }
+        let entries = try SVNXMLParser.parseProperties(properties.standardOutput)
+        guard let original = propertyEntry(for: parent, entries: entries, in: copy)?.value(forProperty: "svn:ignore") else {
+            throw SvnDockIgnoreRemovalError.unsupportedSource
+        }
+        let removal = SvnDockIgnoreRemovalPlan.removingMatches(from: original, name: (target as NSString).lastPathComponent)
+        guard !removal.patterns.isEmpty else { throw SvnDockIgnoreRemovalError.unsupportedSource }
+        let siblings = try await ignoredStatus(paths: [parent], depth: .immediates, in: copy, builder: builder, runner: runner)
+        guard let selected = statusEntry(for: target, entries: siblings, in: copy), selected.status == .ignored,
+              selected.isFileExternal != true else {
+            throw SvnDockServiceError.invalidIgnoreTarget("所选项目已不再是可移除直接忽略规则的项目，请刷新后重试。")
+        }
+        let parentURL = absoluteURL(for: parent, in: copy)
+        let affected = try siblings.filter { entry in
+            entry.status == .ignored && entry.fileURL(relativeTo: copy).deletingLastPathComponent().standardizedFileURL == parentURL
+                && removal.patterns.contains { SvnDockIgnoreRemovalPlan.matches($0, name: (entry.path as NSString).lastPathComponent) }
+        }.map { try builder.normalizedLocalPaths([$0.path], in: copy, command: "status")[0] }.sorted()
+        return SvnDockIgnoreRemovalPlan(workingCopyID: copy.id, workingCopyRootURL: copy.localPath,
+            targetRelativePath: target, parentRelativePath: parent, patterns: removal.patterns,
+            originalPropertyValue: original, updatedPropertyValue: removal.value, affectedSiblingPaths: affected)
+    }
+
     func cleanup(workingCopy: SvnDockWorkingCopy) async throws {
         let coreCopy = coreWorkingCopy(for: workingCopy)
         _ = try await run(.cleanup, in: coreCopy)

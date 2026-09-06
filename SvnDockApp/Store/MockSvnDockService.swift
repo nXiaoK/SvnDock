@@ -229,6 +229,15 @@ actor MockSvnDockService: SvnDockServicing {
         }
     }
 
+    func ignoredEntries(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] {
+        await briefDelay()
+        return entriesByWorkingCopyID[workingCopy.id, default: []].filter { $0.status == .ignored }
+    }
+
+    // Mock entries do not carry the authoritative SVN property value. Keep
+    // prepare/remove on the protocol's explicit unsupported defaults instead
+    // of inventing removable rules or pretending a mutation succeeded.
+
     func cleanup(workingCopy: SvnDockWorkingCopy) async throws {
         await operationDelay()
     }

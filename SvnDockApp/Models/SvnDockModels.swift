@@ -390,6 +390,7 @@ enum SvnDockStatusFilter: String, CaseIterable, Identifiable, Sendable {
     case changed
     case conflicts
     case unversioned
+    case ignored
 
     var id: Self { self }
 
@@ -399,19 +400,22 @@ enum SvnDockStatusFilter: String, CaseIterable, Identifiable, Sendable {
         case .changed: "变更"
         case .conflicts: "冲突"
         case .unversioned: "未纳管"
+        case .ignored: "已忽略"
         }
     }
 
     func includes(_ entry: SvnDockStatusEntry) -> Bool {
         switch self {
         case .all:
-            true
+            entry.status != .ignored
         case .changed:
             entry.status.isChange
         case .conflicts:
             entry.status == .conflicted || entry.repositoryStatus == .conflicted
         case .unversioned:
             entry.status == .unversioned
+        case .ignored:
+            entry.status == .ignored
         }
     }
 }
@@ -445,6 +449,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
     case cleaning
     case resolving
     case ignoring
+    case unignoring
 
     var displayName: String {
         switch self {
@@ -460,6 +465,7 @@ enum SvnDockOperationKind: Hashable, Sendable {
         case .cleaning: "正在清理…"
         case .resolving: "正在解决冲突…"
         case .ignoring: "正在添加忽略规则…"
+        case .unignoring: "正在取消忽略…"
         }
     }
 }

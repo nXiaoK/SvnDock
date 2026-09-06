@@ -21,6 +21,7 @@ final class SvnDockStore: ObservableObject {
             if oldValue != selectedWorkingCopyID {
                 clearDiff()
                 clearHistory()
+                invalidateIgnoredEntries()
             }
         }
     }
@@ -32,7 +33,11 @@ final class SvnDockStore: ObservableObject {
 
     @Published var statusFilter: SvnDockStatusFilter = .all {
         didSet {
-            if oldValue != statusFilter { rebuildStatusPresentation(resetLimit: true, debounce: false) }
+            if oldValue != statusFilter {
+                if oldValue == .ignored || statusFilter == .ignored { selectedEntryIDs = [] }
+                rebuildStatusPresentation(resetLimit: true, debounce: false)
+                if statusFilter == .ignored { loadIgnoredEntriesIfNeeded() }
+            }
         }
     }
     @Published var searchQuery = "" {
@@ -48,6 +53,10 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
     @Published private(set) var filteredEntryCount = 0
     @Published private(set) var isFilteringStatusEntries = false
+    @Published private(set) var ignoredEntries: [SvnDockStatusEntry] = []
+    @Published private(set) var hasLoadedIgnoredEntries = false
+    @Published private(set) var isLoadingIgnoredEntries = false
+    @Published private(set) var ignoredEntriesError: String?
     @Published private var expandedDirectoryIDs: Set<SvnDockStatusEntry.ID> = []
     @Published private var directoryChildrenByID: [
         SvnDockStatusEntry.ID: [SvnDockStatusEntry]
@@ -88,6 +97,7 @@ final class SvnDockStore: ObservableObject {
     @Published var isPresentingRemovalConfirmation = false
     @Published var isPresentingResolveConfirmation = false
     @Published var isPresentingIgnoreConfirmation = false
+    @Published var isPresentingIgnoreRemovalConfirmation = false
 
     private let service: any SvnDockServicing
     let commitDraftStore: SvnDockCommitDraftStore
@@ -108,6 +118,10 @@ final class SvnDockStore: ObservableObject {
     private var pendingRemoval: SvnDockWorkingCopy?
     private var pendingResolve: PendingResolve?
     private var pendingIgnore: PendingIgnore?
+    private var pendingIgnoreRemoval: PendingIgnoreRemoval?
+    private var ignoredEntryIndex: [SvnDockStatusEntry.ID: SvnDockStatusEntry] = [:]
+    private var ignoredLoadTask: Task<Void, Never>?
+    private var ignoredLoadGeneration = UUID()
     private var statusSnapshot = SvnDockStatusSnapshot.empty
     private var filteredStatusEntries: [SvnDockStatusEntry] = []
     private var visibleEntryLimit = SvnDockStore.initialVisibleEntryLimit
@@ -265,7 +279,7 @@ final class SvnDockStore: ObservableObject {
         case .refreshing, .checkingRemote:
             return false
         case .loading, .updating, .committing, .adding, .unschedulingAdd, .deleting,
-             .reverting, .cleaning, .resolving, .ignoring:
+             .reverting, .cleaning, .resolving, .ignoring, .unignoring:
             return true
         }
     }
@@ -321,6 +335,7 @@ final class SvnDockStore: ObservableObject {
             || isPresentingRemovalConfirmation
             || isPresentingResolveConfirmation
             || isPresentingIgnoreConfirmation
+            || isPresentingIgnoreRemovalConfirmation
             || presentedError != nil
     }
 
@@ -1398,6 +1413,149 @@ final class SvnDockStore: ObservableObject {
         await processPendingFinderCommands()
     }
 
+    func loadIgnoredEntriesIfNeeded() {
+        guard statusFilter == .ignored, !hasLoadedIgnoredEntries,
+              !isLoadingIgnoredEntries, let workingCopy = selectedWorkingCopy else { return }
+        let generation = UUID()
+        ignoredLoadGeneration = generation
+        isLoadingIgnoredEntries = true
+        ignoredEntriesError = nil
+        ignoredLoadTask = Task { [weak self, service] in
+            do {
+                let entries = try await service.ignoredEntries(for: workingCopy)
+                try Task.checkCancellation()
+                guard let self, self.ignoredLoadGeneration == generation,
+                      self.selectedWorkingCopyID == workingCopy.id else { return }
+                self.ignoredEntries = entries.filter {
+                    $0.workingCopyID == workingCopy.id && $0.status == .ignored
+                }.sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+                self.ignoredEntryIndex = Dictionary(
+                    self.ignoredEntries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first }
+                )
+                self.hasLoadedIgnoredEntries = true
+                self.isLoadingIgnoredEntries = false
+                self.ignoredLoadTask = nil
+                if self.statusFilter == .ignored {
+                    self.rebuildStatusPresentation(resetLimit: true, debounce: false)
+                }
+            } catch {
+                guard let self, self.ignoredLoadGeneration == generation,
+                      self.selectedWorkingCopyID == workingCopy.id else { return }
+                self.isLoadingIgnoredEntries = false
+                self.ignoredLoadTask = nil
+                if !(error is CancellationError) {
+                    self.ignoredEntriesError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    func retryIgnoredEntries() {
+        guard !isInteractionBlocked else { return }
+        invalidateIgnoredEntries()
+        loadIgnoredEntriesIfNeeded()
+    }
+
+    private func invalidateIgnoredEntries() {
+        ignoredLoadTask?.cancel()
+        ignoredLoadTask = nil
+        ignoredLoadGeneration = UUID()
+        selectedEntryIDs.subtract(ignoredEntryIndex.keys)
+        ignoredEntries = []
+        ignoredEntryIndex = [:]
+        hasLoadedIgnoredEntries = false
+        isLoadingIgnoredEntries = false
+        ignoredEntriesError = nil
+        if statusFilter == .ignored {
+            rebuildStatusPresentation(resetLimit: true, debounce: false)
+        }
+    }
+
+    var pendingIgnoreRemovalMessage: String {
+        guard let request = pendingIgnoreRemoval else { return "" }
+        let plan = request.plan
+        let rules = plan.patterns.map { "• \($0)" }.joined(separator: "\n")
+        return "项目：\(plan.targetRelativePath)\n将从“\(plan.parentRelativePath)”的 svn:ignore 移除：\n\(rules)\n\n"
+            + plan.scopeSummary
+            + "\n\n保留磁盘文件和其他忽略配置。父目录的属性变更需要提交后才能与团队共享。"
+    }
+
+    func requestIgnoreRemoval(for entry: SvnDockStatusEntry) async {
+        guard !isInteractionBlocked, !isLoadingIgnoredEntries,
+              let workingCopy = selectedWorkingCopy,
+              let currentEntry = ignoredEntryIndex[entry.id],
+              currentEntry.workingCopyID == workingCopy.id else { return }
+        activeOperation = SvnDockOperationState(kind: .refreshing, detail: "正在核对忽略规则…")
+        do {
+            let plan = try await service.prepareIgnoreRemoval(for: currentEntry, in: workingCopy)
+            try Task.checkCancellation()
+            guard selectedWorkingCopyID == workingCopy.id,
+                  ignoredEntryIndex[entry.id] != nil else {
+                activeOperation = nil
+                return
+            }
+            pendingIgnoreRemoval = PendingIgnoreRemoval(workingCopy: workingCopy, plan: plan)
+            isPresentingIgnoreRemovalConfirmation = true
+        } catch {
+            if selectedWorkingCopyID == workingCopy.id, !(error is CancellationError) {
+                present(error, title: "无法取消忽略")
+            }
+        }
+        activeOperation = nil
+        await processPendingFinderCommands()
+    }
+
+    func cancelIgnoreRemoval() {
+        pendingIgnoreRemoval = nil
+        isPresentingIgnoreRemovalConfirmation = false
+    }
+
+    func confirmIgnoreRemoval() {
+        guard let request = pendingIgnoreRemoval, activeOperation == nil,
+              selectedWorkingCopyID == request.workingCopy.id else {
+            cancelIgnoreRemoval()
+            return
+        }
+        pendingIgnoreRemoval = nil
+        activeOperation = SvnDockOperationState(kind: .unignoring, detail: request.plan.targetRelativePath)
+        isPresentingIgnoreRemovalConfirmation = false
+        Task { [weak self] in
+            await self?.executeIgnoreRemoval(request)
+        }
+    }
+
+    private func executeIgnoreRemoval(_ request: PendingIgnoreRemoval) async {
+        let startedAt = Date()
+        var removalError: Error?
+        do {
+            try Task.checkCancellation()
+            try await service.removeIgnoreRule(request.plan, in: request.workingCopy)
+        } catch {
+            removalError = error
+            present(error, title: "取消忽略未完成")
+        }
+        recordOperation(.init(
+            workingCopy: request.workingCopy, actionTitle: "取消忽略", startedAt: startedAt,
+            outcome: removalError == nil ? .success : .uncertain,
+            summary: removalError == nil ? "已取消忽略，父目录属性变更需要提交" : "请刷新核对忽略规则和文件状态",
+            detail: "项目：\(request.plan.targetRelativePath)\n规则：\(request.plan.patterns.joined(separator: "、"))"
+                + (removalError.map { "\n" + $0.localizedDescription } ?? "")
+        ))
+        activeOperation = nil
+        if selectedWorkingCopyID == request.workingCopy.id {
+            await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
+            if removalError == nil, selectedWorkingCopyID == request.workingCopy.id {
+                searchQuery = ""
+                statusFilter = .unversioned
+                if let restored = entries.first(where: { $0.relativePath == request.plan.targetRelativePath }),
+                   restored.status == .unversioned {
+                    selectedEntryIDs = [restored.id]
+                }
+            }
+        }
+        await processPendingFinderCommands()
+    }
+
     func requestIgnoreConfirmation(
         for entry: SvnDockStatusEntry,
         mode: SvnDockIgnoreMode,
@@ -1872,6 +2030,12 @@ final class SvnDockStore: ObservableObject {
         }
 
         if let entry = primarySelectedEntry {
+            guard entry.status != .ignored && entry.status != .unversioned else {
+                clearHistory()
+                historyErrorMessage = "此项目尚未纳入 SVN，无法查看提交历史。"
+                inspectorTab = .history
+                return
+            }
             await showHistory(
                 for: workingCopy,
                 relativePaths: [entry.relativePath],
@@ -2370,7 +2534,7 @@ final class SvnDockStore: ObservableObject {
     private func statusEntry(
         withID id: SvnDockStatusEntry.ID
     ) -> SvnDockStatusEntry? {
-        statusSnapshot.entry(withID: id) ?? discoveredEntryIndex[id]
+        statusSnapshot.entry(withID: id) ?? ignoredEntryIndex[id] ?? discoveredEntryIndex[id]
     }
 
     private func selectedStatusEntries(
@@ -2399,10 +2563,12 @@ final class SvnDockStore: ObservableObject {
         guard let index = workingCopies.firstIndex(where: { $0.id == workingCopyID }) else { return }
         workingCopies[index].counts = loadedSnapshot.counts
         workingCopies[index].lastRefreshedAt = .now
+        if statusFilter == .ignored { loadIgnoredEntriesIfNeeded() }
     }
 
     private func clearStatusEntries() {
         clearDiff()
+        invalidateIgnoredEntries()
         resetDirectoryTree()
         activeStatusLoadTask?.cancel()
         activeStatusLoadTask = nil
@@ -2421,6 +2587,7 @@ final class SvnDockStore: ObservableObject {
     private func loadStatusSnapshot(
         for workingCopy: SvnDockWorkingCopy
     ) async throws -> SvnDockStatusSnapshot {
+        invalidateIgnoredEntries()
         activeStatusLoadTask?.cancel()
         let generation = UUID()
         statusLoadGeneration = generation
@@ -2460,8 +2627,9 @@ final class SvnDockStore: ObservableObject {
 
         let normalizedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let filter = statusFilter
-        let sourceEntries = showsMissingDetails || !normalizedQuery.isEmpty
-            ? statusSnapshot.entries : statusSnapshot.groupedEntries
+        let sourceEntries = filter == .ignored ? ignoredEntries
+            : (showsMissingDetails || !normalizedQuery.isEmpty
+                ? statusSnapshot.entries : statusSnapshot.groupedEntries)
 
         if filter == .all, normalizedQuery.isEmpty {
             applyFilteredStatusEntries(sourceEntries, generation: generation)
@@ -2531,6 +2699,7 @@ final class SvnDockStore: ObservableObject {
         case .cleaning: "清理失败"
         case .resolving: "解决冲突失败"
         case .ignoring: "添加忽略规则失败"
+        case .unignoring: "取消忽略失败"
         }
     }
 
@@ -3036,6 +3205,11 @@ private struct PendingIgnore: Sendable {
     let rules: [SvnDockIgnoreRule]
     let message: String
     let finderClaim: FinderCommandClaim?
+}
+
+private struct PendingIgnoreRemoval: Sendable {
+    let workingCopy: SvnDockWorkingCopy
+    let plan: SvnDockIgnoreRemovalPlan
 }
 
 private enum FinderCommandRouteError: Error, Sendable {

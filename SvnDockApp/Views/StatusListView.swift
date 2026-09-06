@@ -9,7 +9,8 @@ struct StatusListView: View {
     private var statusCounts: [SvnDockStatusFilter: Int] {
         let counts = store.statusCounts
         return [.all: store.entries.count, .changed: counts.changed,
-                .conflicts: counts.conflicts, .unversioned: counts.unversioned]
+                .conflicts: counts.conflicts, .unversioned: counts.unversioned,
+                .ignored: store.ignoredEntries.count]
     }
 
     var body: some View {
@@ -17,7 +18,7 @@ struct StatusListView: View {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
 
-            if store.statusCounts.conflicts > 0 {
+            if store.statusCounts.conflicts > 0 && store.statusFilter != .ignored {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("\(store.statusCounts.conflicts) 个项目存在冲突", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(SvnDockTheme.red)
@@ -36,7 +37,7 @@ struct StatusListView: View {
                 .padding(.bottom, 8)
             }
 
-            if store.missingEntryCount > 0 {
+            if store.missingEntryCount > 0 && store.statusFilter != .ignored {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("\(store.missingEntryCount) 个项目在本地缺失", systemImage: "exclamationmark.triangle")
                         .foregroundStyle(.orange)
@@ -81,13 +82,50 @@ struct StatusListView: View {
                 .padding(.bottom, 8)
             }
 
+            if store.statusFilter == .ignored, store.selectedWorkingCopy != nil {
+                Text("右键项目可取消忽略。忽略目录整体列出；通配规则会影响同目录的所有匹配名称。")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+            }
+
             if store.selectedWorkingCopy == nil {
                 SvnDockEmptyState(
                     symbol: "sidebar.left",
                     title: "选择工作副本",
                     message: "从左侧选择一个工作副本以查看本地状态。"
                 )
-            } else if store.entries.isEmpty && !store.isBusy {
+            } else if store.statusFilter == .ignored, store.isLoadingIgnoredEntries {
+                VStack(spacing: 12) {
+                    ProgressView()
+                    Text("正在读取已忽略项目…").foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if store.statusFilter == .ignored, let error = store.ignoredEntriesError {
+                VStack(spacing: 12) {
+                    SvnDockEmptyState(symbol: "exclamationmark.triangle", title: "读取忽略项失败", message: error)
+                    Button("重试") { store.retryIgnoredEntries() }
+                        .buttonStyle(SvnDockButtonStyle())
+                        .disabled(store.isInteractionBlocked)
+                }
+                .padding(.bottom, 24)
+            } else if store.statusFilter == .ignored, !store.hasLoadedIgnoredEntries {
+                VStack(spacing: 12) {
+                    SvnDockEmptyState(symbol: "eye.slash", title: "忽略项尚未读取",
+                                      message: "读取当前工作副本中匹配 SVN 忽略规则的项目。")
+                    Button("读取已忽略项目") { store.loadIgnoredEntriesIfNeeded() }
+                        .buttonStyle(SvnDockButtonStyle())
+                        .disabled(store.isInteractionBlocked)
+                }
+                .padding(.bottom, 24)
+            } else if store.statusFilter == .ignored, store.ignoredEntries.isEmpty, store.hasLoadedIgnoredEntries {
+                SvnDockEmptyState(
+                    symbol: "eye.slash", title: "没有已忽略项目",
+                    message: "当前磁盘上没有匹配 SVN 忽略规则的项目。"
+                )
+            } else if store.statusFilter != .ignored && store.entries.isEmpty && !store.isBusy {
                 SvnDockEmptyState(
                     symbol: "checkmark.circle",
                     title: "工作副本是干净的",
@@ -152,7 +190,7 @@ struct StatusListView: View {
     private func workspaceHeader(counts: [SvnDockStatusFilter: Int]) -> some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(store.statusFilter == .conflicts ? "冲突项目" : "工作区")
+                Text(store.statusFilter == .conflicts ? "冲突项目" : store.statusFilter == .ignored ? "已忽略项目" : "工作区")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(SvnDockTheme.text)
                 Text(workspaceSummary(counts: counts))
@@ -186,6 +224,10 @@ struct StatusListView: View {
             return "发现 \(counts[.conflicts, default: 0]) 个项目存在冲突"
         case .unversioned:
             return "发现 \(counts[.unversioned, default: 0]) 个未纳管项目"
+        case .ignored:
+            if store.isLoadingIgnoredEntries { return "正在读取 SVN 忽略项…" }
+            if store.ignoredEntriesError != nil { return "读取失败，请重试" }
+            return store.hasLoadedIgnoredEntries ? "发现 \(counts[.ignored, default: 0]) 个已忽略项目" : "按需读取已忽略项目"
         case .all, .changed:
             let changed = counts[.changed, default: 0]
             if changed == 0 && counts[.unversioned, default: 0] > 0 {
@@ -196,6 +238,15 @@ struct StatusListView: View {
     }
 
     private func filterBar(counts: [SvnDockStatusFilter: Int]) -> some View {
+        ViewThatFits(in: .horizontal) {
+            filterButtons(counts: counts, showsAllCounts: true)
+            filterButtons(counts: counts, showsAllCounts: false)
+        }
+        .padding(.horizontal, 12)
+        .padding(.bottom, 12)
+    }
+
+    private func filterButtons(counts: [SvnDockStatusFilter: Int], showsAllCounts: Bool) -> some View {
         HStack(spacing: 5) {
             ForEach(SvnDockStatusFilter.allCases) { filter in
                 let isSelected = store.statusFilter == filter
@@ -206,21 +257,22 @@ struct StatusListView: View {
                     HStack(spacing: 4) {
                         Text(filter.displayName)
                             .fontWeight(isSelected ? .semibold : .medium)
-                        Text(count.formatted())
-                            .font(.system(size: 10, weight: .semibold, design: .rounded))
-                            .monospacedDigit()
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 2)
-                            .background(
-                                isSelected ? Color.white.opacity(0.22) : SvnDockTheme.secondaryText.opacity(0.09),
-                                in: Capsule()
-                            )
+                        if showsAllCounts || isSelected {
+                            Text(filter == .ignored && !store.hasLoadedIgnoredEntries ? "—" : count.formatted())
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(
+                                    isSelected ? Color.white.opacity(0.22) : SvnDockTheme.secondaryText.opacity(0.09),
+                                    in: Capsule()
+                                )
+                        }
                     }
                     .font(.system(size: 11))
                     .lineLimit(1)
-                    .minimumScaleFactor(0.75)
                     .foregroundStyle(isSelected ? SvnDockTheme.onAccent : SvnDockTheme.secondaryText)
-                    .frame(maxWidth: .infinity)
+                    .fixedSize(horizontal: true, vertical: false)
                     .padding(.horizontal, 6)
                     .frame(height: 32)
                     .contentShape(Rectangle())
@@ -235,13 +287,12 @@ struct StatusListView: View {
                     }
                 }
                 .buttonStyle(SvnDockPlainButtonStyle())
-                .accessibilityLabel("\(filter.displayName)，\(count) 项")
+                .accessibilityLabel(filter == .ignored && !store.hasLoadedIgnoredEntries ? "已忽略，点击加载" : "\(filter.displayName)，\(count) 项")
                 .accessibilityAddTraits(isSelected ? .isSelected : [])
-                .help("\(filter.displayName)：\(count) 项")
+                .help(filter == .ignored && !store.hasLoadedIgnoredEntries ? "点击读取已忽略项目" : "\(filter.displayName)：\(count) 项")
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.bottom, 12)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     @ViewBuilder
@@ -593,6 +644,13 @@ private struct StatusTreeEntryRowView: View {
                     }
                 }
             }
+        }
+
+        if entry.status == .ignored {
+            Button("取消忽略…") {
+                Task { await store.requestIgnoreRemoval(for: entry) }
+            }
+            .disabled(store.isInteractionBlocked || store.isLoadingIgnoredEntries)
         }
 
         if entry.status.isChange {

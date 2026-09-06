@@ -65,7 +65,13 @@ struct InspectorView: View {
     private var inspectorContent: some View {
         switch store.inspectorTab {
         case .history:
-            HistoryInspectorView(store: store)
+            if store.selectedEntryIDs.count == 1, let entry = store.primarySelectedEntry,
+               entry.status == .ignored || entry.status == .unversioned {
+                SvnDockEmptyState(symbol: "clock", title: "此项目没有提交历史",
+                                  message: "该项目尚未纳入 SVN。可从左侧工作副本的右键菜单查看仓库历史。")
+            } else {
+                HistoryInspectorView(store: store)
+            }
         case .diff, .information:
             fileInspectorContent
         }
@@ -76,7 +82,28 @@ struct InspectorView: View {
         if store.selectedEntryIDs.count > 1 {
             SelectionInspector(store: store)
         } else if let entry = store.primarySelectedEntry {
-            if store.inspectorTab == .diff {
+            if entry.status == .ignored && store.inspectorTab == .diff {
+                VStack(alignment: .leading, spacing: 16) {
+                    Label("此项目已被 SVN 忽略", systemImage: "eye.slash")
+                        .font(.headline)
+                    Text(entry.relativePath)
+                        .textSelection(.enabled)
+                    Text("已忽略项目不会出现在待提交列表。取消忽略后，可在“未纳管”中将它添加到 SVN。")
+                        .foregroundStyle(.secondary)
+                    if entry.nodeKind == .directory {
+                        Text("该目录整体被忽略，因此不会展开内部文件。取消目录规则后可查看其内容。")
+                            .foregroundStyle(.secondary)
+                    }
+                    Button("取消忽略…") {
+                        Task { await store.requestIgnoreRemoval(for: entry) }
+                    }
+                    .buttonStyle(SvnDockButtonStyle())
+                    .disabled(store.isInteractionBlocked || store.isLoadingIgnoredEntries)
+                    Spacer()
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            } else if store.inspectorTab == .diff {
                 DiffInspector(store: store, entry: entry)
                     .id(entry.id)
             } else {
@@ -453,7 +480,9 @@ private struct FileDetailsSidebar: View {
                 VStack(alignment: .leading, spacing: 4) {
                     sidebarAction("复制文件路径", symbol: "doc.on.doc", action: copyPath)
                     sidebarAction("在 Finder 中显示", symbol: "folder", action: reveal)
-                    sidebarAction("查看文件历史", symbol: "clock") { store.inspectorTab = .history }
+                    if entry.status != .ignored && entry.status != .unversioned {
+                        sidebarAction("查看文件历史", symbol: "clock") { store.inspectorTab = .history }
+                    }
                     if canOpenDiff {
                         sidebarAction("在独立窗口查看", symbol: "arrow.up.forward.app") {
                             openWindow(value: SvnDockDiffRequest(
