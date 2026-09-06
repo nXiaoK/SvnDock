@@ -12,8 +12,9 @@ SvnDock 是一款原生 macOS SVN 客户端，专注多工作副本管理与 Fin
 同时存在 Git 仓库：SvnDock 不会调用 Git，也不会主动修改 `.git`。
 
 > SvnDock 目前处于开发预览阶段。0.3.0 已覆盖主要工作副本操作和 Finder Sync
-> 扩展，但尚无 Developer ID 签名并经过 Apple 公证的公开安装包，请从源码构建后
-> 试用。
+> 扩展。[GitHub Releases](https://github.com/nXiaoK/SvnDock/releases) 提供自动构建的
+> arm64、x64 DMG 测试包，使用可跨账号运行的 ad-hoc 签名，尚未配置 Developer ID
+> 签名与 Apple 公证。
 
 ## 主要功能
 
@@ -85,13 +86,26 @@ SvnDock 是一款原生 macOS SVN 客户端，专注多工作副本管理与 Fin
 | --- | --- |
 | macOS | 14 或更高版本 |
 | Apple Silicon | 已测试 |
-| Intel Mac | 本机构建脚本支持 `x86_64`，尚未在 Intel 真机验证 |
+| Intel Mac | 原生 `x86_64` CI 构建与测试，尚未验证 Intel 桌面界面 |
 | Subversion | 已使用 SVN 1.14 测试，其他版本暂未验证 |
 | 界面语言 | 简体中文 |
-| 分发方式 | 源码构建、本机 ad-hoc 测试构建 |
+| 分发方式 | 源码、本机测试 App、arm64/x64 DMG 预发布包 |
 
 SvnDock 会依次检查 Homebrew、MacPorts 和系统中的常见 `svn` 路径，再检查
 `PATH`。开发环境也可以通过 `SVNDOCK_SVN_PATH` 指定绝对可执行文件路径。
+
+## 下载与安装
+
+从 [Releases](https://github.com/nXiaoK/SvnDock/releases) 下载对应架构的 DMG：
+Apple Silicon 选择 `arm64`，Intel 选择 `x64`。打开后将 **SvnDock.app** 拖到
+**Applications**，推出磁盘映像，再从应用程序文件夹启动。
+
+仍需单独安装 SVN 1.14，例如 `brew install subversion`。测试包尚未经过 Apple
+公证，首次打开时 macOS 可能需要用户明确批准。
+
+每次 push 都会构建两种架构，通过验证后将两个安装包及 SHA-256 校验文件一起发布为
+预发布版本。触发规则、签名限制和故障排查见
+[自动 DMG 发布说明](Docs/GitHub-Releases.md)。
 
 ## 构建本机 App
 

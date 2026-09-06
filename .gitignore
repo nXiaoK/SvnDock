@@ -26,6 +26,8 @@ artifacts/
 SvnDock-local-*.zip
 .svndock-output.*
 .svndock-publish.*
+.svndock-release.*
+.svndock-dmg.*
 
 # Signing credentials and profiles
 *.p12

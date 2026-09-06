@@ -13,8 +13,9 @@ remaining independent of an IDE. A directory may also contain a Git repository:
 SvnDock does not invoke Git or intentionally modify `.git`.
 
 > SvnDock is a development preview. Version 0.3.0 supports the main working-copy
-> workflows and a Finder Sync extension, but there is no Developer ID-signed or
-> notarized public binary yet. Build the app locally before evaluating it.
+> workflows and a Finder Sync extension. [GitHub Releases](https://github.com/nXiaoK/SvnDock/releases)
+> provides automated arm64 and x64 DMG test builds. These use portable ad-hoc
+> signatures; Developer ID signing and Apple notarization are not configured.
 
 ## Highlights
 
@@ -116,14 +117,26 @@ subtrees are grouped by default; use **Show details** or search to inspect them.
 | --- | --- |
 | macOS | 14 or later |
 | Apple Silicon | Tested |
-| Intel Mac | The local builder supports `x86_64`, but has not been tested on physical Intel hardware |
+| Intel Mac | Native `x86_64` CI build and tests; physical Intel desktop UI not yet verified |
 | Subversion | Tested with SVN 1.14; other versions are not yet verified |
 | User interface | Simplified Chinese |
-| Distribution | Source build and local ad-hoc test build |
+| Distribution | Source, local test App, and portable arm64/x64 DMG prereleases |
 
 SvnDock looks for `svn` in common Homebrew, MacPorts and system locations, then
 checks `PATH`. Advanced development setups can set `SVNDOCK_SVN_PATH` to an
 absolute executable path.
+
+## Download and install
+
+Download the matching DMG from [Releases](https://github.com/nXiaoK/SvnDock/releases),
+open it, and drag **SvnDock.app** onto **Applications**. Eject the DMG and run
+the installed App. SVN 1.14 is a separate runtime prerequisite, for example
+`brew install subversion`. Downloaded ad-hoc builds may require explicit macOS
+approval before first launch.
+
+Every push builds both architectures and publishes a complete prerelease with
+checksums after verification. See [automatic DMG releases](Docs/GitHub-Releases.md)
+for build triggers, installation, signing limits, and troubleshooting.
 
 ## Build a local app
 

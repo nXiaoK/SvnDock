@@ -1,0 +1,146 @@
+name: Build and release DMGs
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Every push keeps its own build; a newer push must not cancel an older release.
+concurrency:
+  group: release-${{ github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.event.deleted != true
+    name: Build and verify ${{ matrix.asset_arch }} DMG
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            machine_arch: arm64
+            asset_arch: arm64
+          - runner: macos-15-intel
+            machine_arch: x86_64
+            asset_arch: x64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      EXPECTED_ARCH: ${{ matrix.machine_arch }}
+      ASSET_ARCH: ${{ matrix.asset_arch }}
+    steps:
+      - name: Check out the exact pushed commit
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Verify native architecture and toolchain
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          xcodebuild -version
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Ensure real SVN integration tests can run
+        run: |
+          if ! command -v svn >/dev/null || ! command -v svnadmin >/dev/null; then
+            brew install subversion
+          fi
+          svn --version --quiet
+          svnadmin --version --quiet
+
+      - name: Run unit and SVN integration tests
+        run: swift test --disable-sandbox
+
+      - name: Verify portable shared-directory boundaries
+        run: ./Scripts/test-portable-shared-directory.sh
+
+      - name: Run core smoke checks
+        run: |
+          swift run --disable-sandbox -c release \
+            -Xswiftc -swift-version -Xswiftc 6 \
+            -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors \
+            SvnDockCoreSmoke
+
+      - name: Build a portable App and Finder extension
+        run: ./Scripts/build-release-app.sh "$ASSET_ARCH" "$RUNNER_TEMP/portable-app"
+
+      - name: Test disk image installation contents and overwrite protection
+        run: ./Scripts/test-create-dmg.sh "$RUNNER_TEMP/portable-app/SvnDock.app"
+
+      - name: Create the release disk image
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$RUNNER_TEMP/portable-app/SvnDock.app/Contents/Info.plist")"
+          mkdir -p "$RUNNER_TEMP/release"
+          ./Scripts/create-dmg.sh "$RUNNER_TEMP/portable-app/SvnDock.app" \
+            "$RUNNER_TEMP/release/SvnDock-$version-$ASSET_ARCH.dmg"
+
+      - name: Upload the verified disk image
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dmg-${{ matrix.asset_arch }}
+          overwrite: true
+          path: ${{ runner.temp }}/release/*.dmg
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish both architectures to Releases
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Download both verified disk images
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: dmg-*
+          merge-multiple: true
+          path: release
+
+      - name: Create checksums and publish a complete prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd release
+          shopt -s nullglob
+          arm_images=(SvnDock-*-arm64.dmg)
+          intel_images=(SvnDock-*-x64.dmg)
+          images=(*.dmg)
+          test "${#arm_images[@]}" -eq 1
+          test "${#intel_images[@]}" -eq 1
+          test "${#images[@]}" -eq 2
+          test "${arm_images[0]%-arm64.dmg}" = "${intel_images[0]%-x64.dmg}"
+          sha256sum -- "${images[@]}" > SHA256SUMS.txt
+          sha256sum --check SHA256SUMS.txt
+          short_sha="${GITHUB_SHA:0:8}"
+          tag="build-$GITHUB_RUN_NUMBER-$GITHUB_RUN_ATTEMPT-$short_sha"
+          title="SvnDock build $GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT ($short_sha)"
+          {
+            printf 'Automated development build from `%s` at `%s`.\n\n' "$GITHUB_REF_NAME" "$GITHUB_SHA"
+            printf '%s\n\n' 'Requires macOS 14+ and Subversion 1.14 (for example, `brew install subversion`).'
+            printf '%s\n' '- Apple Silicon: download the `arm64.dmg` asset.'
+            printf '%s\n' '- Intel Mac: download the `x64.dmg` asset.'
+            printf '%s\n\n' '- Open the DMG and drag **SvnDock.app** onto **Applications**, then eject the disk image.'
+            printf '%s\n\n' 'These are portable ad-hoc signed test builds, without Developer ID or Apple notarization. macOS may require explicit approval before first launch. No system security settings are changed by the installer.'
+            printf '%s\n\n' 'The Finder extension is included and can be enabled in System Settings after opening the installed App. Shared metadata stays under the signed-in account’s Library/Application Support/SvnDock directory.'
+            printf 'Build and verification: https://github.com/%s/actions/runs/%s\n' "$GITHUB_REPOSITORY" "$GITHUB_RUN_ID"
+          } > release-notes.md
+          # A draft prevents a release with just one architecture becoming visible.
+          # Attempts have unique tags; reruns never overwrite an earlier release.
+          gh release create "$tag" --target "$GITHUB_SHA" --draft --prerelease \
+            --title "$title" --notes-file release-notes.md \
+            "${images[@]}" SHA256SUMS.txt
+          gh release edit "$tag" --draft=false
+          {
+            printf 'Published [%s](https://github.com/%s/releases/tag/%s)\n\n' "$title" "$GITHUB_REPOSITORY" "$tag"
+            printf 'Assets: `%s`, `%s`, `SHA256SUMS.txt`\n' "${arm_images[0]}" "${intel_images[0]}"
+          } >> "$GITHUB_STEP_SUMMARY"
