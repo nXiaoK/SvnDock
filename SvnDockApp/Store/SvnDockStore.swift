@@ -2973,10 +2973,17 @@ final class SvnDockStore: ObservableObject {
         case .openApp:
             if command.paths.count == 1, let path = command.paths.first,
                let relative = Self.relativePath(for: URL(fileURLWithPath: path), under: workingCopy.rootURL),
-               relative != ".", primarySelectedEntry == nil {
-                let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
-                finderSelectedTarget = target
-                selectedEntryIDs = [target.entry.id]
+               relative != "." {
+                if let entry = exactEntry(for: URL(fileURLWithPath: path), in: workingCopy) {
+                    // A directory selection expands to descendants for commit
+                    // and revert, but opening an item should locate that item.
+                    // Known unversioned rows remain valid navigation targets.
+                    selectedEntryIDs = [entry.id]
+                } else {
+                    let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
+                    finderSelectedTarget = target
+                    selectedEntryIDs = [target.entry.id]
+                }
                 inspectorTab = .information
             }
         case .refresh:

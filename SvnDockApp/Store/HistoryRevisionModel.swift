@@ -55,7 +55,7 @@ final class HistoryRevisionModel: ObservableObject {
     var displayedChanges: ArraySlice<SVNChangedPath> { filteredChanges.prefix(visibleLimit) }
     var selectionIndex: Int? { filteredChanges.firstIndex { $0.path == selectedPath } }
     var preferredPathNotice: String? {
-        guard selectedPath == nil, !isLoading, errorMessage == nil,
+        guard selectedPath == nil, !isLoading, !isFiltering, errorMessage == nil,
               let preferred = request?.preferredPath, let details else { return nil }
         if Self.preferredChange(in: details.changes, path: preferred) != nil {
             return "路径筛选隐藏了“\(preferred)”。请清除筛选或从变更列表中选择文件。"

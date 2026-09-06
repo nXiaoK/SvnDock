@@ -106,6 +106,9 @@ struct SvnDockSettingsView: View {
             Text("保持 SvnDock 运行，即可自动更新 Finder 当前浏览目录的状态。角标位置由 macOS 决定；退出 App 后，旧状态会显示为待刷新。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text("使用 Finder 原生角标，不会添加或更改文件标签，也不会影响系统标签分类。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             if let finderStatusMessage {
                 Text(finderStatusMessage)
                     .font(.caption)
@@ -121,6 +124,19 @@ struct SvnDockSettingsView: View {
             .controlSize(.small)
             .help("打开 macOS 的扩展管理界面，由你开启或关闭 SvnDock Finder。")
             .accessibilityIdentifier("openFinderExtensionSettings")
+
+            DisclosureGroup("已启用，但没有状态角标？") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("1. 确认目录已加入 SvnDock 的工作副本列表，保持 App 运行，刷新本地状态后重新打开 Finder 中的目录。")
+                    Text("2. 升级后若右键菜单正常、角标却不显示，可在扩展设置中关闭再开启“SvnDock Finder”。")
+                    Text("3. 若仍不显示，请先等待 Finder 的复制、移动任务完成，再按 ⌥⌘Esc，选择“访达”并点按“重新开启”。Finder 会重新连接扩展。")
+                    Text("其他同步扩展也可能管理同一目录的角标。若问题持续，可检查它们的监控范围；SvnDock 不会自动关闭其他扩展。")
+                }
+                .foregroundStyle(.secondary)
+                .padding(.top, 6)
+            }
+            .font(.caption)
+            .accessibilityIdentifier("finderBadgeTroubleshooting")
 
             DisclosureGroup("没有看到 SvnDock Finder？") {
                 VStack(alignment: .leading, spacing: 8) {

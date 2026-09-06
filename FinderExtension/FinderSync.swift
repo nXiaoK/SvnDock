@@ -16,7 +16,7 @@ final class FinderSync: FIFinderSync {
     private static let retainedMenuPayloadLimit = 16
     private static let retainedMenuPayloadLifetime: TimeInterval = 10 * 60
 
-    private let controller = FIFinderSyncController.default()
+    private var controller: FIFinderSyncController { FIFinderSyncController.default() }
     private let container: SharedContainer
     private let state: SharedStateStore
     private let dispatcher: FinderCommandDispatcher
@@ -32,6 +32,8 @@ final class FinderSync: FIFinderSync {
     private var badgePollTarget: FinderBadgePollTarget?
     private var lastBadgeRequestAt = Date.distantPast
     private var lastBadgeRequestError: String?
+    private var configuredDirectoryURLs: Set<URL>?
+    private var hasReceivedBadgeRequest = false
 
     override init() {
         let container = SharedContainer()
@@ -76,6 +78,7 @@ final class FinderSync: FIFinderSync {
     }
 
     override func requestBadgeIdentifier(for url: URL) {
+        Self.logger.debug("Received Finder badge request")
         performOnMain(#selector(applyBadgeRequest(_:)), value: url)
     }
 
@@ -108,20 +111,28 @@ final class FinderSync: FIFinderSync {
         let hasVersionedChange = statuses.contains(where: \.isLocalChange)
 
         let contextStatus: String
+        let contextBadgeIdentifier: String
         if !isFresh {
             contextStatus = "状态待刷新"
+            contextBadgeIdentifier = FinderBadgeIdentifier.stale
         } else if hasConflict {
             contextStatus = "有冲突"
+            contextBadgeIdentifier = FinderBadgeIdentifier.conflicted
         } else if hasVersionedChange {
             contextStatus = "有本地修改"
+            contextBadgeIdentifier = FinderBadgeIdentifier.modified
         } else if hasUnversioned {
             contextStatus = "未纳管"
+            contextBadgeIdentifier = FinderBadgeIdentifier.unversioned
         } else if statuses.contains(.ignored) {
             contextStatus = "已忽略"
+            contextBadgeIdentifier = FinderBadgeIdentifier.ignored
         } else if statuses.count == selection.urls.count && statuses.allSatisfy({ $0 == .clean }) {
             contextStatus = "正常"
+            contextBadgeIdentifier = FinderBadgeIdentifier.clean
         } else {
-            contextStatus = "SVN 工作副本"
+            contextStatus = "状态待确认"
+            contextBadgeIdentifier = FinderBadgeIdentifier.unknown
         }
         let contextTitle = root.displayName ?? root.canonicalURL?.lastPathComponent ?? "SvnDock"
         let contextItem = NSMenuItem(
@@ -130,8 +141,7 @@ final class FinderSync: FIFinderSync {
             keyEquivalent: ""
         )
         contextItem.isEnabled = false
-        if let first = selection.urls.first,
-           let spec = FinderBadgeSymbolSpec.all.first(where: { $0.identifier == state.badgeIdentifier(for: first) }) {
+        if let spec = FinderBadgeSymbolSpec.all.first(where: { $0.identifier == contextBadgeIdentifier }) {
             contextItem.image = badgeImage(for: spec)
         }
         submenu.addItem(contextItem)
@@ -143,12 +153,14 @@ final class FinderSync: FIFinderSync {
 
         // Badge snapshots are only a menu-visibility hint. The main app must
         // reload authoritative SVN state before executing any of these actions.
-        // A clean versioned item has no badge, so history remains available
-        // when the cached status is absent; an explicitly unversioned item does
-        // not have repository history.
+        // Unknown cached status keeps history/diff available for validation in
+        // the app; an explicitly unversioned or ignored item has no history.
         if isSingleItem, isRoot || (singleStatus != .unversioned && singleStatus != .ignored) {
+            let isDirectory = isRoot
+                || (try? selection.urls[0].resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             submenu.addItem(makeCommandItem("查看历史…", action: #selector(log(_:)), payload: payload))
-            submenu.addItem(makeCommandItem("查看差异", action: #selector(diff(_:)), payload: payload))
+            submenu.addItem(makeCommandItem(isDirectory ? "查看目录属性差异" : "查看差异",
+                                           action: #selector(diff(_:)), payload: payload))
         }
         submenu.addItem(.separator())
         submenu.addItem(makeCommandItem("刷新状态", action: #selector(refresh(_:)), payload: payload))
@@ -353,6 +365,7 @@ final class FinderSync: FIFinderSync {
     @objc private func observeDirectory(_ url: URL) {
         state.reload()
         badgeTracker.observe(url, roots: state.registeredRoots())
+        Self.logger.notice("Finder began observing a directory; registered roots: \(self.state.registeredRoots().count)")
         applySharedState()
     }
 
@@ -364,7 +377,12 @@ final class FinderSync: FIFinderSync {
     @objc private func applyBadgeRequest(_ url: URL) {
         let identifier = state.badgeIdentifier(for: url)
         badgeTracker.request(url, identifier: identifier, roots: state.registeredRoots())
+        Self.logger.debug("Applying Finder badge: \(identifier, privacy: .public)")
         controller.setBadgeIdentifier(identifier, for: url)
+        if !hasReceivedBadgeRequest {
+            hasReceivedBadgeRequest = true
+            Self.logger.notice("Delivered first Finder badge: \(identifier, privacy: .public)")
+        }
         publishBadgeRequests(force: false)
     }
 
@@ -379,7 +397,7 @@ final class FinderSync: FIFinderSync {
         // Finder monitors every registered root recursively. Registering each
         // descendant would be both redundant and prohibitively expensive for
         // large working copies.
-        Self.updateObservedDirectories(using: state)
+        updateObservedDirectories(using: state)
         publishBadgeRequests(force: false)
     }
 
@@ -400,14 +418,17 @@ final class FinderSync: FIFinderSync {
         }
     }
 
-    private static func updateObservedDirectories(using state: SharedStateStore) {
+    private func updateObservedDirectories(using state: SharedStateStore) {
         // Read the latest state after reaching the main queue so an older
         // callback cannot restore roots removed by a newer reload.
         let rootURLs = Set(state.registeredRoots().compactMap(\.canonicalURL))
-        let controller = FIFinderSyncController.default()
-        if controller.directoryURLs != rootURLs {
-            controller.directoryURLs = rootURLs
-        }
+        // Register unconditionally for this extension instance's first setup.
+        // A controller getter reflecting an earlier connection is not proof
+        // that Finder has registered the new instance's callbacks.
+        guard configuredDirectoryURLs != rootURLs else { return }
+        configuredDirectoryURLs = rootURLs
+        controller.directoryURLs = rootURLs
+        Self.logger.notice("Registered Finder observation roots: \(rootURLs.count)")
     }
 
     private func currentSelection(
@@ -486,25 +507,20 @@ final class FinderSync: FIFinderSync {
     }
 
     private func registerBadgeImages() {
+        var count = 0
         for spec in FinderBadgeSymbolSpec.all {
-            guard let image = badgeImage(for: spec) else { continue }
+            guard let image = badgeImage(for: spec) else {
+                Self.logger.error("Unable to render Finder badge: \(spec.identifier, privacy: .public)")
+                continue
+            }
             controller.setBadgeImage(image, label: spec.label, forBadgeIdentifier: spec.identifier)
+            count += 1
         }
+        Self.logger.notice("Registered Finder bitmap badge images: \(count)")
     }
 
     private func badgeImage(for spec: FinderBadgeSymbolSpec) -> NSImage? {
-        let color: NSColor
-        switch spec.color {
-        case .green: color = .systemGreen
-        case .yellow: color = .systemYellow
-        case .red: color = .systemRed
-        case .blue: color = .systemBlue
-        case .gray: color = .systemGray
-        }
-        guard let image = NSImage(systemSymbolName: spec.symbol, accessibilityDescription: spec.label)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) else { return nil }
-        image.isTemplate = false
-        return image
+        FinderBadgeImages.image(for: spec)
     }
 }
 

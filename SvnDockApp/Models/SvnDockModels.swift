@@ -124,7 +124,8 @@ struct SvnDockHistoryTarget: Identifiable, Hashable, Sendable {
 
     var id: String {
         let paths = relativePaths.isEmpty ? "." : relativePaths.joined(separator: "\u{1F}")
-        return "\(workingCopy.id.uuidString)::\(paths)::\(source.rawValue)"
+        let base = "\(workingCopy.id.uuidString)::\(paths)::\(source.rawValue)"
+        return preferredRepositoryPath.map { base + "::" + $0 } ?? base
     }
 }
 

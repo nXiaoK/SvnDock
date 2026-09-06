@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-![版本](https://img.shields.io/badge/version-0.4.0-blue)
+![版本](https://img.shields.io/badge/version-0.4.1-blue)
 ![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)
 ![Swift 工具链](https://img.shields.io/badge/Swift_6-toolchain-orange?logo=swift)
 ![许可证](https://img.shields.io/badge/license-MIT-green)
@@ -11,7 +11,7 @@ SvnDock 是一款原生 macOS SVN 客户端，专注多工作副本管理与 Fin
 右键集成。它把常用 SVN 操作放到文件旁边，不需要依赖 IDE。SVN 工作副本中也可以
 同时存在 Git 仓库：SvnDock 不会调用 Git，也不会主动修改 `.git`。
 
-> SvnDock 目前处于开发预览阶段。0.4.0 已覆盖主要工作副本操作和 Finder Sync
+> SvnDock 目前处于开发预览阶段。0.4.1 已覆盖主要工作副本操作和 Finder Sync
 > 扩展。[GitHub Releases](https://github.com/nXiaoK/SvnDock/releases) 提供自动构建的
 > arm64、x64 DMG 测试包，使用可跨账号运行的 ad-hoc 签名，尚未配置 Developer ID
 > 签名与 Apple 公证。
@@ -135,8 +135,30 @@ provisioning profile 或公证票据，共享数据路径也会绑定到执行�
 3. macOS 14：入口也可能位于“隐私与安全性 → 扩展”。
 4. 启用 **SvnDock Finder**，打开 SvnDock，并登记一个已有的 SVN 工作副本。
 
-系统中最好只保留一份可被发现的 SvnDock。如果 Finder 仍加载旧扩展，可先关闭再
-重新启用扩展，必要时再重启 Finder。
+也可从 SvnDock 设置中的 **打开 Finder 扩展设置…** 直接进入系统管理界面。
+保持 App 运行，Finder 当前浏览目录的状态会自动刷新：绿色勾表示未修改，
+黄色笔表示已修改，红色警告表示冲突，蓝色加号表示已添加；灰色符号区分
+未纳管、已忽略、待确认和待刷新。这些状态使用 Finder Sync 角标显示，
+不会写入 Finder 标签或文件扩展属性。角标位置由 Finder 决定：已验证的
+macOS 15.5 列表视图将角标显示在名称列右侧，其他系统版本或视图可能不同。
+
+0.4.1 将角标渲染为位图，并为填充图形使用独立的前景颜色，让勾、笔、加号和
+警告符号在彩色背景上保持清晰。
+
+右键文件 → **SvnDock**，可以提交本次选择、查看该文件的历史或本地差异。
+提交窗口优先勾选本次 Finder 所选文件，并保留草稿中的提交说明；最终提交前
+仍可检查和调整。历史详情会优先定位目标文件。未修改文件可查看空差异，
+目录差异显示目录自身的属性变更。
+
+自动刷新按 Finder 浏览的目录读取状态，不会将全部未修改文件加入 App 的变更列表。
+退出 SvnDock 会停止后台刷新，缓存超过一分钟后显示灰色待刷新状态。
+
+系统中最好只保留一份可被发现的 SvnDock。升级后，Finder 可能保留旧的扩展连接，
+出现右键菜单可用但角标不显示的情况。先确认扩展已启用、SvnDock 正在运行，
+再重新打开已登记的目录。如果仍无角标，请等 Finder 的复制、移动操作全部完成，
+再按住 Option 键右键点击 Dock 中的 Finder，选择 **重新开启**，然后重新打开目录。
+这一步由用户手动执行，SvnDock 不会自动重启 Finder。已验证的 macOS 15.5 升级
+测试通过重新开启 Finder 恢复了角标请求；这与角标图像本身的渲染修复是两项不同的处理。
 
 ## 自启与菜单栏
 

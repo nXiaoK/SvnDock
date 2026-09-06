@@ -153,15 +153,16 @@ final class SharedStateStoreTests: XCTestCase {
             firstRead.signal()
             allowFirstFinish.wait()
         }
+        let state = fixture.state
         DispatchQueue.global().async {
-            fixture.state.reload()
+            state.reload()
             firstDone.signal()
         }
         XCTAssertEqual(firstRead.wait(timeout: .now() + 5), .success)
         try fixture.writeRoots([])
         DispatchQueue.global().async {
             secondStarted.signal()
-            fixture.state.reload()
+            state.reload()
             secondDone.signal()
         }
         XCTAssertEqual(secondStarted.wait(timeout: .now() + 5), .success)

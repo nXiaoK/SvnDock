@@ -11,6 +11,7 @@ enum FinderRoutingRegressionChecks {
         try await unavailableHistoryPathsRequireExplicitSelection()
         try await finderCommitOverridesOnlyTheInitialScope()
         try await directorySelectionRespectsPathBoundaries()
+        try await openingDirectoriesLocatesTheExactNode()
         try await confirmationBlocksLaterRequestsAndCancellationIsDurable()
         try await invalidRequestsCannotReachTargetOperations()
         try await backgroundBadgesPreserveInteractionAndRespectGates()
@@ -115,6 +116,14 @@ enum FinderRoutingRegressionChecks {
                   "ordinary root history keeps its existing default path selection")
         try check(try await fixture.coordinator.location(of: log.id) == .completed(.completed),
                   "explicit file history leaves a completed queue receipt")
+        await fixture.service.moveRepository(to: "/branches/new-place")
+        let movedLog = try await fixture.enqueue(.log, paths: [FinderRoutingFixture.cleanPath])
+        await store.handleFinderURL(fixture.url(for: movedLog))
+        try check(store.historyTarget?.id != target.id
+                    && store.historyTarget?.preferredRepositoryPath == "/branches/new-place/" + FinderRoutingFixture.cleanPath,
+                  "the same local file at another repository path gets a new history identity")
+        try check(await fixture.service.historyPaths.count == 2,
+                  "updated repository coordinates cannot reuse the old file history cache")
     }
 
     @MainActor
@@ -174,6 +183,31 @@ enum FinderRoutingRegressionChecks {
         try await waitUntil { !fixture.store.isBusy }
         try check(try await fixture.coordinator.location(of: command.id) == .completed(.cancelled),
                   "closing the directory submission acknowledges cancellation")
+    }
+
+    @MainActor
+    private static func openingDirectoriesLocatesTheExactNode() async throws {
+        let fixture = try await FinderRoutingFixture.make()
+        defer { fixture.remove() }
+        for path in ["D", "D/sub", "loose.txt"] {
+            fixture.store.inspectorTab = .diff
+            let command = try await fixture.enqueue(.openApp, paths: [path])
+            await fixture.store.handleFinderURL(fixture.url(for: command))
+            try check(fixture.store.presentedError == nil
+                        && fixture.store.selectedEntryIDs.count == 1
+                        && fixture.store.primarySelectedEntry?.relativePath == path
+                        && fixture.store.inspectorTab == .information,
+                      "opening a Finder item locates that node, not its modified descendants")
+            try check(try await fixture.coordinator.location(of: command.id) == .completed(.completed),
+                      "opening an exact directory or unversioned item completes its queue request")
+            if path == "D/sub" {
+                try check(fixture.store.finderTargetOutsideChangeList?.nodeKind == .directory
+                            && fixture.store.finderTargetOutsideChangeList?.status == .clean,
+                          "a clean directory with modified children remains a precise navigation target")
+            }
+        }
+        try check(await fixture.service.targetPaths == ["D/sub"],
+                  "known modified and unversioned nodes do not require a versioned-only target lookup")
     }
 
     @MainActor
@@ -418,12 +452,14 @@ private actor FinderRoutingService: SvnDockServicing {
     private var shouldHoldUpdate = false
     private var shouldFailBadgeRefresh = false
     private var pendingUpdate: CheckedContinuation<Void, Never>?
+    private var repositoryPrefix = "/branches/feature"
 
     init(copy: SvnDockWorkingCopy) { self.copy = copy }
     var hasPendingUpdate: Bool { pendingUpdate != nil }
     func holdNextUpdate() { shouldHoldUpdate = true }
     func finishPendingUpdate() { pendingUpdate?.resume(); pendingUpdate = nil }
     func failNextBadgeRefresh() { shouldFailBadgeRefresh = true }
+    func moveRepository(to prefix: String) { repositoryPrefix = prefix }
 
     func loadRegisteredWorkingCopies() async throws -> [SvnDockWorkingCopy] { [copy] }
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
@@ -446,10 +482,10 @@ private actor FinderRoutingService: SvnDockServicing {
         targetPaths.append(relativePath)
         guard relativePath != "loose.txt" else { throw unavailable }
         let entry = SvnDockStatusEntry(workingCopyID: copy.id, relativePath: relativePath,
-            nodeKind: relativePath == "." || relativePath == "D" ? .directory : .file,
-            status: relativePath == "src/clean@文本.swift" || relativePath == "." ? .clean : .modified)
+            nodeKind: relativePath == "." || relativePath == "D" || relativePath == "D/sub" ? .directory : .file,
+            status: relativePath == "src/clean@文本.swift" || relativePath == "." || relativePath == "D/sub" ? .clean : .modified)
         return SvnDockFinderTarget(entry: entry,
-            repositoryRelativePath: relativePath == "." ? "/branches/feature" : "/branches/feature/" + relativePath)
+            repositoryRelativePath: relativePath == "." ? repositoryPrefix : repositoryPrefix + "/" + relativePath)
     }
     func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String {
         diffPaths.append(relativePath)

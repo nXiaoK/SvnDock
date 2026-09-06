@@ -137,7 +137,7 @@ struct FinderBadgeSymbolSpec: Equatable, Sendable {
         .init(identifier: FinderBadgeIdentifier.missing, symbol: "xmark.circle.fill", label: "SVN 文件缺失", color: .red),
         .init(identifier: FinderBadgeIdentifier.unversioned, symbol: "questionmark.circle.fill", label: "SVN 未纳管", color: .gray),
         .init(identifier: FinderBadgeIdentifier.ignored, symbol: "eye.slash.circle.fill", label: "SVN 已忽略", color: .gray),
-        .init(identifier: FinderBadgeIdentifier.stale, symbol: "clock.fill", label: "SVN 状态待刷新", color: .gray),
+        .init(identifier: FinderBadgeIdentifier.stale, symbol: "clock.circle.fill", label: "SVN 状态待刷新", color: .gray),
         .init(identifier: FinderBadgeIdentifier.unknown, symbol: "questionmark.circle", label: "SVN 状态待确认", color: .gray)
     ]
 }
@@ -250,10 +250,17 @@ struct FinderBadgeTracker {
     mutating func stopObserving(_ url: URL) {
         let url = url.standardizedFileURL
         observedDirectories.removeAll { $0.path == url.path }
-        recentDirectories.removeAll { $0.path == url.path }
-        let removed = requestedURLs.filter { $0.deletingLastPathComponent().path == url.path }
-        requestedURLs.removeAll { $0.deletingLastPathComponent().path == url.path }
+        let remainingObserved = Set(observedDirectories.map(\.path))
+        let removed = requestedURLs.filter { requestedURL in
+            let path = requestedURL.path
+            let isWithinEndedDirectory = path == url.path || path.hasPrefix(url.path + "/")
+            return isWithinEndedDirectory && !remainingObserved.contains(requestedURL.deletingLastPathComponent().path)
+        }
+        let removedPaths = Set(removed.map(\.path))
+        requestedURLs.removeAll { removedPaths.contains($0.path) }
         for removedURL in removed { lastIdentifiers[removedURL.path] = nil }
+        let activeDirectories = remainingObserved.union(requestedURLs.map { $0.deletingLastPathComponent().path })
+        recentDirectories.removeAll { !activeDirectories.contains($0.path) }
     }
 
     mutating func request(_ url: URL, identifier: String, roots: [RegisteredRoot]) {

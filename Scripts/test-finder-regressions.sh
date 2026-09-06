@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run Finder cache regressions with Command Line Tools (XCTest is optional).
+# Run Finder cache, menu and badge regressions with Command Line Tools.
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,6 +11,15 @@ trap 'rm -rf "$test_directory"' EXIT
 sed '/^import XCTest$/d; /^@testable import SvnDockFinderExtension$/d' \
     "$repository_root/FinderExtensionTests/SharedStateStoreTests.swift" \
     > "$test_directory/SharedStateStoreTests.swift"
+sed '/^import XCTest$/d; /^@testable import SvnDockFinderExtension$/d' \
+    "$repository_root/FinderExtensionTests/FinderMenuSelectionResolverTests.swift" \
+    > "$test_directory/FinderMenuSelectionResolverTests.swift"
+sed '/^import XCTest$/d; /^@testable import SvnDockFinderExtension$/d' \
+    "$repository_root/FinderExtensionTests/FinderBadgePresentationTests.swift" \
+    > "$test_directory/FinderBadgePresentationTests.swift"
+sed '/^import XCTest$/d; /^@testable import SvnDockFinderExtension$/d' \
+    "$repository_root/FinderExtensionTests/FinderBadgeImageTests.swift" \
+    > "$test_directory/FinderBadgeImageTests.swift"
 
 cat > "$test_directory/Assertions.swift" <<'SWIFT'
 import Foundation
@@ -42,16 +51,52 @@ struct FinderRegressionMain {
         try tests.testRemovedAndMalformedRegistryImmediatelyClearCachedRoots()
         try tests.testReplacementDuringReadIsDetectedOnNextReload()
         try tests.testConcurrentReloadCannotRestoreStaleRoots()
-        print("Passed 7 Finder shared-state regression tests")
+        let menuTests = FinderMenuSelectionResolverTests()
+        menuTests.testItemMenuUsesSelectionAndDoesNotFallBackToTarget()
+        menuTests.testContainerAndSidebarMenusUseTargetInsteadOfStaleSelection()
+        menuTests.testToolbarUsesSelectionThenFallsBackToTarget()
+        menuTests.testUnsupportedMenuKindFailsClosed()
+        menuTests.testResolverCanonicalizesDeduplicatesAndRejectsNonFileURLs()
+        menuTests.testNestedItemsResolveToTheDeepestRegisteredWorkingCopy()
+        let badgeTests = FinderBadgePresentationTests()
+        badgeTests.testDirectStateNeverFallsBackToAncestorDisplayBadge()
+        badgeTests.testCleanRequiresFreshRootAndUnknownNeverBecomesGreen()
+        try badgeTests.testLegacySnapshotRemainsUnknownAndGlobalDateDoesNotRefreshAnotherRoot()
+        badgeTests.testFreshnessHandlesTimestampVariantsBoundaryAndFutureClock()
+        badgeTests.testRepaintingOnlyUpdatesRequestedPathsAndClearsRemovedBadges()
+        badgeTests.testRequestedPathCapDeduplicationAndDirectoryScope()
+        badgeTests.testRecentDirectoryLimitAndEndObservationPreservesOtherVisibleDirectory()
+        try badgeTests.testRequestEncodingRespectsDirectoryItemAndByteBudgets()
+        badgeTests.testSymbolSpecificationsGiveEachStateAColorShapeAndLabel()
+        try badgeTests.testRequestWriterUsesPrivatePermissionsAndStableInstanceFile()
+        try badgeTests.testRootLoaderFiltersDisabledAndCanonicalizesRoots()
+        let imageTests = FinderBadgeImageTests()
+        try imageTests.testEveryStateProducesVisibleStandardAndRetinaBitmaps()
+        try imageTests.testFilledStatesKeepWhiteGlyphsAndTheirStateColor()
+        try imageTests.testUnknownOutlineRemainsGrayWithoutWhiteFill()
+        try imageTests.testFilledStatesRemainDistinguishableWhenColorsMatch()
+        try imageTests.testSecureArchivePreservesBitmapSizesAndPixels()
+        try imageTests.testTIFFPreservesTransparentColoredBitmapContent()
+        imageTests.testUnavailableSymbolDoesNotProduceABlankBadge()
+        try imageTests.testRenderingPreservesTheCallingGraphicsContext()
+        print("Passed 32 Finder shared-state, menu, badge and image regression tests")
     }
 }
 SWIFT
 
-xcrun swiftc -swift-version 5 -target "$(uname -m)-apple-macosx14.0" \
+xcrun swiftc -swift-version 6 -strict-concurrency=complete -warnings-as-errors \
+    -D SVNDOCK_LOCAL_SIGNED_BUILD \
+    -target "$(uname -m)-apple-macosx14.0" \
     -module-cache-path "$test_directory/ModuleCache" \
+    -framework AppKit \
     "$repository_root/FinderExtension/SharedModels.swift" \
     "$repository_root/FinderExtension/SharedContainer.swift" \
+    "$repository_root/FinderExtension/FinderMenuSelectionResolver.swift" \
+    "$repository_root/FinderExtension/FinderBadgeImages.swift" \
     "$test_directory/SharedStateStoreTests.swift" \
+    "$test_directory/FinderMenuSelectionResolverTests.swift" \
+    "$test_directory/FinderBadgePresentationTests.swift" \
+    "$test_directory/FinderBadgeImageTests.swift" \
     "$test_directory/Assertions.swift" \
     -o "$test_directory/FinderRegressionTests"
 "$test_directory/FinderRegressionTests"

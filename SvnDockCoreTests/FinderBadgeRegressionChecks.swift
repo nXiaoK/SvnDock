@@ -20,6 +20,8 @@ enum FinderBadgeRegressionChecks {
             StatusEntry(path: "loose.txt", status: .unversioned),
             StatusEntry(path: "cache", status: .ignored),
             StatusEntry(path: "unknown.txt", status: .unknown("new-client-status")),
+            StatusEntry(path: "file-external.txt", status: .normal, isFileExternal: true),
+            StatusEntry(path: "directory-external", status: .external),
             StatusEntry(path: "external/file.txt", status: .conflicted),
             StatusEntry(path: "../outside.txt", status: .modified)
         ], in: copy, excludingRoots: ["/tmp/finder-badges/external"])
@@ -36,6 +38,8 @@ enum FinderBadgeRegressionChecks {
                   "ignored, unversioned and clean have separate authoritative states")
         try check(badges.entries["/tmp/finder-badges/unknown.txt"] == nil
                     && badges.entries["/tmp/finder-badges/external/file.txt"] == nil
+                    && badges.entries["/tmp/finder-badges/file-external.txt"] == nil
+                    && badges.entries["/tmp/finder-badges/directory-external"] == nil
                     && badges.entries["/tmp/outside.txt"] == nil,
                   "unknown states and foreign paths never acquire green or aggregate badges")
         let ignoredOnly = FinderBadgeBuilder.build(from: [StatusEntry(path: "cache", status: .ignored)], in: copy)
@@ -134,6 +138,22 @@ enum FinderBadgeRegressionChecks {
                   "request reads enforce privacy, TTL, size scope, deepest root and direct-child preference")
         let expired = try await store.activeDirectories(registeredRoots: [root, nested, disabled], now: now.addingTimeInterval(31))
         try check(expired.isEmpty, "dead Finder processes expire without persistent observation work")
+
+        for _ in 0..<300 {
+            let old = FinderBadgeRefreshRequest(id: UUID(), updatedAt: now.addingTimeInterval(-120), directories: [valid])
+            let oldURL = try write(old, in: directory)
+            try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-120)], ofItemAtPath: oldURL.path)
+        }
+        let afterRestarts = try await store.activeDirectories(registeredRoots: [root, nested, disabled], now: now)
+        try check(afterRestarts.count == 1, "hundreds of expired process files cannot hide a current Finder request")
+        for index in 0..<12 {
+            let observed = FinderBadgeRefreshDirectory(workingCopyID: root.id, workingCopyRoot: root.path,
+                directoryPath: root.path + "/window-\(index)")
+            try write(FinderBadgeRefreshRequest(id: UUID(), updatedAt: now.addingTimeInterval(1), directories: [observed]), in: directory)
+        }
+        let bounded = try await store.activeDirectories(registeredRoots: [root, nested, disabled], now: now)
+        try check(bounded.count == FinderBadgeRefreshRequestStore.maximumActiveProcesses,
+                  "at most ten live process requests contribute observation work")
     }
 
     @discardableResult
