@@ -1,8 +1,10 @@
 import AppKit
+import FinderSync
 import SwiftUI
 
 struct SvnDockSettingsView: View {
     @ObservedObject var preferences: SvnDockPreferences
+    @State private var finderExtensionEnabled = false
 
     var body: some View {
         Form {
@@ -68,10 +70,7 @@ struct SvnDockSettingsView: View {
                     Text("自动检测 Homebrew 与系统路径")
                         .foregroundStyle(.secondary)
                 }
-                LabeledContent("Finder 集成") {
-                    Text("在“系统设置 → 通用 → 登录项与扩展 → Finder 扩展”中启用")
-                        .foregroundStyle(.secondary)
-                }
+                finderIntegrationSettings
             }
         }
         .formStyle(.grouped)
@@ -79,10 +78,57 @@ struct SvnDockSettingsView: View {
         .tint(SvnDockTheme.accent)
         .frame(width: 580)
         .fixedSize(horizontal: false, vertical: true)
-        .onAppear { preferences.refreshLoginItemStatus() }
+        .onAppear { refreshSystemStatus() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            preferences.refreshLoginItemStatus()
+            refreshSystemStatus()
         }
+    }
+
+    private var finderIntegrationSettings: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            LabeledContent("Finder 集成") {
+                Label(finderExtensionEnabled ? "已启用" : "未启用",
+                      systemImage: finderExtensionEnabled ? "checkmark.circle" : "circle.dashed")
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("finderExtensionStatus")
+            }
+
+            Text(finderExtensionEnabled
+                 ? "已允许 SvnDock Finder 在 Finder 中显示 SVN 状态和右键菜单。"
+                 : "在系统扩展管理中开启“SvnDock Finder”，即可在 Finder 中查看 SVN 状态和使用右键菜单。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Button {
+                FIFinderSyncController.showExtensionManagementInterface()
+            } label: {
+                Label("打开 Finder 扩展设置…", systemImage: "arrow.up.forward.app")
+            }
+            .controlSize(.small)
+            .help("打开 macOS 的扩展管理界面，由你开启或关闭 SvnDock Finder。")
+            .accessibilityIdentifier("openFinderExtensionSettings")
+
+            DisclosureGroup("没有看到 SvnDock Finder？") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("请将 SvnDock.app 放入“应用程序”文件夹并启动，再重新打开扩展设置。不同 macOS 版本的入口可能不同，也可在系统设置中搜索“扩展”或“Finder”。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("打开系统登录项与扩展…") {
+                        preferences.openLoginItemsSettings()
+                    }
+                    .controlSize(.small)
+                    .help("打开系统登录项页面；较新 macOS 的扩展管理也位于此处。")
+                    .accessibilityIdentifier("openFinderExtensionFallbackSettings")
+                }
+                .padding(.top, 6)
+            }
+            .font(.caption)
+        }
+    }
+
+    private func refreshSystemStatus() {
+        preferences.refreshLoginItemStatus()
+        finderExtensionEnabled = FIFinderSyncController.isExtensionEnabled
     }
 
     private var loginItemDescription: String {

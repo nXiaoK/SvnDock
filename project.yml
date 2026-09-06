@@ -90,6 +90,7 @@ targets:
       - target: SvnDockFinderExtension
         embed: true
       - sdk: ServiceManagement.framework
+      - sdk: FinderSync.framework
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: "$(SVNDOCK_BUNDLE_ID_PREFIX).app"
