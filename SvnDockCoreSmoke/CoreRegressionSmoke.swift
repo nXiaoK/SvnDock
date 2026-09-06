@@ -1,5 +1,6 @@
 #if SVNDOCK_SMOKE_TESTS
 import Foundation
+import Darwin
 import SvnDockCore
 
 enum CoreRegressionSmoke {
@@ -15,6 +16,7 @@ enum CoreRegressionSmoke {
         try await checkXMLDates()
         try await checkProcessIO()
         try await checkCancellationWithBlockedInput()
+        try await checkCancellationWithHelpers()
         print("Core regression checks passed: bounded diff scanning, malformed patches, reusable XML dates, process I/O and cancellation")
     }
 
@@ -141,6 +143,95 @@ enum CoreRegressionSmoke {
             throw Failure(description: "Cancellation must throw CancellationError")
         } catch is CancellationError { }
         try check(Date().timeIntervalSince(start) < 4, "Cancellation must stop children that ignore SIGTERM while stdin is blocked")
+    }
+
+    private static func checkCancellationWithHelpers() async throws {
+        // These helpers deliberately ignore SIGTERM. Cover both pipe draining
+        // and a helper that can outlive the invocation without holding a pipe.
+        for mode in ["pipes", "closed-output", "parent-exits", "all-ignore-term"] {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SvnDock-helper-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let ready = directory.appendingPathComponent("ready")
+            let marker = directory.appendingPathComponent("after-cancel")
+            let parentDone = directory.appendingPathComponent("parent-done")
+            let helper = directory.appendingPathComponent("helper.sh")
+            try Data(#"""
+                trap '' TERM
+                printf '%s' "$$" > "$1"
+                /bin/sleep "$3"
+                printf unexpected > "$2"
+                /bin/sleep 3
+                """#.utf8).write(to: helper)
+            let parentScript = #"""
+                if [ "$1" = all-ignore-term ]; then trap '' TERM; fi
+                if [ "$1" = closed-output ]; then
+                    /bin/sh "$2" "$3" "$4" "$6" >/dev/null 2>&1 &
+                else
+                    /bin/sh "$2" "$3" "$4" "$6" &
+                fi
+                if [ "$1" = parent-exits ]; then
+                    /bin/sleep 0.2
+                    printf done > "$5"
+                    exit 0
+                fi
+                wait
+                """#
+            // The stubborn leader gets a two-second TERM grace period. Put
+            // its helper's write beyond even the allowed cancellation bound.
+            let delay = mode == "all-ignore-term" ? 5.0 : 1.0
+            let task = Task {
+                try await ProcessRunner().run(ProcessInvocation(
+                    executableURL: URL(fileURLWithPath: "/bin/sh"),
+                    arguments: ["-c", parentScript, "svndock-test", mode, helper.path,
+                                ready.path, marker.path, parentDone.path, String(delay)]
+                ))
+            }
+            defer { task.cancel() }
+            // The PID comes only from this disposable fixture. Clean it up if
+            // an assertion fails on a runner that still has the original bug.
+            var helperPID: pid_t?
+            var helperGroup: pid_t?
+            defer {
+                if let helperPID, let helperGroup, helperGroup > 0,
+                   Darwin.getpgid(helperPID) == helperGroup {
+                    _ = Darwin.kill(helperPID, SIGKILL)
+                }
+            }
+            let deadline = Date().addingTimeInterval(3)
+            while Date() < deadline {
+                if let value = try? String(contentsOf: ready, encoding: .utf8),
+                   let pid = pid_t(value), pid > 0 {
+                    helperPID = pid
+                    helperGroup = Darwin.getpgid(pid)
+                    break
+                }
+                try await Task.sleep(nanoseconds: 10_000_000)
+            }
+            try check(helperPID != nil, "Helper cancellation fixture must start: \(mode)")
+            if mode == "parent-exits" {
+                while !FileManager.default.fileExists(atPath: parentDone.path), Date() < deadline {
+                    try await Task.sleep(nanoseconds: 10_000_000)
+                }
+                try check(FileManager.default.fileExists(atPath: parentDone.path), "Fixture parent must exit")
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            let start = Date()
+            task.cancel()
+            do {
+                _ = try await task.value
+                throw Failure(description: "Helper cancellation must throw CancellationError: \(mode)")
+            } catch is CancellationError { }
+            try check(Date().timeIntervalSince(start) < 3.5, "Helper must not keep cancellation draining: \(mode)")
+            // Wait past the scheduled write, including when stdout/stderr were
+            // closed and the runner could otherwise return before the helper.
+            let remaining = delay + 0.2 - Date().timeIntervalSince(start)
+            if remaining > 0 {
+                try await Task.sleep(nanoseconds: UInt64(remaining * 1_000_000_000))
+            }
+            try check(!FileManager.default.fileExists(atPath: marker.path), "Helper must not write after cancellation: \(mode)")
+        }
     }
 }
 #endif

@@ -97,7 +97,7 @@ public protocol ProcessRunning: Sendable {
 ///
 /// stdout and stderr are drained concurrently so a verbose SVN command cannot
 /// deadlock after filling a pipe. Cancelling the calling task terminates the
-/// child process and ultimately throws `CancellationError`.
+/// child process and its verified process group, then throws `CancellationError`.
 public struct ProcessRunner: ProcessRunning, Sendable {
     public init() {}
 
@@ -272,6 +272,7 @@ public struct ProcessRunner: ProcessRunning, Sendable {
         try? inputPipe?.fileHandleForWriting.close()
 
         process.waitUntilExit()
+        state.didExit(process)
         drains.wait()
         state.clear(process)
 
@@ -332,6 +333,7 @@ private final class RunningProcessState: @unchecked Sendable {
     private var cancelled = false
     private var launched = false
     private var terminationRequested = false
+    private var processGroup: pid_t?
 
     var isCancelled: Bool {
         lock.withLock { cancelled }
@@ -349,6 +351,7 @@ private final class RunningProcessState: @unchecked Sendable {
         lock.withLock {
             if self.process === process {
                 self.process = nil
+                processGroup = nil
             }
         }
     }
@@ -357,7 +360,24 @@ private final class RunningProcessState: @unchecked Sendable {
         lock.withLock {
             guard self.process === process else { return }
             launched = true
+            // Foundation normally starts a dedicated group on macOS. Verify
+            // that ownership before ever sending a group signal; a fallback
+            // must not signal the app's own group or another command's group.
+            let pid = process.processIdentifier
+            if pid > 0, Darwin.getpgid(pid) == pid, pid != Darwin.getpgrp() {
+                processGroup = pid
+            }
             if cancelled { terminateLocked() }
+        }
+    }
+
+    func didExit(_ process: Process) {
+        lock.withLock {
+            guard self.process === process, cancelled else { return }
+            // The leader has finished its cleanup. Helpers may ignore TERM,
+            // retain output pipes, or close them and continue writing files.
+            // Stop them before draining completes and clears invocation state.
+            signalLocked(SIGKILL)
         }
     }
 
@@ -369,17 +389,27 @@ private final class RunningProcessState: @unchecked Sendable {
     }
 
     private func terminateLocked() {
-        guard !terminationRequested, let process, process.isRunning else { return }
+        guard !terminationRequested, let process else { return }
         terminationRequested = true
-        process.terminate()
+        // Cancellation may arrive after the leader exits while a helper still
+        // holds a pipe open. That group still belongs to this invocation.
+        signalLocked(process.isRunning ? SIGTERM : SIGKILL)
         // SVN normally handles SIGTERM and releases its locks. A stuck helper
         // may ignore it; allow cleanup time, then ensure cancellation finishes.
         DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 2) { [weak self, weak process] in
             guard let self, let process else { return }
             self.lock.withLock {
-                guard self.process === process, process.isRunning else { return }
-                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                guard self.process === process else { return }
+                self.signalLocked(SIGKILL)
             }
+        }
+    }
+
+    private func signalLocked(_ signal: Int32) {
+        if let processGroup {
+            _ = Darwin.kill(-processGroup, signal)
+        } else if let process, process.isRunning {
+            _ = Darwin.kill(process.processIdentifier, signal)
         }
     }
 }
