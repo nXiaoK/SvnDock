@@ -128,6 +128,11 @@ struct StatusListView: View {
                     title: "选择工作副本",
                     message: "从左侧选择一个工作副本以查看本地状态。"
                 )
+            } else if let message = store.statusRecoveryMessage {
+                SvnDockEmptyState(symbol: "exclamationmark.triangle", title: "本地状态待确认",
+                                  message: message, actionTitle: "重新读取状态") {
+                    Task { await store.reloadSelectedWorkingCopy() }
+                }
             } else if store.statusFilter == .ignored, store.isLoadingIgnoredEntries {
                 VStack(spacing: 12) {
                     ProgressView()

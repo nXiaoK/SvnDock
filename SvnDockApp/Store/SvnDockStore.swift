@@ -58,6 +58,7 @@ final class SvnDockStore: ObservableObject {
         }
     }
     @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
+    @Published private(set) var statusRecoveryMessage: String?
     @Published private(set) var filteredEntryCount = 0
     @Published private(set) var isFilteringStatusEntries = false
     @Published private(set) var ignoredEntries: [SvnDockStatusEntry] = []
@@ -1268,6 +1269,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func executeConfirmedRevert(_ request: PendingRevert) async {
+        let startedAt = Date()
         let executingClaim: FinderCommandClaim?
         do {
             executingClaim = try await markFinderClaimExecuting(request.finderClaim)
@@ -1282,6 +1284,7 @@ final class SvnDockStore: ObservableObject {
         }
 
         var succeeded = false
+        var mutationError: Error?
         do {
             try Task.checkCancellation()
             try await service.revert(
@@ -1289,17 +1292,11 @@ final class SvnDockStore: ObservableObject {
                 in: request.workingCopy
             )
             succeeded = true
-        } catch is CancellationError {
-            // The selection snapshot remains valid, but a cancelled operation
-            // is intentionally not retried without another confirmation.
-            if let executingClaim {
-                await quarantineExecutedFinderClaim(executingClaim)
-            }
         } catch {
+            mutationError = error
             if let executingClaim {
                 await quarantineExecutedFinderClaim(executingClaim)
             }
-            present(error, title: operationFailureTitle(for: .reverting))
         }
 
         if succeeded, Task.isCancelled {
@@ -1309,11 +1306,47 @@ final class SvnDockStore: ObservableObject {
         } else if succeeded, let executingClaim {
             _ = await acknowledgeFinderClaim(executingClaim, outcome: .completed)
         }
-        activeOperation = nil
-        if succeeded, selectedWorkingCopyID == request.workingCopy.id {
-            await reloadSelectedWorkingCopy()
+        // Revert groups are not one transaction. Keep the operation gate until
+        // an independent read finishes, even if the mutation task was cancelled.
+        let verificationError = await refreshAfterRevert(in: request.workingCopy)
+        let cancelled = Task.isCancelled || mutationError is CancellationError
+            || (mutationError as? SvnDockRevertFailure)?.wasCancelled == true
+        let outcome: SvnDockOperationRecord.Outcome = verificationError != nil || cancelled
+            ? .uncertain : succeeded ? .success : .failure
+        let detail = [mutationError?.localizedDescription, verificationError].compactMap { $0 }.joined(separator: "\n")
+        recordOperation(.init(workingCopy: request.workingCopy, actionTitle: "还原", startedAt: startedAt,
+            outcome: outcome,
+            summary: outcome == .success ? "还原命令完成，已刷新本地状态" : "还原可能已部分生效，请检查当前状态；未自动重试",
+            detail: detail.isEmpty ? nil : detail))
+        if !succeeded || verificationError != nil || cancelled {
+            presentedError = SvnDockUserFacingError(title: "还原结果需要检查",
+                message: "还原可能已部分生效，未自动重试。\n" + (detail.isEmpty ? "操作已中断，已重新读取本地状态。" : detail))
         }
+        activeOperation = nil
         await processPendingFinderCommands()
+    }
+
+    private func refreshAfterRevert(in workingCopy: SvnDockWorkingCopy) async -> String? {
+        invalidateRemoteStatus(for: workingCopy.id)
+        invalidateHistory(for: workingCopy.id)
+        guard selectedWorkingCopyID == workingCopy.id else { return nil }
+        clearStatusEntries()
+        selectedEntryIDs = []
+        let service = self.service
+        let result = await Task.detached { () -> Result<SvnDockStatusSnapshot, Error> in
+            do { return .success(try await service.status(for: workingCopy)) }
+            catch { return .failure(error) }
+        }.value
+        guard selectedWorkingCopyID == workingCopy.id else { return nil }
+        switch result {
+        case let .success(snapshot):
+            apply(snapshot, to: workingCopy.id)
+            return nil
+        case let .failure(error):
+            let message = "无法确认还原后的状态，旧变更列表已失效。请刷新成功后再选择项目执行操作。\n\(error.localizedDescription)"
+            statusRecoveryMessage = message
+            return message
+        }
     }
 
     func showConflicts() {
@@ -2650,6 +2683,7 @@ final class SvnDockStore: ObservableObject {
         _ loadedSnapshot: SvnDockStatusSnapshot,
         to workingCopyID: UUID
     ) {
+        statusRecoveryMessage = nil
         resetDirectoryTree()
         statusSnapshot = loadedSnapshot
         selectedEntryIDs = Set(selectedEntryIDs.filter {
@@ -2667,6 +2701,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func clearStatusEntries() {
+        statusRecoveryMessage = nil
         clearDiff()
         finderSelectedTarget = nil
         invalidateIgnoredEntries()

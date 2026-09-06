@@ -8,7 +8,74 @@ enum SVNSafetyRegressionChecks {
     static func run() async throws {
         try await additionUndoPreservesContent()
         try await switchedTargetsCannotSilentlyCommit()
+        try await revertRecoveryUsesFreshState()
         print("SVN safety checks passed")
+    }
+
+    @MainActor
+    private static func revertRecoveryUsesFreshState() async throws {
+        let f = try await SafetyFixture.create()
+        defer { f.remove() }
+        try f.write("base blocked\n", to: "blocked/fail.txt")
+        _ = try await f.svn(["add", "blocked"])
+        _ = try await f.svn(["commit", "-m", "Seed blocked path", "."])
+        _ = try await f.svn(["delete", "source"])
+        try f.write("uncommitted blocked edit\n", to: "blocked/fail.txt")
+        let blocked = f.root.appendingPathComponent("blocked")
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: blocked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: blocked.path) }
+        let service = try f.service()
+        _ = try await service.registerWorkingCopy(at: f.root)
+        let store = SvnDockStore(service: service)
+        _ = await store.load()
+        store.selectedEntryIDs = Set(store.entries.filter { ["source", "blocked/fail.txt"].contains($0.relativePath) }.map(\.id))
+        store.requestRevertConfirmation()
+        store.confirmRevert()
+        try await waitForStore(store)
+        try check(store.presentedError?.message.contains("已完成：source") == true,
+                  "partial revert identifies the completed directory")
+        try check(!store.entries.contains { $0.relativePath == "source" }, "restored directory is not left scheduled for deletion in the UI")
+        try check(store.entries.contains { $0.relativePath == "blocked/fail.txt" && $0.status == .modified },
+                  "the failed file retains its actual modification state")
+        try check(try f.read("source/a.txt") == "base\n", "first revert group really completed")
+        try check(try f.read("blocked/fail.txt") == "uncommitted blocked edit\n", "failed file content remains intact")
+        try check(store.operationRecords.first?.outcome == .failure, "a partial failure is not reported as success")
+
+        for mode in [SafetyRecoveryRunner.Mode.failVerification, .cancelAfterRevert] {
+            let other = try await SafetyFixture.create()
+            defer { other.remove() }
+            try other.write("local edit\n", to: "other.txt")
+            let runner = SafetyRecoveryRunner(base: other.runner, mode: mode)
+            let otherService = try other.service(runner: runner)
+            _ = try await otherService.registerWorkingCopy(at: other.root)
+            let otherStore = SvnDockStore(service: otherService)
+            _ = await otherStore.load()
+            otherStore.selectedEntryIDs = Set(otherStore.entries.map(\.id))
+            otherStore.requestRevertConfirmation()
+            otherStore.confirmRevert()
+            try await waitForStore(otherStore)
+            try check(otherStore.entries.isEmpty && otherStore.selectedEntryIDs.isEmpty,
+                      "old changes cannot survive cancelled or unverifiable revert results")
+            try check(otherStore.operationRecords.first?.outcome == .uncertain,
+                      "cancelled or unverified results remain explicitly uncertain")
+            try check(await runner.revertCount == 1, "recovery never repeats the mutation")
+            if mode == .failVerification {
+                try check(otherStore.statusRecoveryMessage != nil, "failed status verification remains visible after error dismissal")
+                otherStore.presentedError = nil
+                await runner.allowVerification()
+                await otherStore.reloadSelectedWorkingCopy()
+                try check(otherStore.statusRecoveryMessage == nil, "successful refresh restores trusted state")
+            } else {
+                try check(otherStore.statusRecoveryMessage == nil, "cancellation does not cancel the independent verification read")
+            }
+        }
+    }
+
+    @MainActor
+    private static func waitForStore(_ store: SvnDockStore) async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while store.isBusy, ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(20)) }
+        try check(!store.isBusy, "store failed to finish mutation and status recovery")
     }
 
     private static func switchedTargetsCannotSilentlyCommit() async throws {
@@ -178,5 +245,27 @@ private struct SafetyRunner: ProcessRunning {
             standardInput: invocation.standardInput, argumentFiles: invocation.argumentFiles.map {
                 ProcessArgumentFile(argumentIndex: $0.argumentIndex + 4, contents: $0.contents)
             }))
+    }
+}
+
+private actor SafetyRecoveryRunner: ProcessRunning {
+    enum Mode { case failVerification, cancelAfterRevert }
+    let base: SafetyRunner
+    let mode: Mode
+    var revertCount = 0
+    var verificationAllowed = false
+    init(base: SafetyRunner, mode: Mode) { self.base = base; self.mode = mode }
+    func allowVerification() { verificationAllowed = true }
+    func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
+        if invocation.arguments.first == "status", revertCount > 0,
+           mode == .failVerification, !verificationAllowed {
+            throw SafetyFailure("injected status read failure after the real revert")
+        }
+        let result = try await base.run(invocation)
+        if invocation.arguments.first == "revert" {
+            revertCount += 1
+            if mode == .cancelAfterRevert { throw CancellationError() }
+        }
+        return result
     }
 }

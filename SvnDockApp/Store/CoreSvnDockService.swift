@@ -601,13 +601,22 @@ actor CoreSvnDockService: SvnDockServicing {
                 let groups = try await Self.revertTargetGroups(
                     targets, in: coreCopy, builder: builder, runner: runner
                 )
-                for (paths, depth) in groups where !paths.isEmpty {
-                    try Task.checkCancellation()
-                    try Self.validateResolvedBoundary(relativePaths: paths, in: coreCopy)
-                    let result = try await runner.run(builder.makeInvocation(
-                        for: .revert(paths: paths, depth: depth), in: coreCopy
-                    ))
-                    guard result.succeeded else { throw SVNProcessFailure(result: result) }
+                var completedPaths: [String] = []
+                do {
+                    for (paths, depth) in groups where !paths.isEmpty {
+                        try Task.checkCancellation()
+                        try Self.validateResolvedBoundary(relativePaths: paths, in: coreCopy)
+                        let result = try await runner.run(builder.makeInvocation(
+                            for: .revert(paths: paths, depth: depth), in: coreCopy
+                        ))
+                        guard result.succeeded else { throw SVNProcessFailure(result: result) }
+                        completedPaths.append(contentsOf: paths)
+                    }
+                } catch {
+                    let completed = Set(completedPaths)
+                    throw SvnDockRevertFailure(completedPaths: completedPaths,
+                        unconfirmedPaths: groups.flatMap { $0.0 }.filter { !completed.contains($0) },
+                        wasCancelled: error is CancellationError, detail: error.localizedDescription)
                 }
             }
         }
