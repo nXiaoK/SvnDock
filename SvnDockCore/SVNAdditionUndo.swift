@@ -3,6 +3,8 @@ import Foundation
 public enum SVNAdditionUndoError: Error, LocalizedError, Equatable, Sendable {
     case notScheduledAddition(String)
     case notMissing(String)
+    case copiedAddition(String)
+    case unsafeDescendant(String)
     case commandFailed(String)
 
     public var errorDescription: String? {
@@ -11,6 +13,10 @@ public enum SVNAdditionUndoError: Error, LocalizedError, Equatable, Sendable {
             "“\(path)”不是尚未提交的待添加项目。已纳管文件缺失时，请恢复文件或明确标记为 SVN 删除。未执行清理。"
         case let .notMissing(path):
             "“\(path)”已不再是本地缺失状态，请刷新后重试。未执行清理。"
+        case let .copiedAddition(path):
+            "“\(path)”属于尚未提交的 SVN 复制或移动。取消添加可能删除其中的本地内容，已停止整个操作。请先备份内容，并在支持复制或移动还原的 SVN 客户端中处理。"
+        case let .unsafeDescendant(path):
+            "“\(path)”包含冲突或属于外部工作副本，无法安全取消添加。未执行任何还原，请单独检查该项目。"
         case let .commandFailed(message):
             message
         }
@@ -68,7 +74,9 @@ public struct SVNAdditionUndo: Sendable {
 
         for batch in batches {
             try Task.checkCancellation()
-            let result = try await checkedRun(.status(SVNStatusOptions(depth: .empty, paths: batch)), in: workingCopy)
+            let result = try await checkedRun(.status(SVNStatusOptions(
+                includeIgnored: true, ignoreExternals: true, depth: .infinity, paths: batch
+            )), in: workingCopy)
             for entry in try SVNXMLParser.parseStatus(
                 result.standardOutput, workingCopyURL: workingCopy.localPath, resolveNodeKinds: false
             ) {
@@ -91,6 +99,25 @@ public struct SVNAdditionUndo: Sendable {
                     throw SVNAdditionUndoError.notMissing(target)
                 }
                 throw SVNAdditionUndoError.notScheduledAddition(target)
+            }
+        }
+        // Reverting a copy/move destination can remove the whole disk tree,
+        // including edited and unversioned files, even without --remove-added.
+        // Check the complete selection before reverting any ordinary addition.
+        let selectedRoots = Set(targets.map { absolutePath($0, in: workingCopy) })
+        for (path, status) in statuses.sorted(by: { $0.key < $1.key }) {
+            var ancestor = path
+            while !selectedRoots.contains(ancestor), ancestor != "/", !ancestor.isEmpty {
+                ancestor = (ancestor as NSString).deletingLastPathComponent
+            }
+            guard selectedRoots.contains(ancestor) else { continue }
+            if status.isCopied {
+                throw SVNAdditionUndoError.copiedAddition(status.path)
+            }
+            if status.isTreeConflicted || status.status == .conflicted
+                || status.propertyStatus == .conflicted
+                || status.status == .external || status.isFileExternal == true {
+                throw SVNAdditionUndoError.unsafeDescendant(status.path)
             }
         }
         try Task.checkCancellation()

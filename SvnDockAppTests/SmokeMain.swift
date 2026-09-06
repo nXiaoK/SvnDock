@@ -3,6 +3,8 @@ import Foundation
 @main
 struct AppRegressionSmoke {
     static func main() async throws {
+        try await SVNSafetyRegressionChecks.run()
+#if !SVNDOCK_SAFETY_SMOKE
         try await CommitDraftRegressionChecks.run()
         try await SelectedCommitRegressionChecks.run()
         try ReviewInteractionRegressionChecks.localPreviewBoundaries()
@@ -34,5 +36,6 @@ struct AppRegressionSmoke {
         try await ViewsRegressionChecks.historySelectionAndFiltering()
         try await ViewsRegressionChecks.historyDiffCacheRetainsRecentlyUsedEntries()
         print("App regression checks passed")
+#endif
     }
 }

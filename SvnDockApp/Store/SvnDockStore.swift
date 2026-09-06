@@ -1129,7 +1129,7 @@ final class SvnDockStore: ObservableObject {
         if request.missingOnly {
             return "将取消缺失项目尚未提交的添加计划，目录包含其子项。不会恢复文件、删除磁盘内容或提交仓库变更。若发现已纳管或状态已变化的项目，本次清理将停止。\n\n\(summary)"
         }
-        return "文件和目录会保留在磁盘上，但将恢复为未纳管状态，不会包含在下次提交中。\n\n\(summary)"
+        return "普通新增文件和目录会保留在磁盘上，并恢复为未纳管状态。若范围内包含 SVN 复制、移动或冲突，整个操作将停止，以保护本地内容。\n\n\(summary)"
     }
 
     func cancelUnscheduleAddConfirmation() {
