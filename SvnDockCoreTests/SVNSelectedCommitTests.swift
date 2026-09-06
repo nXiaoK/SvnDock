@@ -39,6 +39,8 @@ enum SelectedCommitRegressionChecks {
         let fixtures: [(String, [String], SVNSelectedCommitError)] = [
             (entry("external.txt", "modified", extra: "file-external=\"true\""), ["external.txt"], .externalWorkingCopy("external.txt")),
             (entry("vendor", "external") + entry("vendor/edit.txt", "modified"), ["vendor/edit.txt"], .externalWorkingCopy("vendor/edit.txt")),
+            (entry("vendor", "external") + entry("vendor", "normal", properties: "modified") + entry("vendor/edit.txt", "modified"),
+             ["vendor/edit.txt"], .externalWorkingCopy("vendor/edit.txt")),
             (entry("new", "added") + entry("new/edit.txt", "added"), ["new/edit.txt"], .missingParent("new")),
             (entry("good.txt", "modified") + entry("bad.txt", "conflicted"), ["good.txt", "bad.txt"], .changedSelection("bad.txt")),
             (entry("properties", "normal", properties: "conflicted"), ["properties"], .changedSelection("properties"))
@@ -62,7 +64,7 @@ enum SelectedCommitRegressionChecks {
         let commit = try SVNSelectedCommit(executableURL: URL(fileURLWithPath: "/usr/bin/svn"), runner: runner)
         try await commit.run(targets: ["folder"], message: "fixture", in: copy)
         let invocations = await runner.invocations
-        try check(invocations.map { $0.arguments[0] } == ["status", "commit"], "safe directory properties can be committed")
+        try check(invocations.map { $0.arguments[0] } == ["status", "info", "info", "commit"], "safe directory properties are committed only after ownership checks")
         let args = invocations.last?.arguments ?? []
         guard let depthIndex = args.firstIndex(of: "--depth"), let separator = args.firstIndex(of: "--") else {
             throw Failure(message: "commit must explicitly bound traversal and separate paths")
@@ -90,7 +92,17 @@ private actor SelectedCommitFixtureRunner: ProcessRunning {
 
     func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
         invocations.append(invocation)
-        let output = invocation.arguments[0] == "status" ? "<status><target path=\".\">\(entriesXML)</target></status>" : ""
+        let output: String
+        if invocation.arguments[0] == "status" {
+            output = "<status><target path=\".\">\(entriesXML)</target></status>"
+        } else if invocation.arguments[0] == "info" {
+            let root = invocation.currentDirectoryURL!.path
+            let paths = invocation.argumentFiles.isEmpty ? ["."] : ["folder"]
+            output = "<info>" + paths.map { path in
+                let url = path == "." ? "https://svn.example.test/repo" : "https://svn.example.test/repo/\(path)"
+                return "<entry path=\"\(path)\" kind=\"dir\"><url>\(url)</url><repository><uuid>fixture</uuid></repository><wc-info><wcroot-abspath>\(root)</wcroot-abspath></wc-info></entry>"
+            }.joined() + "</info>"
+        } else { output = "" }
         return ProcessResult(terminationStatus: 0, terminationReason: .exit, standardOutput: Data(output.utf8), standardError: Data())
     }
 }

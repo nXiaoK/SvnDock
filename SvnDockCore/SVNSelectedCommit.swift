@@ -61,10 +61,18 @@ public struct SVNSelectedCommit: Sendable {
             indexed[path] = entry
         }
         let switchedPaths = Set(zip(paths, entries).compactMap { $0.1.isSwitched ? $0.0 : nil })
+        // `svn status` can emit both an external boundary and that WC's own
+        // modified root properties at the same path. Never overwrite identity.
+        let externalPaths = Set(zip(paths, entries).compactMap {
+            $0.1.status == .external || $0.1.isFileExternal == true ? $0.0 : nil
+        })
         let included = Set(targets)
         for target in targets {
             var switchedAncestor = target
             while true {
+                if externalPaths.contains(switchedAncestor) {
+                    throw SVNSelectedCommitError.externalWorkingCopy(target)
+                }
                 if switchedPaths.contains(switchedAncestor) {
                     throw SVNSelectedCommitError.switchedTarget(target)
                 }
@@ -95,15 +103,34 @@ public struct SVNSelectedCommit: Sendable {
         }
         // Bind an explicitly reviewed repository identity to the final write,
         // rather than trusting a registration ID or a refreshed service cache.
+        let infoResult = try await checkedRun(.info, in: workingCopy)
+        let info = try SVNXMLParser.parseInfo(infoResult.standardOutput)
+        let physicalRoot = workingCopy.localPath.resolvingSymlinksInPath().standardizedFileURL.path
+        guard let rootURL = info.url, let repositoryUUID = info.repositoryUUID,
+              info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL.path == physicalRoot else {
+            throw SVNSelectedCommitError.repositoryIdentityChanged
+        }
         if workingCopy.repositoryURL != nil || workingCopy.repositoryUUID != nil {
-            let infoResult = try await checkedRun(.info, in: workingCopy)
-            let info = try SVNXMLParser.parseInfo(infoResult.standardOutput)
             guard let expectedURL = workingCopy.repositoryURL,
                   let expectedUUID = workingCopy.repositoryUUID,
-                  info.url == expectedURL, info.repositoryUUID == expectedUUID,
-                  info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL.path
-                    == workingCopy.localPath.resolvingSymlinksInPath().standardizedFileURL.path else {
+                  rootURL == expectedURL, repositoryUUID == expectedUUID else {
                 throw SVNSelectedCommitError.repositoryIdentityChanged
+            }
+        }
+        let targetInfoResult = try await checkedRun(.infoTargets(paths: targets), in: workingCopy)
+        let targetInfos = try SVNXMLParser.parseInfos(targetInfoResult.standardOutput)
+        let infoPaths = targetInfos.isEmpty ? [] : try builder.normalizedLocalPaths(
+            targetInfos.map(\.path), in: workingCopy, command: "commit")
+        let infoByPath = Dictionary(zip(infoPaths, targetInfos), uniquingKeysWith: { _, latest in latest })
+        for target in targets {
+            guard let targetInfo = infoByPath[target],
+                  targetInfo.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL.path == physicalRoot,
+                  targetInfo.repositoryUUID == repositoryUUID else {
+                throw SVNSelectedCommitError.externalWorkingCopy(target)
+            }
+            let expectedURL = target == "." ? rootURL : rootURL.appendingPathComponent(target)
+            guard targetInfo.url == expectedURL else {
+                throw SVNSelectedCommitError.switchedTarget(target)
             }
         }
         try Task.checkCancellation()

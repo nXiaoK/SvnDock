@@ -9,7 +9,51 @@ enum SVNSafetyRegressionChecks {
         try await additionUndoPreservesContent()
         try await switchedTargetsCannotSilentlyCommit()
         try await revertRecoveryUsesFreshState()
+        try await externalBoundariesSurviveDuplicateStatus()
         print("SVN safety checks passed")
+    }
+
+    private static func externalBoundariesSurviveDuplicateStatus() async throws {
+        let f = try await SafetyFixture.create()
+        let foreign = try await SafetyFixture.create()
+        defer { f.remove(); foreign.remove() }
+        _ = try await f.svn(["copy", f.remote("trunk/source"), f.remote("external"), "-m", "Create external tree"])
+        _ = try await f.svn(["update", "."])
+        _ = try await f.svn(["propset", "svn:externals", "^/external vendor\n\(foreign.remote("trunk/source")) foreign", "."])
+        _ = try await f.svn(["commit", "-m", "Define externals", "."])
+        _ = try await f.svn(["update", "."])
+        for directory in ["vendor", "foreign"] {
+            try f.write("external edited content\n", to: "\(directory)/a.txt")
+            _ = try await f.svn(["propset", "custom:local", "external root property", directory])
+        }
+        try f.write("selected main edit\n", to: "other.txt")
+        let status = try await f.status()
+        try check(status.filter { $0.path == "vendor" }.count == 2,
+                  "fixture contains both an external marker and the external root property change")
+        let service = try f.service()
+        let copy = try await service.registerWorkingCopy(at: f.root)
+        let before = try await f.revision()
+        let foreignBefore = try await foreign.revision()
+        for targets in [["vendor/a.txt", "other.txt"], ["vendor"], ["foreign/a.txt"]] {
+            do {
+                try await service.commit(workingCopy: copy, relativePaths: targets, message: "Must reject external WC")
+                throw SafetyFailure("external working copy unexpectedly committed")
+            } catch SVNSelectedCommitError.externalWorkingCopy { }
+        }
+        let after = try await f.revision()
+        let foreignAfter = try await foreign.revision()
+        try check(after == before && foreignAfter == foreignBefore,
+                  "rejected external targets create no revision in either repository")
+        try check(try f.read("vendor/a.txt") == "external edited content\n", "external content remains local")
+        try check(try f.read("foreign/a.txt") == "external edited content\n", "foreign repository content remains local")
+        let staleStatusService = try f.service(runner: SafetyStatusWithoutBoundaries(base: f.runner))
+        do {
+            try await staleStatusService.commit(workingCopy: copy, relativePaths: ["vendor/a.txt"], message: "Must verify actual WC ownership")
+            throw SafetyFailure("missing status boundary bypassed actual working-copy ownership")
+        } catch SVNSelectedCommitError.externalWorkingCopy { }
+        try check(try await f.revision() == before, "info ownership validation protects even when status omits the boundary")
+        try await service.commit(workingCopy: copy, relativePaths: ["other.txt"], message: "Commit only main WC")
+        try check(try await foreign.revision() == foreignBefore, "a safe main commit leaves the foreign repository untouched")
     }
 
     @MainActor
@@ -267,5 +311,17 @@ private actor SafetyRecoveryRunner: ProcessRunning {
             if mode == .cancelAfterRevert { throw CancellationError() }
         }
         return result
+    }
+}
+
+private struct SafetyStatusWithoutBoundaries: ProcessRunning {
+    let base: SafetyRunner
+    func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
+        if invocation.arguments.first == "status" {
+            return ProcessResult(terminationStatus: 0, terminationReason: .exit,
+                standardOutput: Data("<status><target path=\".\"><entry path=\"vendor/a.txt\"><wc-status item=\"modified\" props=\"none\"/></entry></target></status>".utf8),
+                standardError: Data())
+        }
+        return try await base.run(invocation)
     }
 }
