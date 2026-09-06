@@ -19,6 +19,7 @@ struct CommitSheet: View {
     @State private var draftNotice: String
     @State private var draftError: String?
     @State private var isConfirmingDraftClear = false
+    @State private var showsScopeDetails = false
 
     init(store: SvnDockStore) {
         self.store = store
@@ -53,43 +54,54 @@ struct CommitSheet: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            Group {
-                if isPreviewExpanded {
-                    expandedHeader
-                } else {
-                    VStack(spacing: 0) {
-                        header
-                        summary.padding(.horizontal, 24)
-                        messageEditor.padding(24)
+        GeometryReader { geometry in
+            let compact = geometry.size.height < 860
+            VStack(spacing: 0) {
+                Group {
+                    if isPreviewExpanded {
+                        expandedHeader
+                    } else {
+                        VStack(spacing: 0) {
+                            header(compact: compact)
+                            if compact {
+                                compactSummary
+                                    .padding(.horizontal, 16)
+                            } else {
+                                summary.padding(.horizontal, 24)
+                            }
+                            messageEditor(compact: compact)
+                                .padding(.horizontal, compact ? 16 : 24)
+                                .padding(.vertical, compact ? 10 : 24)
+                        }
                     }
                 }
-            }
-            Divider().overlay(SvnDockTheme.border)
-            // Keep the diff in the same branch when changing layout so its
-            // display mode, font size and scroll position remain intact.
-            HStack(spacing: 0) {
-                if !isPreviewExpanded {
-                    fileSelection
-                        .frame(minWidth: 350, maxWidth: showsDiffPreview ? 410 : .infinity)
+                Divider().overlay(SvnDockTheme.border)
+                // Keep the diff in the same branch when changing layout so its
+                // display mode, font size and scroll position remain intact.
+                HStack(spacing: 0) {
+                    if !isPreviewExpanded {
+                        fileSelection(compact: compact)
+                            .frame(minWidth: 350, maxWidth: showsDiffPreview ? 410 : .infinity)
+                    }
+                    if showsDiffPreview {
+                        if !isPreviewExpanded { Divider().overlay(SvnDockTheme.border) }
+                        diffPreview(compact: compact)
+                    }
                 }
-                if showsDiffPreview {
-                    if !isPreviewExpanded { Divider().overlay(SvnDockTheme.border) }
-                    diffPreview
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+                Divider().overlay(SvnDockTheme.border)
+                Group {
+                    if isPreviewExpanded { expandedFooter }
+                    else { footer(compact: compact) }
                 }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            Divider().overlay(SvnDockTheme.border)
-            Group {
-                if isPreviewExpanded { expandedFooter }
-                else { footer }
             }
         }
         .foregroundStyle(SvnDockTheme.text)
         .background(SvnDockTheme.surface)
         .tint(SvnDockTheme.accent)
         .frame(minWidth: 940, idealWidth: 940, maxWidth: 1100,
-               minHeight: 720, idealHeight: 800, maxHeight: 900)
+               minHeight: 640, idealHeight: 800, maxHeight: 900)
         .interactiveDismissDisabled(store.isBusy)
         .task(id: previewRequest) {
             await loadPreview(for: previewRequest)
@@ -120,12 +132,12 @@ struct CommitSheet: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 16) {
+    private func header(compact: Bool) -> some View {
+        HStack(spacing: compact ? 12 : 16) {
             Image(systemName: "arrow.up")
-                .font(.system(size: 23, weight: .semibold))
+                .font(.system(size: compact ? 18 : 23, weight: .semibold))
                 .foregroundStyle(SvnDockTheme.onAccent)
-                .frame(width: 46, height: 46)
+                .frame(width: compact ? 34 : 46, height: compact ? 34 : 46)
                 .background {
                     Circle().fill(
                         LinearGradient(colors: [SvnDockTheme.accent.opacity(0.85), SvnDockTheme.accent],
@@ -135,7 +147,7 @@ struct CommitSheet: View {
                 .shadow(color: SvnDockTheme.accent.opacity(0.22), radius: 5, y: 3)
             VStack(alignment: .leading, spacing: 5) {
                 Text("提交到 SVN")
-                    .font(.system(size: 21, weight: .semibold))
+                    .font(.system(size: compact ? 18 : 21, weight: .semibold))
                 HStack(spacing: 10) {
                     Text(store.selectedWorkingCopy?.name ?? "未选择工作副本")
                         .fontWeight(.medium)
@@ -165,7 +177,25 @@ struct CommitSheet: View {
             .help("关闭并保留草稿")
             .accessibilityLabel("关闭并保留草稿")
         }
-        .padding(24)
+        .padding(.horizontal, compact ? 16 : 24)
+        .padding(.vertical, compact ? 12 : 24)
+    }
+
+    private var compactSummary: some View {
+        HStack(spacing: 12) {
+            Label("已选择 \(selectionSummary.count) / \(store.committableEntries.count) 项", systemImage: "doc.text")
+                .foregroundStyle(SvnDockTheme.accent)
+            Text(selectedStatusSummary)
+                .foregroundStyle(SvnDockTheme.secondaryText)
+            Spacer(minLength: 4)
+            Text(store.selectedWorkingCopy?.revision.map { "根目录基线 r\($0)" } ?? "版本信息未获取")
+                .foregroundStyle(SvnDockTheme.secondaryText)
+        }
+        .font(.system(size: 11))
+        .lineLimit(1)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(SvnDockTheme.subtleSurface, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private var summary: some View {
@@ -205,10 +235,15 @@ struct CommitSheet: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var messageEditor: some View {
-        VStack(alignment: .leading, spacing: 12) {
+    private func messageEditor(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 7 : 12) {
             HStack {
                 Text("提交说明").font(.system(size: 14, weight: .semibold))
+                if compact {
+                    Text("\(message.count) 字")
+                        .font(.system(size: 11).monospacedDigit())
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                }
                 Spacer()
                 Text(draftError ?? draftNotice)
                     .font(.system(size: 11))
@@ -221,34 +256,36 @@ struct CommitSheet: View {
             ZStack(alignment: .topLeading) {
                 if message.isEmpty {
                     Text("描述本次修改的目的和影响…")
-                        .font(.system(size: 14))
+                        .font(.system(size: compact ? 13 : 14))
                         .foregroundStyle(SvnDockTheme.secondaryText.opacity(0.75))
-                        .padding(.horizontal, 15)
-                        .padding(.top, 16)
+                        .padding(.horizontal, compact ? 13 : 15)
+                        .padding(.top, compact ? 12 : 16)
                         .allowsHitTesting(false)
                 }
                 TextEditor(text: $message)
-                    .font(.system(size: 14))
+                    .font(.system(size: compact ? 13 : 14))
                     .scrollContentBackground(.hidden)
-                    .padding(10)
-                    .padding(.bottom, 22)
+                    .padding(compact ? 8 : 10)
+                    .padding(.bottom, compact ? 0 : 22)
                     .disabled(store.isBusy)
                     .accessibilityLabel("提交说明")
             }
-            .frame(height: 104)
+            .frame(height: compact ? 76 : 104)
             .overlay(alignment: .bottomTrailing) {
-                Text("\(message.count) 字")
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundStyle(SvnDockTheme.secondaryText)
-                    .padding(12)
-                    .allowsHitTesting(false)
+                if !compact {
+                    Text("\(message.count) 字")
+                        .font(.system(size: 12).monospacedDigit())
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                        .padding(12)
+                        .allowsHitTesting(false)
+                }
             }
             .svnDockSurface(cornerRadius: 9)
         }
     }
 
-    private var fileSelection: some View {
-        VStack(alignment: .leading, spacing: 16) {
+    private func fileSelection(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 16) {
             HStack {
                 Text("待提交项目  （\(store.committableEntries.count)）")
                     .font(.system(size: 14, weight: .semibold))
@@ -283,14 +320,14 @@ struct CommitSheet: View {
                     .accessibilityLabel("清除路径筛选")
                 }
             }
-            .padding(9)
+            .padding(compact ? 7 : 9)
             .svnDockSurface(cornerRadius: 8)
             Toggle("仅看已包含项目（\(selectionSummary.count)）", isOn: $showsIncludedOnly)
                 .toggleStyle(.checkbox)
                 .font(.system(size: 12))
             ScrollView {
-                LazyVStack(spacing: 8) {
-                    ForEach(filteredEntries) { entry in fileRow(entry) }
+                LazyVStack(spacing: compact ? 6 : 8) {
+                    ForEach(filteredEntries) { entry in fileRow(entry, compact: compact) }
                     if filteredEntries.isEmpty {
                         Text("没有符合筛选条件的项目")
                             .font(.system(size: 12))
@@ -301,36 +338,71 @@ struct CommitSheet: View {
                 .padding(1)
             }
             .frame(maxHeight: .infinity)
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle(isOn: $showsDiffPreview) {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("显示差异预览").font(.system(size: 13, weight: .medium))
-                        Text("在右侧查看所选文件的代码差异")
-                            .font(.system(size: 11))
-                            .foregroundStyle(SvnDockTheme.secondaryText)
+            .layoutPriority(1)
+            if compact {
+                HStack(spacing: 8) {
+                    Toggle("显示差异预览", isOn: $showsDiffPreview)
+                        .toggleStyle(.checkbox)
+                        .font(.system(size: 12))
+                    Spacer(minLength: 0)
+                    if hasSafetyNotices {
+                        Button {
+                            showsScopeDetails = true
+                        } label: {
+                            Label(compactNoticeTitle, systemImage: "info.circle")
+                                .font(.system(size: 11))
+                                .padding(.horizontal, 6)
+                                .frame(minHeight: 28)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(SvnDockPlainButtonStyle())
+                        .foregroundStyle(SvnDockTheme.accent)
+                        .help("查看目录操作范围及未包含项目的提示")
+                        .popover(isPresented: $showsScopeDetails) {
+                            ScrollView {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Text("提交范围与提示").font(.headline)
+                                    safetyNotices
+                                }
+                                .padding(16)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(width: 390, height: 280)
+                        }
                     }
                 }
-                .toggleStyle(.checkbox)
-                safetyNotices
+            } else {
+                VStack(alignment: .leading, spacing: 12) {
+                    Toggle(isOn: $showsDiffPreview) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("显示差异预览").font(.system(size: 13, weight: .medium))
+                            Text("在右侧查看所选文件的代码差异")
+                                .font(.system(size: 11))
+                                .foregroundStyle(SvnDockTheme.secondaryText)
+                        }
+                    }
+                    .toggleStyle(.checkbox)
+                    safetyNotices
+                }
             }
         }
-        .padding(20)
+        .padding(compact ? 12 : 20)
     }
 
-    private func fileRow(_ entry: SvnDockStatusEntry) -> some View {
+    private func fileRow(_ entry: SvnDockStatusEntry, compact: Bool) -> some View {
         let isPreviewed = previewEntryID == entry.id
         return HStack(spacing: 0) {
             Toggle("包含 \(entry.fileName)", isOn: inclusionBinding(for: entry))
                 .labelsHidden()
                 .toggleStyle(.checkbox)
-                .frame(width: 36, height: 62)
+                .frame(width: 36, height: compact ? 50 : 62)
                 .contentShape(Rectangle())
                 .disabled(store.isBusy)
             Button {
                 previewEntryID = entry.id
             } label: {
                 HStack(spacing: 11) {
-                    SvnDockFileIcon(entry: entry, size: 40)
+                    SvnDockFileIcon(entry: entry, size: compact ? 32 : 40)
                     VStack(alignment: .leading, spacing: 5) {
                         Text(entry.fileName)
                             .font(.system(size: 13, weight: .medium))
@@ -345,7 +417,7 @@ struct CommitSheet: View {
                     Spacer(minLength: 3)
                     SvnDockStatusPill(status: entry.status)
                 }
-                .padding(.vertical, 11)
+                .padding(.vertical, compact ? 7 : 11)
                 .padding(.trailing, 11)
                 .padding(.leading, 2)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -364,16 +436,32 @@ struct CommitSheet: View {
         }
     }
 
-    private var diffPreview: some View {
-        VStack(alignment: .leading, spacing: 14) {
+    private func diffPreview(compact: Bool) -> some View {
+        VStack(alignment: .leading, spacing: compact ? 8 : 14) {
             if !isPreviewExpanded {
                 HStack {
-                    Text("文件差异预览").font(.system(size: 14, weight: .semibold))
+                    if compact, let entry = previewEntry {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.fileName)
+                                .font(.system(size: 13, weight: .semibold))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            Text(parentDirectory(for: entry))
+                                .font(.system(size: 11))
+                                .foregroundStyle(SvnDockTheme.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                        .help(entry.relativePath)
+                        SvnDockStatusPill(status: entry.status)
+                    } else {
+                        Text("文件差异预览").font(.system(size: 14, weight: .semibold))
+                    }
                     Spacer()
                     Button {
                         isPreviewExpanded = true
                     } label: {
-                        Label("放大查看", systemImage: "arrow.up.left.and.arrow.down.right")
+                        Label(compact ? "放大" : "放大查看", systemImage: "arrow.up.left.and.arrow.down.right")
                             .padding(.horizontal, 8)
                             .frame(minHeight: 32)
                             .contentShape(Rectangle())
@@ -386,7 +474,7 @@ struct CommitSheet: View {
                     .accessibilityIdentifier("commit.expandPreview")
                 }
             }
-            if let entry = previewEntry {
+            if let entry = previewEntry, !compact || isPreviewExpanded {
                 HStack(spacing: 10) {
                     Image(systemName: "doc.text")
                         .font(.system(size: 18))
@@ -431,7 +519,7 @@ struct CommitSheet: View {
                     .allowsHitTesting(false)
             }
         }
-        .padding(20)
+        .padding(compact ? 12 : 20)
         .frame(minWidth: 390, maxWidth: .infinity, maxHeight: .infinity)
     }
 
@@ -558,7 +646,7 @@ struct CommitSheet: View {
         }
     }
 
-    private var footer: some View {
+    private func footer(compact: Bool) -> some View {
         HStack(spacing: 10) {
             Label("将提交 \(selectionSummary.count) 个项目到 SVN", systemImage: "info.circle")
                 .font(.system(size: 12))
@@ -590,7 +678,7 @@ struct CommitSheet: View {
             )
         }
         .padding(.horizontal, 24)
-        .padding(.vertical, 16)
+        .padding(.vertical, compact ? 10 : 16)
         .background(SvnDockTheme.subtleSurface.opacity(0.55))
     }
 
@@ -603,6 +691,18 @@ struct CommitSheet: View {
             includedEntryIDs.contains($0.id) && $0.nodeKind == .directory
                 && [.added, .deleted, .replaced].contains($0.status)
         }
+    }
+
+    private var hasSafetyNotices: Bool {
+        !includedDirectoryOperations.isEmpty
+            || store.entries.contains { $0.status == .missing || $0.status == .conflicted }
+    }
+
+    private var compactNoticeTitle: String {
+        if !includedDirectoryOperations.isEmpty { return "目录范围与提示（\(includedDirectoryOperations.count)）" }
+        let missing = store.entries.contains { $0.status == .missing }
+        let conflicted = store.entries.contains { $0.status == .conflicted }
+        return missing && conflicted ? "冲突 / 缺失未包含" : conflicted ? "冲突项目未包含" : "缺失项目未包含"
     }
 
     private var filteredEntries: [SvnDockStatusEntry] {
