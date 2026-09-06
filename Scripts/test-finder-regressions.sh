@@ -35,12 +35,14 @@ func XCTAssertNil<T>(_ value: T?, file: StaticString = #file, line: UInt = #line
 struct FinderRegressionMain {
     static func main() throws {
         let tests = SharedStateStoreTests()
+        try tests.testBadgeFreshnessUsesEachRootAndKeepsExactStatesSeparate()
+        tests.testBadgeTrackerRepaintsRequestedPathsAndDropsClosedDirectories()
         try tests.testUnchangedCallbacksReuseDecodedSnapshots()
         try tests.testBadgeReplacementReloadsOnlyBadgesEvenWithSameSizeAndDate()
         try tests.testRemovedAndMalformedRegistryImmediatelyClearCachedRoots()
         try tests.testReplacementDuringReadIsDetectedOnNextReload()
         try tests.testConcurrentReloadCannotRestoreStaleRoots()
-        print("Passed 5 Finder shared-state regression tests")
+        print("Passed 7 Finder shared-state regression tests")
     }
 }
 SWIFT

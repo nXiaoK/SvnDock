@@ -298,6 +298,9 @@ public struct SVNInfo: Codable, Hashable, Sendable {
 public struct SVNStatusOptions: Codable, Hashable, Sendable {
     public var showRemoteUpdates: Bool
     public var includeIgnored: Bool
+    /// Explicitly include normal versioned nodes for bounded Finder listings.
+    public var includeUnchanged: Bool
+    public var ignoreExternals: Bool
     /// Limits how deeply Subversion inspects directory targets. `nil` keeps
     /// the client's default recursive behavior.
     public var depth: SVNDepth?
@@ -308,11 +311,15 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
     public init(
         showRemoteUpdates: Bool = false,
         includeIgnored: Bool = false,
+        includeUnchanged: Bool = false,
+        ignoreExternals: Bool = false,
         depth: SVNDepth? = nil,
         paths: [String] = []
     ) {
         self.showRemoteUpdates = showRemoteUpdates
         self.includeIgnored = includeIgnored
+        self.includeUnchanged = includeUnchanged
+        self.ignoreExternals = ignoreExternals
         self.depth = depth
         self.paths = paths
     }
@@ -320,6 +327,8 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case showRemoteUpdates
         case includeIgnored
+        case includeUnchanged
+        case ignoreExternals
         case depth
         case paths
     }
@@ -328,6 +337,8 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         showRemoteUpdates = try container.decode(Bool.self, forKey: .showRemoteUpdates)
         includeIgnored = try container.decode(Bool.self, forKey: .includeIgnored)
+        includeUnchanged = try container.decodeIfPresent(Bool.self, forKey: .includeUnchanged) ?? false
+        ignoreExternals = try container.decodeIfPresent(Bool.self, forKey: .ignoreExternals) ?? false
         depth = try container.decodeIfPresent(SVNDepth.self, forKey: .depth)
         paths = try container.decodeIfPresent([String].self, forKey: .paths) ?? []
     }
@@ -336,6 +347,8 @@ public struct SVNStatusOptions: Codable, Hashable, Sendable {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(showRemoteUpdates, forKey: .showRemoteUpdates)
         try container.encode(includeIgnored, forKey: .includeIgnored)
+        if includeUnchanged { try container.encode(true, forKey: .includeUnchanged) }
+        if ignoreExternals { try container.encode(true, forKey: .ignoreExternals) }
         try container.encodeIfPresent(depth, forKey: .depth)
         if !paths.isEmpty {
             try container.encode(paths, forKey: .paths)

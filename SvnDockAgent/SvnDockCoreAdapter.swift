@@ -49,7 +49,8 @@ public struct SvnDockCoreCommandExecutor: FinderCommandExecuting, Sendable {
         let statusInvocation = try builder.makeInvocation(
             for: .status(SVNStatusOptions(
                 showRemoteUpdates: false,
-                includeIgnored: false,
+                includeIgnored: true,
+                ignoreExternals: true,
                 paths: []
             )),
             in: workingCopy
@@ -77,16 +78,18 @@ public struct SvnDockCoreCommandExecutor: FinderCommandExecuting, Sendable {
                 }
                 let entries = try SVNXMLParser.parseStatus(
                     status.standardOutput,
-                    workingCopyURL: workingCopy.localPath
+                    workingCopyURL: workingCopy.localPath,
+                    resolveNodeKinds: false
                 )
-                let replacement = Self.badgeEntries(
-                    from: entries,
-                    in: workingCopy
-                )
+                let roots = try await sharedStore.loadRegisteredRoots().roots
+                let rootPath = workingCopy.canonicalPath
+                let excluded = roots.filter { $0.enabled && $0.id != workingCopy.id && $0.path.hasPrefix(rootPath + "/") }.map(\.path)
+                let replacement = FinderBadgeBuilder.build(from: entries, in: workingCopy, excludingRoots: excluded)
                 try await sharedStore.replaceBadgeEntries(
                     forWorkingCopyID: workingCopy.id,
                     underWorkingCopyRoot: workingCopy.canonicalPath,
-                    with: replacement
+                    with: replacement.entries,
+                    directEntries: replacement.directEntries
                 )
                 try? dirtyMarkers.clear(for: workingCopy.id)
                 Self.postSharedStateChanged()
@@ -132,44 +135,6 @@ public struct SvnDockCoreCommandExecutor: FinderCommandExecuting, Sendable {
         case .openApp, .refresh, .commit, .diff, .revert, .log, .resolve,
              .copyRepositoryURL, .ignoreName, .ignoreExtension:
             throw AgentExecutionError.requiresMainApplication(command.kind)
-        }
-    }
-
-    private static func badgeEntries(
-        from entries: [StatusEntry],
-        in workingCopy: WorkingCopy
-    ) -> [String: BadgeKind] {
-        var replacement: [String: BadgeKind] = [:]
-        var rootBadge: BadgeKind?
-
-        for entry in entries where entry.hasLocalChanges {
-            let path = entry.fileURL(relativeTo: workingCopy).standardizedFileURL.path
-            let badge = BadgeKind(statusEntry: entry)
-            replacement[path] = badge
-            rootBadge = higherPriority(rootBadge, badge)
-        }
-        if let rootBadge {
-            replacement[workingCopy.canonicalPath] = rootBadge
-        }
-        return replacement
-    }
-
-    private static func higherPriority(_ lhs: BadgeKind?, _ rhs: BadgeKind) -> BadgeKind {
-        guard let lhs else { return rhs }
-        return badgePriority(rhs) < badgePriority(lhs) ? rhs : lhs
-    }
-
-    private static func badgePriority(_ badge: BadgeKind) -> Int {
-        switch badge {
-        case .conflicted: 0
-        case .missing: 1
-        case .deleted: 2
-        case .replaced: 3
-        case .modified: 4
-        case .added: 5
-        case .unversioned: 6
-        case .ignored: 7
-        case .clean: 8
         }
     }
 

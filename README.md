@@ -172,6 +172,21 @@ details.
 4. Enable **SvnDock Finder**, open SvnDock and register an existing SVN working
    copy.
 
+SvnDock Settings also has **打开 Finder 扩展设置…** for the system's current
+extension management interface. Keep the App running while browsing registered
+working copies: green checks mean unchanged, yellow pencils mean modified, red
+warnings mean conflicted, and blue plus signs mean added. Gray symbols identify
+unversioned, ignored, unknown, or stale states. macOS controls icon placement.
+
+Right-click files in Finder and open **SvnDock** to commit the current selection,
+view that file's history, or compare local differences. Finder selection takes
+priority over a saved draft's checked files; the commit message is preserved.
+History details prefer the requested file within a multi-file revision. Normal
+files can show an empty diff, and folder differences show directory properties.
+Automatic refresh reads the directories Finder is using without adding all
+unchanged files to SvnDock's workspace list. Quitting SvnDock stops background
+updates; cached badges become gray after a minute.
+
 Keep only one discoverable copy of the app. If Finder retains an older extension
 instance, toggle the extension off and on before restarting Finder.
 

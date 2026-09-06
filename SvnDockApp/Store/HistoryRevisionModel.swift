@@ -54,6 +54,14 @@ final class HistoryRevisionModel: ObservableObject {
     }
     var displayedChanges: ArraySlice<SVNChangedPath> { filteredChanges.prefix(visibleLimit) }
     var selectionIndex: Int? { filteredChanges.firstIndex { $0.path == selectedPath } }
+    var preferredPathNotice: String? {
+        guard selectedPath == nil, !isLoading, errorMessage == nil,
+              let preferred = request?.preferredPath, let details else { return nil }
+        if Self.preferredChange(in: details.changes, path: preferred) != nil {
+            return "路径筛选隐藏了“\(preferred)”。请清除筛选或从变更列表中选择文件。"
+        }
+        return "此版本未列出“\(preferred)”，或存在多个可能的复制目标。文件可能使用了其他路径，请从本次提交的变更列表中选择。"
+    }
 
     func load(_ request: SvnDockRevisionRequest) async {
         let previousPath = self.request == request ? selectedPath : nil
@@ -150,6 +158,7 @@ final class HistoryRevisionModel: ObservableObject {
         filterGeneration = generation
         let query = pathQuery
         let changes = details?.changes ?? []
+        let preferred = preferredPath ?? request?.preferredPath
         isFiltering = true
         filterTask = Task { [weak self] in
             if debounce {
@@ -172,13 +181,25 @@ final class HistoryRevisionModel: ObservableObject {
             self.visibleLimit = 300
             self.isFiltering = false
             if !matches.contains(where: { $0.path == self.selectedPath }) {
-                let preferred = matches.first { $0.path == preferredPath }
-                    ?? matches.first { $0.kind != .directory } ?? matches.first
-                self.select(preferred?.path)
+                let selection: SVNChangedPath?
+                if let preferred {
+                    selection = Self.preferredChange(in: matches, path: preferred)
+                } else {
+                    selection = matches.first { $0.kind != .directory } ?? matches.first
+                }
+                self.select(selection?.path)
             } else if let index = self.selectionIndex {
                 self.visibleLimit = max(300, index + 1)
             }
         }
+    }
+
+    private static func preferredChange(in changes: [SVNChangedPath], path: String) -> SVNChangedPath? {
+        if let exact = changes.first(where: { $0.path == path }) { return exact }
+        // A unique recorded copy source can identify the moved path. Multiple
+        // copies are ambiguous, so leave the selection for the user to choose.
+        let copies = changes.filter { $0.copyFromPath == path }
+        return copies.count == 1 ? copies[0] : nil
     }
 
     private nonisolated static func matching(_ changes: [SVNChangedPath], query: String) throws -> [SVNChangedPath] {

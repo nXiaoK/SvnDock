@@ -3,6 +3,68 @@ import XCTest
 @testable import SvnDockFinderExtension
 
 final class SharedStateStoreTests: XCTestCase {
+    func testBadgeFreshnessUsesEachRootAndKeepsExactStatesSeparate() throws {
+        let fixture = try Fixture()
+        defer { fixture.remove() }
+        let second = RegisteredRoot(id: UUID(), path: "/tmp/second-copy", displayName: nil, enabled: true)
+        let secondFile = URL(fileURLWithPath: second.path).appendingPathComponent("clean.txt")
+        let rootURL = URL(fileURLWithPath: fixture.root.path)
+        let now = Date(timeIntervalSince1970: 1_788_000_000)
+        let formatter = ISO8601DateFormatter()
+        try fixture.writeRoots([fixture.root, second])
+        try JSONEncoder().encode(BadgeSnapshotDocument(
+            schemaVersion: 1, generatedAt: formatter.string(from: now),
+            entries: [rootURL.path: .conflicted, fixture.fileURL.path: .clean, secondFile.path: .clean],
+            directEntries: [rootURL.path: .clean, fixture.fileURL.path: .clean, secondFile.path: .clean],
+            perRootUpdatedAt: [fixture.root.path: formatter.string(from: now.addingTimeInterval(-59)),
+                               second.path: formatter.string(from: now)]
+        )).write(to: fixture.loader.badgeSnapshotURL!, options: .atomic)
+        fixture.state.reload()
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: rootURL, at: now), FinderBadgeIdentifier.conflicted)
+        XCTAssertEqual(fixture.state.directBadge(for: rootURL), .clean)
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: fixture.fileURL, at: now), FinderBadgeIdentifier.clean)
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: rootURL.appendingPathComponent("unknown.txt"), at: now),
+                       FinderBadgeIdentifier.unknown)
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: rootURL.appendingPathComponent(".svn/wc.db"), at: now),
+                       FinderBadgeIdentifier.none)
+        // The timer can expire one root without rereading JSON or aging another.
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: fixture.fileURL, at: now.addingTimeInterval(2)),
+                       FinderBadgeIdentifier.stale)
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: secondFile, at: now.addingTimeInterval(2)),
+                       FinderBadgeIdentifier.clean)
+        try fixture.writeBadges(.clean)
+        fixture.state.reload()
+        XCTAssertEqual(fixture.state.badgeIdentifier(for: fixture.fileURL, at: now), FinderBadgeIdentifier.stale)
+        XCTAssertNil(fixture.state.directBadge(for: fixture.fileURL))
+    }
+
+    func testBadgeTrackerRepaintsRequestedPathsAndDropsClosedDirectories() {
+        let root = RegisteredRoot(id: UUID(), path: "/tmp/tracked-copy", displayName: nil, enabled: true)
+        let directory = URL(fileURLWithPath: root.path).appendingPathComponent("src")
+        let first = directory.appendingPathComponent("first.txt")
+        let second = directory.appendingPathComponent("second.txt")
+        let third = directory.appendingPathComponent("third.txt")
+        var tracker = FinderBadgeTracker(maximumRequestedURLs: 2)
+        tracker.observe(directory, roots: [root])
+        for file in [first, second, third] {
+            tracker.request(file, identifier: FinderBadgeIdentifier.clean, roots: [root])
+        }
+        XCTAssertEqual(tracker.requestedURLs, [second, third])
+        XCTAssertEqual(tracker.directoryRequests(roots: [root]).count, 1)
+        XCTAssertEqual(tracker.directoryRequests(roots: [root]).first?.itemPaths, [third.path, second.path])
+        let updates = tracker.badgeUpdates { _ in FinderBadgeIdentifier.stale }
+        XCTAssertEqual(updates.map(\.url), [second, third])
+        XCTAssertTrue(tracker.badgeUpdates { _ in FinderBadgeIdentifier.stale }.isEmpty)
+        tracker.stopObserving(URL(fileURLWithPath: directory.path, isDirectory: true))
+        XCTAssertTrue(tracker.requestedURLs.isEmpty)
+        XCTAssertTrue(tracker.directoryRequests(roots: [root]).isEmpty)
+        tracker.observe(directory, roots: [root])
+        tracker.request(first, identifier: FinderBadgeIdentifier.clean, roots: [root])
+        tracker.pruneUnregistered(roots: [])
+        XCTAssertTrue(tracker.requestedURLs.isEmpty)
+        XCTAssertTrue(tracker.observedDirectories.isEmpty)
+    }
+
     func testUnchangedCallbacksReuseDecodedSnapshots() throws {
         let fixture = try Fixture()
         defer { fixture.remove() }

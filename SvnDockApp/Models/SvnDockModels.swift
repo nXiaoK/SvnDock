@@ -103,6 +103,24 @@ struct SvnDockHistoryTarget: Identifiable, Hashable, Sendable {
     let relativePaths: [String]
     let title: String
     let source: SvnDockHistoryTargetSource
+    /// Repository-relative path from authoritative SVN metadata. A working
+    /// copy can represent a subdirectory such as /trunk, so its local relative
+    /// paths cannot be used directly to select a revision's changed path.
+    let preferredRepositoryPath: String?
+
+    init(workingCopy: SvnDockWorkingCopy, relativePaths: [String], title: String,
+         source: SvnDockHistoryTargetSource, preferredRepositoryPath: String? = nil) {
+        self.workingCopy = workingCopy
+        self.relativePaths = relativePaths
+        self.title = title
+        self.source = source
+        self.preferredRepositoryPath = preferredRepositoryPath
+    }
+
+    func revisionRequest(for revision: Int) -> SvnDockRevisionRequest {
+        SvnDockRevisionRequest(workingCopyID: workingCopy.id, revision: revision,
+                               preferredPath: preferredRepositoryPath)
+    }
 
     var id: String {
         let paths = relativePaths.isEmpty ? "." : relativePaths.joined(separator: "\u{1F}")

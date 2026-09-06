@@ -105,15 +105,39 @@ should display a badge:
   "schemaVersion": 1,
   "generatedAt": "2026-09-04T08:00:00.000Z",
   "entries": {
-    "/Users/me/Projects/example": "modified",
+    "/Users/me/Projects/example": "conflicted",
     "/Users/me/Projects/example/File.swift": "conflicted"
+  },
+  "directEntries": {
+    "/Users/me/Projects/example": "clean",
+    "/Users/me/Projects/example/File.swift": "conflicted"
+  },
+  "perRootUpdatedAt": {
+    "/Users/me/Projects/example": "2026-09-04T08:00:00.000Z"
   }
 }
 ```
 
 Badge values are `modified`, `added`, `deleted`, `conflicted`, `unversioned`,
-`missing`, `replaced`, `ignored`, and `clean`. `ignored` and `clean` intentionally
-clear the badge.
+`missing`, `replaced`, `ignored`, and `clean`. Green checks identify confirmed
+unchanged nodes, yellow pencils identify modifications, red warnings identify
+conflicts, blue plus signs identify additions, and gray symbols distinguish
+unversioned, ignored, unknown, or stale states. `entries` includes ancestor
+summaries; `directEntries` is the exact SVN state used for menu eligibility.
+Per-root timestamps prevent refreshing one working copy from making another
+working copy's cached state look current. Missing timestamps and snapshots
+older than 60 seconds display a gray refresh indicator, never a green guess.
+
+While the App is running, the extension writes private, expiring observation
+hints to `finder-badge-requests/<instance-uuid>.json` every five seconds. The App
+polls these hints, batches up to 32 directories per working copy, and waits at
+least ten seconds after each scan before repeating it. It reads sparse local
+changes for folder summaries and verbose status only for the immediate children
+of the requested versioned directories. Ignored, unversioned, external, and
+symlink directories are not traversed. Optional green entries have a bounded
+budget, with requested visible files taking priority. Unknown entries remain
+gray. Background failures preserve the previous snapshot and timestamp.
+These hints never authorize a mutation or start SVN inside Finder.
 
 The extension creates a command request like this:
 
@@ -151,6 +175,17 @@ Supported `kind` values are `openApp`, `refresh`, `update`, `commit`, `diff`, `a
 - A single versioned item exposes history; an exact conflict badge exposes the
   resolve workflow; and an exact unversioned badge exposes name/extension ignore
   rules. The app rechecks all three against fresh SVN state before execution.
+- Finder commits start with this invocation's selected paths, even when an
+  older draft has different checked files. The commit message can still be
+  restored; the confirmation sheet remains editable before submission.
+- Explicit file history carries an authoritative repository-relative preferred
+  path into revision details. Clean files can open an empty local diff without
+  being added to the ordinary changes list. Directory diffs show properties.
 - Users must enable the Finder extension in macOS System Settings. Finder badge
   ownership can conflict with iCloud Drive, Dropbox, and other Finder extensions.
 - Finder decides menu placement and may coalesce or delay badge callbacks.
+  SvnDock supplies official icon overlays; it cannot add a custom status column
+  to Finder or choose which side of an icon macOS overlays. Already-requested
+  visible icons are repainted when snapshots change, with polling as a fallback.
+- Keep SvnDock running for automatic status updates. Closing its main window
+  can keep it running; explicitly quitting the App stops background SVN reads.

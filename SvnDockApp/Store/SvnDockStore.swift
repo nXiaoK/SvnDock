@@ -21,13 +21,20 @@ final class SvnDockStore: ObservableObject {
             if oldValue != selectedWorkingCopyID {
                 clearDiff()
                 clearHistory()
+                finderSelectedTarget = nil
                 invalidateIgnoredEntries()
             }
         }
     }
     @Published var selectedEntryIDs: Set<SvnDockStatusEntry.ID> = [] {
         didSet {
-            if oldValue != selectedEntryIDs { clearDiff() }
+            if oldValue != selectedEntryIDs {
+                clearDiff()
+                if !selectedEntryIDs.isEmpty, let target = finderSelectedTarget,
+                   !selectedEntryIDs.contains(target.entry.id) {
+                    finderSelectedTarget = nil
+                }
+            }
         }
     }
 
@@ -57,6 +64,10 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var hasLoadedIgnoredEntries = false
     @Published private(set) var isLoadingIgnoredEntries = false
     @Published private(set) var ignoredEntriesError: String?
+    @Published private(set) var finderSelectedTarget: SvnDockFinderTarget?
+    @Published private(set) var commitInitialSelectedEntryIDs: Set<SvnDockStatusEntry.ID>?
+    @Published private(set) var finderBadgeRefreshError: String?
+    @Published private(set) var finderBadgesLastRefreshedAt: Date?
     @Published private var expandedDirectoryIDs: Set<SvnDockStatusEntry.ID> = []
     @Published private var directoryChildrenByID: [
         SvnDockStatusEntry.ID: [SvnDockStatusEntry]
@@ -102,6 +113,10 @@ final class SvnDockStore: ObservableObject {
     private let service: any SvnDockServicing
     let commitDraftStore: SvnDockCommitDraftStore
     private let finderQueueCoordinator: FinderCommandQueueCoordinator?
+    private let finderBadgeRequestStore: FinderBadgeRefreshRequestStore?
+    private var finderBadgeRefreshTask: Task<Void, Never>?
+    private var isRefreshingFinderBadges = false
+    private var nextFinderBadgeRefreshByID: [UUID: Date] = [:]
     private var finderConsumerLease: FinderCommandConsumerLease?
     private nonisolated(unsafe) var finderHandoffObserver: NSObjectProtocol?
     private var didRecoverFinderClaims = false
@@ -167,6 +182,9 @@ final class SvnDockStore: ObservableObject {
         self.finderQueueCoordinator = finderSharedStore.flatMap {
             try? FinderCommandQueueCoordinator(directoryURL: $0.directoryURL)
         }
+        self.finderBadgeRequestStore = finderSharedStore.flatMap {
+            try? FinderBadgeRefreshRequestStore(baseDirectoryURL: $0.directoryURL)
+        }
         self.finderHandoffObserver = DistributedNotificationCenter.default().addObserver(
             forName: Self.finderHandoffNotification,
             object: nil,
@@ -181,6 +199,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     deinit {
+        finderBadgeRefreshTask?.cancel()
         if let finderHandoffObserver {
             DistributedNotificationCenter.default().removeObserver(finderHandoffObserver)
         }
@@ -259,6 +278,13 @@ final class SvnDockStore: ObservableObject {
 
     var committableEntries: [SvnDockStatusEntry] {
         statusSnapshot.committableEntries
+    }
+
+    var finderTargetOutsideChangeList: SvnDockStatusEntry? {
+        guard let entry = finderSelectedTarget?.entry,
+              entry.workingCopyID == selectedWorkingCopyID,
+              !statusSnapshot.containsEntry(withID: entry.id) else { return nil }
+        return entry
     }
 
     var hasPendingChanges: Bool {
@@ -455,6 +481,7 @@ final class SvnDockStore: ObservableObject {
             defer { startupTask = nil }
             guard await load() else { return }
             hasStarted = true
+            startFinderBadgeRefreshIfNeeded()
             await processPendingFinderCommands()
         }
         startupTask = task
@@ -485,6 +512,65 @@ final class SvnDockStore: ObservableObject {
             let loadedEntries = try await loadStatusSnapshot(for: workingCopy)
             guard selectedWorkingCopyID == workingCopy.id else { return }
             apply(loadedEntries, to: workingCopy.id)
+        }
+    }
+
+    var finderBadgeStatusMessage: String {
+        if let error = finderBadgeRefreshError { return "Finder 状态更新失败：\(error)" }
+        if let refreshed = finderBadgesLastRefreshedAt {
+            return "最近刷新 Finder 状态：\(refreshed.formatted(date: .omitted, time: .standard))"
+        }
+        return "等待 Finder 打开已登记的工作副本。"
+    }
+
+    private func startFinderBadgeRefreshIfNeeded() {
+        guard finderBadgeRequestStore != nil, finderBadgeRefreshTask == nil else { return }
+        finderBadgeRefreshTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(3)) } catch { return }
+                guard let self else { return }
+                await self.refreshFinderBadgesIfNeeded()
+            }
+        }
+    }
+
+    /// Finder only supplies bounded directory hints. The trusted service
+    /// validates each target and reads SVN while retaining the WC lease.
+    /// Background reads never change the user's selection or open error sheets.
+    func refreshFinderBadgesIfNeeded(now: Date = .now) async {
+        guard let requestStore = finderBadgeRequestStore, finderConsumerLease != nil, !isInteractionBlocked,
+              !isRefreshingFinderBadges else { return }
+        isRefreshingFinderBadges = true
+        defer { isRefreshingFinderBadges = false }
+        do {
+            let roots = workingCopies.map {
+                RegisteredRoot(id: $0.id, path: $0.rootURL.standardizedFileURL.path, displayName: $0.name)
+            }
+            let requests = try await requestStore.activeDirectories(registeredRoots: roots, now: now)
+            let grouped = Dictionary(grouping: requests, by: \.workingCopyID)
+            nextFinderBadgeRefreshByID = nextFinderBadgeRefreshByID.filter { grouped[$0.key] != nil }
+            for copy in workingCopies where grouped[copy.id] != nil {
+                guard !Task.isCancelled, !isInteractionBlocked else { return }
+                guard now >= nextFinderBadgeRefreshByID[copy.id, default: .distantPast] else { continue }
+                let directories = Array(Set(grouped[copy.id, default: []].map(\.directoryPath))).sorted()
+                let preferredPaths = Array(Set(grouped[copy.id, default: []].flatMap(\.itemPaths))).sorted()
+                do {
+                    try await service.refreshFinderBadges(for: copy, directoryPaths: Array(directories.prefix(32)),
+                                                         preferredPaths: Array(preferredPaths.prefix(2_048)))
+                    guard workingCopies.contains(where: { $0.id == copy.id && $0.rootURL == copy.rootURL }) else { continue }
+                    finderBadgesLastRefreshedAt = .now
+                    finderBadgeRefreshError = nil
+                    nextFinderBadgeRefreshByID[copy.id] = Date().addingTimeInterval(10)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard workingCopies.contains(where: { $0.id == copy.id }) else { continue }
+                    finderBadgeRefreshError = "\(copy.name)：\(error.localizedDescription)"
+                    nextFinderBadgeRefreshByID[copy.id] = Date().addingTimeInterval(30)
+                }
+            }
+        } catch {
+            if !(error is CancellationError) { finderBadgeRefreshError = error.localizedDescription }
         }
     }
 
@@ -716,6 +802,8 @@ final class SvnDockStore: ObservableObject {
         guard allowDuringFinderRouting || !isInteractionBlocked else { return }
         guard hasPendingChanges else { return }
         pendingCommitClaim = finderClaim
+        commitInitialSelectedEntryIDs = finderClaim == nil ? nil
+            : Set(committableEntries.filter { selectedEntryIDs.contains($0.id) }.map(\.id))
         isPresentingCommit = true
     }
 
@@ -728,7 +816,9 @@ final class SvnDockStore: ObservableObject {
     /// A successful commit clears the claim before dismissing, so this method
     /// cannot accidentally turn a completed request into a cancellation.
     func commitPresentationDidDismiss() {
-        guard !isPresentingCommit, let claim = pendingCommitClaim else { return }
+        guard !isPresentingCommit else { return }
+        commitInitialSelectedEntryIDs = nil
+        guard let claim = pendingCommitClaim else { return }
         pendingCommitClaim = nil
         finalizeAwaitingFinderClaim(claim, outcome: .cancelled)
     }
@@ -2041,6 +2131,8 @@ final class SvnDockStore: ObservableObject {
                 relativePaths: [entry.relativePath],
                 title: entry.fileName,
                 source: .selection,
+                preferredRepositoryPath: finderSelectedTarget?.entry.id == entry.id
+                    ? finderSelectedTarget?.repositoryRelativePath : nil,
                 allowDuringFinderRouting: allowDuringFinderRouting
             )
         } else {
@@ -2146,6 +2238,7 @@ final class SvnDockStore: ObservableObject {
         relativePaths: [String],
         title: String,
         source: SvnDockHistoryTargetSource,
+        preferredRepositoryPath: String? = nil,
         allowDuringFinderRouting: Bool
     ) async {
         if !allowDuringFinderRouting,
@@ -2156,7 +2249,8 @@ final class SvnDockStore: ObservableObject {
             workingCopy: workingCopy,
             relativePaths: relativePaths,
             title: title,
-            source: source
+            source: source,
+            preferredRepositoryPath: preferredRepositoryPath
         )
         inspectorTab = .history
         // Returning to the same target keeps its loaded pages. The explicit
@@ -2535,6 +2629,7 @@ final class SvnDockStore: ObservableObject {
         withID id: SvnDockStatusEntry.ID
     ) -> SvnDockStatusEntry? {
         statusSnapshot.entry(withID: id) ?? ignoredEntryIndex[id] ?? discoveredEntryIndex[id]
+            ?? (finderSelectedTarget?.entry.id == id ? finderSelectedTarget?.entry : nil)
     }
 
     private func selectedStatusEntries(
@@ -2568,6 +2663,7 @@ final class SvnDockStore: ObservableObject {
 
     private func clearStatusEntries() {
         clearDiff()
+        finderSelectedTarget = nil
         invalidateIgnoredEntries()
         resetDirectoryTree()
         activeStatusLoadTask?.cancel()
@@ -2587,6 +2683,7 @@ final class SvnDockStore: ObservableObject {
     private func loadStatusSnapshot(
         for workingCopy: SvnDockWorkingCopy
     ) async throws -> SvnDockStatusSnapshot {
+        finderSelectedTarget = nil
         invalidateIgnoredEntries()
         activeStatusLoadTask?.cancel()
         let generation = UUID()
@@ -2866,11 +2963,22 @@ final class SvnDockStore: ObservableObject {
         interactiveClaim: FinderCommandClaim? = nil
     ) async throws {
         let workingCopy = try await selectWorkingCopy(forRootPath: command.workingCopyRoot)
+        if [.openApp, .commit, .diff, .log].contains(command.kind) {
+            searchQuery = ""
+            statusFilter = .all
+        }
         selectEntries(forAbsolutePaths: command.paths, in: workingCopy)
 
         switch command.kind {
         case .openApp:
-            break
+            if command.paths.count == 1, let path = command.paths.first,
+               let relative = Self.relativePath(for: URL(fileURLWithPath: path), under: workingCopy.rootURL),
+               relative != ".", primarySelectedEntry == nil {
+                let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
+                finderSelectedTarget = target
+                selectedEntryIDs = [target.entry.id]
+                inspectorTab = .information
+            }
         case .refresh:
             // `selectWorkingCopy` has already reloaded authoritative status
             // and rewritten the Finder badge snapshot.
@@ -2907,18 +3015,16 @@ final class SvnDockStore: ObservableObject {
             }
         case .diff:
             guard command.paths.count == 1,
-                  let entry = primarySelectedEntry,
-                  entry.nodeKind == .file,
-                  entry.status != .unversioned,
-                  entry.status != .ignored,
-                  let selectedPath = command.paths.first.map({
-                      URL(fileURLWithPath: $0).standardizedFileURL.path
-                  }),
-                  workingCopy.rootURL
-                    .appendingPathComponent(entry.relativePath)
-                    .standardizedFileURL.path == selectedPath else {
-                throw SvnDockServiceError.unavailable("所选文件已经无法查看差异。")
+                  let path = command.paths.first,
+                  let relative = Self.relativePath(for: URL(fileURLWithPath: path), under: workingCopy.rootURL) else {
+                throw SvnDockServiceError.unavailable("一次只能查看一个项目的本地差异。")
             }
+            let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
+            guard target.entry.status != .missing else {
+                throw SvnDockServiceError.unavailable("文件在本地缺失。可从 Finder 的历史入口查看已提交版本。")
+            }
+            finderSelectedTarget = target
+            selectedEntryIDs = [target.entry.id]
             inspectorTab = .diff
             let succeeded = await loadDiffForSelection(allowDuringFinderRouting: true)
             try Task.checkCancellation()
@@ -2990,10 +3096,8 @@ final class SvnDockStore: ObservableObject {
                   ) else {
                 throw SvnDockServiceError.unavailable("一次只能查看一个项目的提交历史。")
             }
-            if let entry = exactEntry(for: selectedURL, in: workingCopy),
-               entry.status == .unversioned || entry.status == .ignored {
-                throw SvnDockServiceError.unavailable("未纳管或已忽略的项目没有 SVN 提交历史。")
-            }
+            let target = try await service.finderTarget(relativePath: relativePath, in: workingCopy)
+            finderSelectedTarget = target
             // Finder supplied an explicit history target. A directory may
             // contain many changed status rows, but those rows must not cause
             // InspectorView's selection task to replace the requested target.
@@ -3004,6 +3108,7 @@ final class SvnDockStore: ObservableObject {
                 relativePaths: isRoot ? [] : [relativePath],
                 title: isRoot ? workingCopy.name : selectedURL.lastPathComponent,
                 source: .finderExplicit,
+                preferredRepositoryPath: isRoot ? nil : target.repositoryRelativePath,
                 allowDuringFinderRouting: true
             )
             try Task.checkCancellation()
