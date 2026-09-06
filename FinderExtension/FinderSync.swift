@@ -16,7 +16,7 @@ final class FinderSync: FIFinderSync {
     private static let retainedMenuPayloadLimit = 16
     private static let retainedMenuPayloadLifetime: TimeInterval = 10 * 60
 
-    private let controller = FIFinderSyncController.default()
+    private var controller: FIFinderSyncController { FIFinderSyncController.default() }
     private let container: SharedContainer
     private let state: SharedStateStore
     private let dispatcher: FinderCommandDispatcher
@@ -32,6 +32,8 @@ final class FinderSync: FIFinderSync {
     private var badgePollTarget: FinderBadgePollTarget?
     private var lastBadgeRequestAt = Date.distantPast
     private var lastBadgeRequestError: String?
+    private var configuredDirectoryURLs: Set<URL>?
+    private var hasReceivedBadgeRequest = false
 
     override init() {
         let container = SharedContainer()
@@ -76,6 +78,7 @@ final class FinderSync: FIFinderSync {
     }
 
     override func requestBadgeIdentifier(for url: URL) {
+        Self.logger.debug("Received Finder badge request")
         performOnMain(#selector(applyBadgeRequest(_:)), value: url)
     }
 
@@ -362,6 +365,7 @@ final class FinderSync: FIFinderSync {
     @objc private func observeDirectory(_ url: URL) {
         state.reload()
         badgeTracker.observe(url, roots: state.registeredRoots())
+        Self.logger.notice("Finder began observing a directory; registered roots: \(self.state.registeredRoots().count)")
         applySharedState()
     }
 
@@ -373,7 +377,12 @@ final class FinderSync: FIFinderSync {
     @objc private func applyBadgeRequest(_ url: URL) {
         let identifier = state.badgeIdentifier(for: url)
         badgeTracker.request(url, identifier: identifier, roots: state.registeredRoots())
+        Self.logger.debug("Applying Finder badge: \(identifier, privacy: .public)")
         controller.setBadgeIdentifier(identifier, for: url)
+        if !hasReceivedBadgeRequest {
+            hasReceivedBadgeRequest = true
+            Self.logger.notice("Delivered first Finder badge: \(identifier, privacy: .public)")
+        }
         publishBadgeRequests(force: false)
     }
 
@@ -388,7 +397,7 @@ final class FinderSync: FIFinderSync {
         // Finder monitors every registered root recursively. Registering each
         // descendant would be both redundant and prohibitively expensive for
         // large working copies.
-        Self.updateObservedDirectories(using: state)
+        updateObservedDirectories(using: state)
         publishBadgeRequests(force: false)
     }
 
@@ -409,14 +418,17 @@ final class FinderSync: FIFinderSync {
         }
     }
 
-    private static func updateObservedDirectories(using state: SharedStateStore) {
+    private func updateObservedDirectories(using state: SharedStateStore) {
         // Read the latest state after reaching the main queue so an older
         // callback cannot restore roots removed by a newer reload.
         let rootURLs = Set(state.registeredRoots().compactMap(\.canonicalURL))
-        let controller = FIFinderSyncController.default()
-        if controller.directoryURLs != rootURLs {
-            controller.directoryURLs = rootURLs
-        }
+        // Register unconditionally for this extension instance's first setup.
+        // A controller getter reflecting an earlier connection is not proof
+        // that Finder has registered the new instance's callbacks.
+        guard configuredDirectoryURLs != rootURLs else { return }
+        configuredDirectoryURLs = rootURLs
+        controller.directoryURLs = rootURLs
+        Self.logger.notice("Registered Finder observation roots: \(rootURLs.count)")
     }
 
     private func currentSelection(
@@ -495,25 +507,20 @@ final class FinderSync: FIFinderSync {
     }
 
     private func registerBadgeImages() {
+        var count = 0
         for spec in FinderBadgeSymbolSpec.all {
-            guard let image = badgeImage(for: spec) else { continue }
+            guard let image = badgeImage(for: spec) else {
+                Self.logger.error("Unable to render Finder badge: \(spec.identifier, privacy: .public)")
+                continue
+            }
             controller.setBadgeImage(image, label: spec.label, forBadgeIdentifier: spec.identifier)
+            count += 1
         }
+        Self.logger.notice("Registered Finder bitmap badge images: \(count)")
     }
 
     private func badgeImage(for spec: FinderBadgeSymbolSpec) -> NSImage? {
-        let color: NSColor
-        switch spec.color {
-        case .green: color = .systemGreen
-        case .yellow: color = .systemYellow
-        case .red: color = .systemRed
-        case .blue: color = .systemBlue
-        case .gray: color = .systemGray
-        }
-        guard let image = NSImage(systemSymbolName: spec.symbol, accessibilityDescription: spec.label)?
-            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) else { return nil }
-        image.isTemplate = false
-        return image
+        FinderBadgeImages.image(for: spec)
     }
 }
 

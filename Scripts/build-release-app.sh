@@ -69,6 +69,7 @@ xcrun swiftc -target "$target" -sdk "$sdk" -swift-version 6 \
     -strict-concurrency=complete -warnings-as-errors -O -whole-module-optimization \
     -D SVNDOCK_PORTABLE_SIGNED_BUILD -application-extension -parse-as-library \
     -module-name SvnDockFinderExtension -emit-executable \
+    "$source_directory/FinderExtension/FinderBadgeImages.swift" \
     "$source_directory/FinderExtension/FinderCommandDispatcher.swift" \
     "$source_directory/FinderExtension/FinderMenuSelectionResolver.swift" \
     "$source_directory/FinderExtension/FinderSync.swift" \
