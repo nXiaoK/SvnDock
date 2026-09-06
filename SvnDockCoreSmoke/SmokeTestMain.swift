@@ -111,7 +111,7 @@ struct SvnDockCoreSmokeTestMain {
         )
         try check(
             !unscheduleAdd.arguments.contains("--remove-added"),
-            "unscheduling additions preserves disk content"
+            "ordinary additions omit remove-added; copied additions need separate preflight rejection"
         )
 
         let diffLiteral = try builder.makeInvocation(

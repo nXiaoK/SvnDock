@@ -10,8 +10,11 @@ enum MissingDeletionSmoke {
     }
 
     static func run() async throws {
-        let copy = WorkingCopy(localPath: FileManager.default.temporaryDirectory
-            .appendingPathComponent("missing-delete-mock-\(UUID().uuidString)"))
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("missing-delete-mock-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let copy = WorkingCopy(localPath: root)
         let executable = URL(fileURLWithPath: "/opt/homebrew/bin/svn")
         let builder = try SVNCommandBuilder(executableURL: executable)
         let deletion = try SVNMissingDeletion(executableURL: executable)
@@ -85,8 +88,6 @@ enum MissingDeletionSmoke {
         let batchedCommands = await batched.commands
         try check(batchedCommands == ["status", "status", "status", "info", "delete"], "status reads batch before one large delete")
 
-        try FileManager.default.createDirectory(at: copy.localPath, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: copy.localPath) }
         let restored = copy.localPath.appendingPathComponent("restored")
         let raced = MissingDeletionFixtureRunner(copy: copy, entries: [.init(path: "restored")], restoreDuringInfo: restored)
         do {
