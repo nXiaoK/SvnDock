@@ -7,7 +7,46 @@ import SvnDockCore
 enum SVNSafetyRegressionChecks {
     static func run() async throws {
         try await additionUndoPreservesContent()
+        try await switchedTargetsCannotSilentlyCommit()
         print("SVN safety checks passed")
+    }
+
+    private static func switchedTargetsCannotSilentlyCommit() async throws {
+        let f = try await SafetyFixture.create()
+        defer { f.remove() }
+        _ = try await f.svn(["copy", f.remote("trunk"), f.remote("branches/release"), "-m", "Create branch"])
+        let service = try f.service()
+        let reviewed = try await service.registerWorkingCopy(at: f.root)
+        _ = try await f.svn(["switch", f.remote("branches/release/source"), "source"])
+        try f.write("switched edit\n", to: "source/a.txt")
+        try f.write("ordinary edit\n", to: "other.txt")
+        let snapshot = try await service.status(for: reviewed)
+        try check(snapshot.entries.first { $0.relativePath == "source/a.txt" }?.switchedAncestorPath == "source",
+                  "a clean switched ancestor remains visible on its modified descendants")
+        let revision = try await f.revision()
+        do {
+            try await service.commit(workingCopy: reviewed, relativePaths: ["source/a.txt", "other.txt"], message: "Must reject switched subtree")
+            throw SafetyFailure("switched subtree unexpectedly committed")
+        } catch SVNSelectedCommitError.switchedTarget { }
+        try check(try await f.revision() == revision, "switched rejection must preserve the whole transaction")
+        try check(try f.read("source/a.txt") == "switched edit\n", "rejected commit preserves local edits")
+
+        _ = try await f.svn(["switch", f.remote("trunk/source"), "source"])
+        _ = try await f.svn(["switch", f.remote("branches/release"), "."])
+        let refreshed = try await service.refreshWorkingCopyMetadata(for: reviewed)
+        try check(refreshed.repositoryURL != reviewed.repositoryURL, "fixture really switched the WC root")
+        do {
+            // The service cache now knows the new branch; it must not replace
+            // the identity that the caller actually reviewed.
+            try await service.commit(workingCopy: reviewed, relativePaths: ["other.txt"], message: "Must reject changed identity")
+            throw SafetyFailure("stale reviewed repository unexpectedly committed")
+        } catch SVNSelectedCommitError.repositoryIdentityChanged { }
+        try check(try await f.revision() == revision, "root identity rejection creates no revision")
+        try await service.commit(workingCopy: refreshed, relativePaths: ["other.txt"], message: "Commit newly reviewed branch")
+        try check(try await f.svn(["cat", f.remote("branches/release/other.txt")]).standardOutputString == "ordinary edit\n",
+                  "a freshly reviewed root branch remains usable")
+        try check(try await f.svn(["cat", f.remote("trunk/other.txt")]).standardOutputString == "base other\n",
+                  "the rejected stale review never changes trunk")
     }
 
     private static func additionUndoPreservesContent() async throws {
@@ -118,6 +157,9 @@ private struct SafetyFixture: Sendable {
     func status() async throws -> Set<StatusEntry> {
         let result = try await svn(["status", "--xml", "--no-ignore"])
         return Set(try SVNXMLParser.parseStatus(result.standardOutput, workingCopyURL: root, resolveNodeKinds: false))
+    }
+    func revision() async throws -> String {
+        try await svn(["info", "--show-item", "revision", repository.absoluteString]).standardOutputString
     }
     func svn(_ arguments: [String], in cwd: URL? = nil) async throws -> ProcessResult {
         let result = try await runner.run(ProcessInvocation(executableURL: executable, arguments: arguments,

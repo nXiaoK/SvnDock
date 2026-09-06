@@ -11,6 +11,7 @@ struct SvnDockWorkingCopy: Identifiable, Hashable, Sendable {
     var name: String
     var rootURL: URL
     var repositoryURL: URL?
+    var repositoryUUID: String?
     var revision: Int?
     var lastRefreshedAt: Date?
     var counts: SvnDockStatusCounts
@@ -20,6 +21,7 @@ struct SvnDockWorkingCopy: Identifiable, Hashable, Sendable {
         name: String,
         rootURL: URL,
         repositoryURL: URL? = nil,
+        repositoryUUID: String? = nil,
         revision: Int? = nil,
         lastRefreshedAt: Date? = nil,
         counts: SvnDockStatusCounts = .zero
@@ -28,6 +30,7 @@ struct SvnDockWorkingCopy: Identifiable, Hashable, Sendable {
         self.name = name
         self.rootURL = rootURL
         self.repositoryURL = repositoryURL
+        self.repositoryUUID = repositoryUUID
         self.revision = revision
         self.lastRefreshedAt = lastRefreshedAt
         self.counts = counts
@@ -223,6 +226,8 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
     /// Children of uncommitted copies can have a normal schedule but no BASE.
     var workingCopyRevision: Int?
     var missingDescendantCount = 0
+    /// The nearest switched node affecting this target, including a clean parent.
+    var switchedAncestorPath: String?
 
     init(
         workingCopyID: UUID,

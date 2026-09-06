@@ -162,13 +162,27 @@ actor CoreSvnDockService: SvnDockServicing {
             }
         }
 
-        let uiEntries = listing.entries.compactMap { entry in
-            makeUIStatusEntry(
+        let switchedPaths = Set(listing.entries.filter(\.isSwitched).map {
+            relativePath(for: $0.fileURL(relativeTo: coreCopy), root: coreCopy.localPath)
+        })
+        let uiEntries = listing.entries.compactMap { entry -> SvnDockStatusEntry? in
+            guard var value = makeUIStatusEntry(
                 entry, in: coreCopy,
                 missingInfo: entry.status == .missing || entry.status == .deleted
                     ? listing.missingInfoByPath[entry.fileURL(relativeTo: coreCopy).path]
                     : nil
-            )
+            ) else { return nil }
+            var ancestor = value.relativePath
+            while true {
+                if switchedPaths.contains(ancestor) {
+                    value.switchedAncestorPath = ancestor
+                    break
+                }
+                if ancestor == "." { break }
+                let parent = (ancestor as NSString).deletingLastPathComponent
+                ancestor = parent.isEmpty ? "." : parent
+            }
+            return value
         }
         postSharedStateChanged()
         return SvnDockStatusSnapshot(entries: uiEntries)
@@ -493,7 +507,12 @@ actor CoreSvnDockService: SvnDockServicing {
         relativePaths: [String],
         message: String
     ) async throws {
-        let coreCopy = coreWorkingCopy(for: workingCopy)
+        guard workingCopy.repositoryURL != nil, workingCopy.repositoryUUID != nil else {
+            throw SVNSelectedCommitError.repositoryIdentityChanged
+        }
+        let coreCopy = SvnDockCore.WorkingCopy(id: workingCopy.id, name: workingCopy.name,
+            localPath: workingCopy.rootURL, repositoryURL: workingCopy.repositoryURL,
+            repositoryUUID: workingCopy.repositoryUUID, revision: workingCopy.revision)
         let commit = try SVNSelectedCommit(executableURL: executableLocator.locate(), runner: processRunner)
         let targets = try commit.targets(for: relativePaths, in: coreCopy)
         let operationLock = crossProcessLock
@@ -1101,6 +1120,7 @@ actor CoreSvnDockService: SvnDockServicing {
             name: value.name,
             localPath: value.rootURL,
             repositoryURL: value.repositoryURL,
+            repositoryUUID: value.repositoryUUID,
             revision: value.revision
         )
         coreWorkingCopies[value.id] = copy
@@ -1113,6 +1133,7 @@ actor CoreSvnDockService: SvnDockServicing {
             name: copy.name,
             rootURL: copy.localPath,
             repositoryURL: copy.repositoryURL,
+            repositoryUUID: copy.repositoryUUID,
             revision: copy.revision
         )
     }

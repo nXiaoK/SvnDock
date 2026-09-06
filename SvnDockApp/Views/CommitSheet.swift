@@ -167,6 +167,11 @@ struct CommitSheet: View {
                 }
                 .font(.system(size: 12))
                 .foregroundStyle(SvnDockTheme.secondaryText)
+                Text(store.commitWorkingCopy?.repositoryURL?.absoluteString ?? "仓库地址待确认，请刷新工作副本")
+                    .font(.system(size: 11))
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+                    .textSelection(.enabled)
+                    .lineLimit(2)
             }
             Spacer(minLength: 12)
             Button {
@@ -617,6 +622,12 @@ struct CommitSheet: View {
 
     @ViewBuilder
     private var safetyNotices: some View {
+        if !includedSwitchedEntries.isEmpty {
+            Label("所选项目包含已切换分支的子树，无法从当前根工作副本提交：\(includedSwitchedEntries.map(\.relativePath).joined(separator: "、"))。请在目标分支的独立工作副本中检查并提交。", systemImage: "exclamationmark.triangle.fill")
+                .font(.system(size: 12))
+                .foregroundStyle(SvnDockTheme.red)
+                .textSelection(.enabled)
+        }
         if !includedDirectoryOperations.isEmpty {
             DisclosureGroup("目录操作范围（\(includedDirectoryOperations.count) 项）") {
                 VStack(alignment: .leading, spacing: 7) {
@@ -682,6 +693,7 @@ struct CommitSheet: View {
                 store.isBusy
                 || message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 || selectionSummary.count == 0
+                || !includedSwitchedEntries.isEmpty
             )
         }
         .padding(.horizontal, 24)
@@ -702,10 +714,12 @@ struct CommitSheet: View {
 
     private var hasSafetyNotices: Bool {
         !includedDirectoryOperations.isEmpty
+            || !includedSwitchedEntries.isEmpty
             || store.entries.contains { $0.status == .missing || $0.status == .conflicted }
     }
 
     private var compactNoticeTitle: String {
+        if !includedSwitchedEntries.isEmpty { return "已切换分支：提交已阻止" }
         if !includedDirectoryOperations.isEmpty { return "目录范围与提示（\(includedDirectoryOperations.count)）" }
         let missing = store.entries.contains { $0.status == .missing }
         let conflicted = store.entries.contains { $0.status == .conflicted }
@@ -718,6 +732,10 @@ struct CommitSheet: View {
             (!showsIncludedOnly || includedEntryIDs.contains($0.id))
                 && (query.isEmpty || $0.relativePath.localizedStandardContains(query))
         }
+    }
+
+    private var includedSwitchedEntries: [SvnDockStatusEntry] {
+        store.committableEntries.filter { includedEntryIDs.contains($0.id) && $0.switchedAncestorPath != nil }
     }
 
     private var filteredEntryIDs: Set<SvnDockStatusEntry.ID> {

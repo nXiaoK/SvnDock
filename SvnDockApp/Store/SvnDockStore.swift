@@ -170,6 +170,7 @@ final class SvnDockStore: ObservableObject {
     private var finderQueueRecoveryErrorID: UUID?
     private var isDrainingFinderQueue = false
     private var pendingCommitClaim: FinderCommandClaim?
+    @Published private(set) var commitWorkingCopy: SvnDockWorkingCopy?
     @Published private var activeFinderCommandID: UUID?
 
     init(
@@ -608,6 +609,7 @@ final class SvnDockStore: ObservableObject {
             guard selectedWorkingCopyID == expectedID,
                   let index = workingCopies.firstIndex(where: { $0.id == expectedID }) else { return }
             workingCopies[index].repositoryURL = metadata?.repositoryURL
+            workingCopies[index].repositoryUUID = metadata?.repositoryUUID
             workingCopies[index].revision = metadata?.revision
         }
     }
@@ -801,6 +803,7 @@ final class SvnDockStore: ObservableObject {
     ) {
         guard allowDuringFinderRouting || !isInteractionBlocked else { return }
         guard hasPendingChanges else { return }
+        commitWorkingCopy = selectedWorkingCopy
         pendingCommitClaim = finderClaim
         commitInitialSelectedEntryIDs = finderClaim == nil ? nil
             : Set(committableEntries.filter { selectedEntryIDs.contains($0.id) }.map(\.id))
@@ -818,6 +821,7 @@ final class SvnDockStore: ObservableObject {
     func commitPresentationDidDismiss() {
         guard !isPresentingCommit else { return }
         commitInitialSelectedEntryIDs = nil
+        commitWorkingCopy = nil
         guard let claim = pendingCommitClaim else { return }
         pendingCommitClaim = nil
         finalizeAwaitingFinderClaim(claim, outcome: .cancelled)
@@ -828,7 +832,8 @@ final class SvnDockStore: ObservableObject {
     /// which two Tasks could otherwise race the same awaiting-user claim.
     func commit(message: String, entryIDs: Set<SvnDockStatusEntry.ID>) {
         guard activeOperation == nil else { return }
-        guard let workingCopy = selectedWorkingCopy else {
+        guard let workingCopy = commitWorkingCopy ?? selectedWorkingCopy,
+              workingCopy.id == selectedWorkingCopyID else {
             present(SvnDockServiceError.noWorkingCopySelected, title: "无法提交")
             return
         }
@@ -941,7 +946,7 @@ final class SvnDockStore: ObservableObject {
 
     private static func isPreflightFailure(_ error: SVNSelectedCommitError) -> Bool {
         switch error {
-        case .changedSelection, .missingParent, .externalWorkingCopy: true
+        case .changedSelection, .missingParent, .externalWorkingCopy, .switchedTarget, .repositoryIdentityChanged: true
         case .commandFailed: false
         }
     }

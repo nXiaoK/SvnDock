@@ -4,6 +4,8 @@ public enum SVNSelectedCommitError: Error, LocalizedError, Equatable, Sendable {
     case changedSelection(String)
     case missingParent(String)
     case externalWorkingCopy(String)
+    case switchedTarget(String)
+    case repositoryIdentityChanged
     case commandFailed(String)
 
     public var errorDescription: String? {
@@ -14,6 +16,10 @@ public enum SVNSelectedCommitError: Error, LocalizedError, Equatable, Sendable {
             "本次提交依赖尚未提交的父目录“\(path)”。请同时勾选该目录，再检查需要包含的子项。未执行提交。"
         case let .externalWorkingCopy(path):
             "“\(path)”属于 SVN 外部定义。请在其对应的工作副本中单独检查并提交，本次未执行提交。"
+        case let .switchedTarget(path):
+            "“\(path)”位于已切换分支的子树中，实际提交地址与根工作副本不同。已停止整个提交；请在目标分支的独立工作副本中检查并提交。"
+        case .repositoryIdentityChanged:
+            "工作副本的仓库地址或身份已变化，或无法确认本次审阅的目标。未执行提交，请关闭提交窗口，刷新工作副本后重新检查仓库地址与勾选范围。"
         case let .commandFailed(message):
             message
         }
@@ -54,8 +60,18 @@ public struct SVNSelectedCommit: Sendable {
         for (path, entry) in zip(paths, entries) {
             indexed[path] = entry
         }
+        let switchedPaths = Set(zip(paths, entries).compactMap { $0.1.isSwitched ? $0.0 : nil })
         let included = Set(targets)
         for target in targets {
+            var switchedAncestor = target
+            while true {
+                if switchedPaths.contains(switchedAncestor) {
+                    throw SVNSelectedCommitError.switchedTarget(target)
+                }
+                if switchedAncestor == "." { break }
+                let parent = (switchedAncestor as NSString).deletingLastPathComponent
+                switchedAncestor = parent.isEmpty ? "." : parent
+            }
             if indexed[target]?.isFileExternal == true {
                 throw SVNSelectedCommitError.externalWorkingCopy(target)
             }
@@ -75,6 +91,19 @@ public struct SVNSelectedCommit: Sendable {
                         throw SVNSelectedCommitError.missingParent(parent)
                     }
                 }
+            }
+        }
+        // Bind an explicitly reviewed repository identity to the final write,
+        // rather than trusting a registration ID or a refreshed service cache.
+        if workingCopy.repositoryURL != nil || workingCopy.repositoryUUID != nil {
+            let infoResult = try await checkedRun(.info, in: workingCopy)
+            let info = try SVNXMLParser.parseInfo(infoResult.standardOutput)
+            guard let expectedURL = workingCopy.repositoryURL,
+                  let expectedUUID = workingCopy.repositoryUUID,
+                  info.url == expectedURL, info.repositoryUUID == expectedUUID,
+                  info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL.path
+                    == workingCopy.localPath.resolvingSymlinksInPath().standardizedFileURL.path else {
+                throw SVNSelectedCommitError.repositoryIdentityChanged
             }
         }
         try Task.checkCancellation()
