@@ -164,7 +164,7 @@ final class FinderSync: FIFinderSync {
         }
         submenu.addItem(.separator())
         submenu.addItem(makeCommandItem("刷新状态", action: #selector(refresh(_:)), payload: payload))
-        submenu.addItem(makeCommandItem("更新", action: #selector(update(_:)), payload: payload))
+        submenu.addItem(makeCommandItem("更新整个工作副本", action: #selector(update(_:)), payload: payload))
         if !isRoot {
             submenu.addItem(makeCommandItem("添加到 SVN", action: #selector(add(_:)), payload: payload))
             submenu.addItem(makeCommandItem("还原…", action: #selector(revert(_:)), payload: payload))
