@@ -397,18 +397,24 @@ private struct DiffInspector: View {
             HStack(spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
                     .foregroundStyle(SvnDockTheme.red)
-                Text("此文件存在冲突")
+                Text(entry.nodeKind == .directory ? "此目录存在冲突" : "此文件存在冲突")
                     .font(.system(size: 14, weight: .semibold))
                 Spacer()
-                Button("解决冲突…") {
+                Button("审阅冲突…") {
                     store.requestResolveConfirmation(for: entry)
                 }
                 .buttonStyle(SvnDockButtonStyle(primary: true))
                 .disabled(store.isInteractionBlocked)
             }
-            Text(entry.nodeKind == .file && entry.conflictKinds == [.text]
-                 ? "检查文件内容后，可选择保留工作副本、接受本地或服务器版本。"
-                 : "请先检查并处理文件或目录，再将冲突标记为已解决。")
+            Text([SvnDockConflictKind.text, .property, .tree]
+                .filter { entry.conflictKinds.contains($0) }.map(\.displayName).joined(separator: " · "))
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(SvnDockTheme.red)
+            Text(entry.conflictKinds.contains(.tree)
+                 ? "先处理删除、移动或阻挡关系，再审阅并确认路径结构。标记已解决不会自动修复目录结构，如有本地变更，仍需审阅后提交。"
+                 : entry.conflictKinds.contains(.property)
+                    ? "先检查并修正属性值，再审阅并确认当前工作状态。标记已解决不会自动选择正确属性，如有本地变更，仍需审阅后提交。"
+                    : "先检查并处理文件内容；内容冲突也可能发生于二进制文件。审阅确认后再标记已解决，如有本地变更，仍需审阅后提交。")
                 .font(.system(size: 12))
                 .foregroundStyle(SvnDockTheme.secondaryText)
         }

@@ -21,7 +21,7 @@ struct OperationRecordBar: View {
                         .foregroundStyle(SvnDockTheme.secondaryText)
                 } else {
                     Image(systemName: "clock")
-                    Text("本次运行暂无更新或提交记录")
+                    Text("本次运行暂无更新、提交或冲突处理记录")
                         .foregroundStyle(SvnDockTheme.secondaryText)
                     Spacer(minLength: 12)
                 }
@@ -54,7 +54,7 @@ struct OperationRecordBar: View {
         }
         .buttonStyle(SvnDockPlainButtonStyle(cornerRadius: 0))
         .background(SvnDockTheme.subtleSurface)
-        .help("查看本次运行最近 30 条更新与提交结果")
+        .help("查看本次运行最近 30 条更新、提交与冲突处理结果")
         .accessibilityIdentifier("operations.showRecords")
         .popover(isPresented: $isPresented, arrowEdge: .top) {
             OperationRecordPopover(records: store.operationRecords)
@@ -81,7 +81,7 @@ struct OperationRecordPopover: View {
             if records.isEmpty {
                 VStack(spacing: 10) {
                     Image(systemName: "clock").font(.system(size: 25, weight: .light))
-                    Text("尚无更新或提交结果")
+                    Text("尚无更新、提交或冲突处理结果")
                     Text("完成操作后，可在这里查看每个工作副本的结果与详情。")
                         .font(.system(size: 12))
                         .foregroundStyle(SvnDockTheme.secondaryText)

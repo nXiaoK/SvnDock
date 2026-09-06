@@ -11,6 +11,8 @@ struct AppRegressionSmoke {
         try await RemoteStoreRegressionChecks.run()
         try OperationRecordRegressionChecks.run()
         try await OperationStoreRegressionChecks.run()
+        try await ConflictReviewRegressionChecks.run()
+        try await ResolveServiceRegressionChecks.run()
         try HistoryQueryRegressionChecks.run()
         try await HistoryPagingRegressionChecks.run()
         try await HistoryPageServiceRegressionChecks.run()

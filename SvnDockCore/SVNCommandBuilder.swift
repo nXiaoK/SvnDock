@@ -304,7 +304,7 @@ public struct SVNCommandBuilder: Sendable {
             ))
 
         case let .resolve(paths, accept):
-            arguments = ["resolve", "--accept", accept.rawValue]
+            arguments = ["resolve", "--accept", accept.rawValue, "--depth", "empty"]
             appendCommonOptions(to: &arguments)
             arguments.append("--")
             arguments.append(contentsOf: try requiredSafePaths(

@@ -545,12 +545,14 @@ actor CoreSvnDockService: SvnDockServicing {
         }
         let executableURL = try executableLocator.locate()
         let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let targets = Array(Set(try builder.normalizedLocalPaths(relativePaths, in: coreCopy, command: "resolve"))).sorted()
         let statusInvocation = try builder.makeInvocation(
-            for: .status(SVNStatusOptions(paths: relativePaths)),
+            for: .status(SVNStatusOptions(depth: .empty, paths: targets)),
             in: coreCopy
         )
+        let infoInvocation = try builder.makeInvocation(for: .infoTargets(paths: targets), in: coreCopy)
         let resolveInvocation = try builder.makeInvocation(
-            for: .resolve(paths: relativePaths, accept: choice),
+            for: .resolve(paths: targets, accept: choice),
             in: coreCopy
         )
         let runner = processRunner
@@ -559,7 +561,7 @@ actor CoreSvnDockService: SvnDockServicing {
         try await scheduler.enqueue(for: coreCopy.id) {
             try await operationLock.withLock(for: coreCopy.id) {
                 try Self.validateResolvedBoundary(
-                    relativePaths: relativePaths,
+                    relativePaths: targets,
                     in: coreCopy
                 )
 
@@ -572,22 +574,57 @@ actor CoreSvnDockService: SvnDockServicing {
                     workingCopyURL: coreCopy.localPath
                 )
                 try Self.validateConflictTargets(
-                    relativePaths,
+                    targets,
                     resolution: resolution,
                     entries: currentEntries,
                     in: coreCopy
                 )
+                try Self.validateConflictReplacementFiles(targets, resolution: resolution, in: coreCopy)
+                // A path inside this directory may be a nested checkout or an
+                // external. Its own WC root must match before changing state.
+                let infoResult = try await runner.run(infoInvocation)
+                guard infoResult.succeeded else { throw SVNProcessFailure(result: infoResult) }
+                let infos = try SVNXMLParser.parseInfos(infoResult.standardOutput)
+                let root = coreCopy.localPath.resolvingSymlinksInPath().standardizedFileURL
+                for target in targets {
+                    guard let info = infos.first(where: {
+                        Self.absoluteURL(for: $0.path, in: coreCopy) == Self.absoluteURL(for: target, in: coreCopy)
+                    }), info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL == root else {
+                        throw SvnDockServiceError.unavailable("无法确认“\(target)”属于当前工作副本，请单独打开所属工作副本后处理冲突。")
+                    }
+                }
 
                 // Resolve symlinks again immediately before the mutation. The
                 // confirmation dialog may have remained open for an arbitrary
                 // amount of time after Finder originally queued the request.
                 try Self.validateResolvedBoundary(
-                    relativePaths: relativePaths,
+                    relativePaths: targets,
                     in: coreCopy
                 )
+                try Self.validateConflictReplacementFiles(targets, resolution: resolution, in: coreCopy)
                 let resolveResult = try await runner.run(resolveInvocation)
                 guard resolveResult.succeeded else {
                     throw SVNProcessFailure(result: resolveResult)
+                }
+                let verifiedEntries: [SvnDockCore.StatusEntry]
+                do {
+                    try Self.validateResolvedBoundary(relativePaths: targets, in: coreCopy)
+                    let verification = try await runner.run(statusInvocation)
+                    guard verification.succeeded else { throw SVNProcessFailure(result: verification) }
+                    verifiedEntries = try SVNXMLParser.parseStatus(
+                        verification.standardOutput, workingCopyURL: coreCopy.localPath
+                    )
+                } catch {
+                    throw SvnDockResolveVerificationError.statusUnavailable(
+                        detail: error is CancellationError ? "状态核验已取消。" : error.localizedDescription
+                    )
+                }
+                let remaining = targets.filter { target in
+                    guard let entry = Self.statusEntry(for: target, entries: verifiedEntries, in: coreCopy) else { return false }
+                    return entry.status == .conflicted || entry.propertyStatus == .conflicted || entry.isTreeConflicted
+                }
+                guard remaining.isEmpty else {
+                    throw SvnDockResolveVerificationError.remainingConflicts(paths: remaining)
                 }
             }
         }
@@ -1043,6 +1080,26 @@ actor CoreSvnDockService: SvnDockServicing {
         }
     }
 
+    private static func validateConflictReplacementFiles(
+        _ paths: [String],
+        resolution: SvnDockConflictResolution,
+        in workingCopy: SvnDockCore.WorkingCopy
+    ) throws {
+        guard resolution != .working else { return }
+        for path in paths {
+            // Query a fresh URL each time, including immediately before resolve.
+            // File-content replacement is limited to regular files, matching
+            // the UI even when an in-root symlink would pass the WC boundary.
+            let file = absoluteURL(for: path, in: workingCopy)
+            let values = try? file.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey])
+            guard values?.isSymbolicLink == false, values?.isRegularFile == true else {
+                throw SvnDockServiceError.unavailable(
+                    "“\(path)”已变化或不是普通文件，无法替换文件内容。请刷新并核实所选项目。"
+                )
+            }
+        }
+    }
+
     private static func validateConflictTargets(
         _ relativePaths: [String],
         resolution: SvnDockConflictResolution,
@@ -1060,13 +1117,17 @@ actor CoreSvnDockService: SvnDockServicing {
                 throw SvnDockServiceError.noConflictedFiles
             }
 
+            guard entry.isFileExternal != true, entry.status != .external else {
+                throw SvnDockServiceError.unavailable("“\(relativePath)”属于外部工作副本，请在所属工作副本中单独处理冲突。")
+            }
+
             if resolution != .working {
                 guard entry.kind == .file,
                       entry.status == .conflicted,
                       entry.propertyStatus != .conflicted,
                       !entry.isTreeConflicted else {
                     throw SvnDockServiceError.unavailable(
-                        "冲突类型已经变化；只有纯文本文件冲突可以替换内容，请刷新后重试。"
+                        "冲突类型已经变化；只有单独的文件内容冲突可以替换内容，请刷新后重试。"
                     )
                 }
             }

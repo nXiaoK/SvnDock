@@ -17,6 +17,25 @@ struct StatusListView: View {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
 
+            if store.statusCounts.conflicts > 0 {
+                VStack(alignment: .leading, spacing: 8) {
+                    Label("\(store.statusCounts.conflicts) 个项目存在冲突", systemImage: "exclamationmark.triangle")
+                        .foregroundStyle(SvnDockTheme.red)
+                    HStack(spacing: 10) {
+                        Button("显示冲突") { store.showConflicts() }
+                        Button("审阅全部冲突…") { store.requestResolveAllConflicts() }
+                    }
+                    .buttonStyle(SvnDockButtonStyle())
+                    .disabled(store.isInteractionBlocked)
+                }
+                .font(.system(size: 12))
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(12)
+                .background(SvnDockTheme.red.opacity(0.05), in: RoundedRectangle(cornerRadius: 10))
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
+
             if store.missingEntryCount > 0 {
                 VStack(alignment: .leading, spacing: 6) {
                     Label("\(store.missingEntryCount) 个项目在本地缺失", systemImage: "exclamationmark.triangle")
@@ -133,7 +152,7 @@ struct StatusListView: View {
     private func workspaceHeader(counts: [SvnDockStatusFilter: Int]) -> some View {
         HStack(alignment: .center) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(store.statusFilter == .conflicts ? "冲突文件" : "工作区")
+                Text(store.statusFilter == .conflicts ? "冲突项目" : "工作区")
                     .font(.system(size: 20, weight: .semibold))
                     .foregroundStyle(SvnDockTheme.text)
                 Text(workspaceSummary(counts: counts))
@@ -505,6 +524,7 @@ private struct StatusTreeEntryRowView: View {
     private var entryContextMenu: some View {
         let selection = StatusActionSelection.context(for: entry, selectedEntries: store.selectedEntries)
         let multiple = selection.entries.count > 1
+        let conflicts = selection.entries.filter { $0.status == .conflicted }
 
         if multiple {
             Text("已选择 \(selection.entries.count) 项")
@@ -530,6 +550,16 @@ private struct StatusTreeEntryRowView: View {
             .disabled(store.isInteractionBlocked)
             if selection.revertibleEntries.count < selection.entries.count {
                 Text("仅还原有本地变更的已纳管项目")
+            }
+        }
+
+        if !conflicts.isEmpty {
+            Button("审阅 \(selection.countLabel(conflicts.count)) 冲突…") {
+                store.requestResolveConfirmation(for: entry, preserveSelection: true)
+            }
+            .disabled(store.isInteractionBlocked)
+            if conflicts.count < selection.entries.count {
+                Text("仅处理选中的冲突项目，审阅窗口会列出确切范围")
             }
         }
 
@@ -603,12 +633,6 @@ private struct StatusTreeEntryRowView: View {
                     store.selectedEntryIDs = selection.entryIDs
                     store.requestRevertConfirmation()
                 }
-            }
-        }
-
-        if entry.status == .conflicted {
-            Button("解决此项冲突…") {
-                store.requestResolveConfirmation(for: entry)
             }
         }
 

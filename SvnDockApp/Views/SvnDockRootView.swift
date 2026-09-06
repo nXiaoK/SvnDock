@@ -142,34 +142,11 @@ struct SvnDockRootView: View {
         } message: {
             Text(store.revertConfirmationMessage)
         }
-        .confirmationDialog(
-            "解决“\(store.pendingResolveName)”的冲突？",
-            isPresented: $store.isPresentingResolveConfirmation,
-            titleVisibility: .visible
-        ) {
-            Button(SvnDockConflictResolution.working.displayName) {
-                store.confirmResolve(using: .working)
+        .sheet(isPresented: $store.isPresentingResolveConfirmation) {
+            if let review = store.pendingConflictReview {
+                ConflictReviewSheet(store: store, review: review)
+                    .id(review.id)
             }
-            if store.pendingResolveAllowsReplacement {
-                Button(SvnDockConflictResolution.mineFull.displayName, role: .destructive) {
-                    store.confirmResolve(using: .mineFull)
-                }
-                Button(SvnDockConflictResolution.theirsFull.displayName, role: .destructive) {
-                    store.confirmResolve(using: .theirsFull)
-                }
-                Button(SvnDockConflictResolution.base.displayName, role: .destructive) {
-                    store.confirmResolve(using: .base)
-                }
-            }
-            Button("取消", role: .cancel) {
-                store.cancelResolveConfirmation()
-            }
-        } message: {
-            Text(
-                store.pendingResolveAllowsReplacement
-                    ? "除“保留当前内容”外，其余选项会替换当前文件内容，且无法由 SvnDock 撤销。"
-                    : "属性或树冲突只能保留当前工作状态并标记为已解决。"
-            )
         }
         .alert("添加 SVN 忽略规则？", isPresented: $store.isPresentingIgnoreConfirmation) {
             Button("取消", role: .cancel) {

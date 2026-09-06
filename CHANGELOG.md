@@ -7,6 +7,10 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Conflict review sheets show exact paths, conflict types, current diffs and
+  strategy-specific guidance. Whole-file replacement requires explicit consent;
+  mixed selections preserve their eligible conflict subset. Resolve outcomes
+  join session operation records with scope and verification details.
 - Filter loaded history by message, author and revision, combine an author
   condition, and open a repository revision directly without paging to it.
   Older-revision pagination replaces repeated HEAD queries and the 1,000-entry
@@ -47,6 +51,10 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- Resolve checks the selected nodes again under the working-copy lock before
+  reporting completion. Shallow execution leaves unselected child conflicts
+  intact and rejects external or nested working copies and escaping symlinks.
+  Failed verification is reported explicitly without automatically retrying.
 - Context-menu Add and Revert preserve selected groups and explain eligible
   subsets. Revert confirmation identifies the captured paths and directory scope.
 - Selected commits keep directory property changes shallow, validate required

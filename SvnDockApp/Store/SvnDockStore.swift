@@ -289,6 +289,8 @@ final class SvnDockStore: ObservableObject {
         pendingRemoval?.name ?? "所选目录"
     }
 
+    var pendingConflictReview: SvnDockConflictReview? { pendingResolve?.review }
+
     var pendingResolveName: String {
         pendingResolve?.displayName ?? "所选项目"
     }
@@ -1204,38 +1206,70 @@ final class SvnDockStore: ObservableObject {
         await processPendingFinderCommands()
     }
 
+    func showConflicts() {
+        guard !isInteractionBlocked else { return }
+        searchQuery = ""
+        statusFilter = .conflicts
+        inspectorTab = .diff
+        selectedEntryIDs = Set(entries.first(where: { $0.status == .conflicted }).map { [$0.id] } ?? [])
+    }
+
+    func requestResolveAllConflicts() {
+        guard !isInteractionBlocked, let workingCopy = selectedWorkingCopy else { return }
+        presentConflictReview(
+            for: workingCopy, candidates: entries.filter { $0.status == .conflicted }, finderClaim: nil
+        )
+    }
+
     func requestResolveConfirmation(
         for entry: SvnDockStatusEntry? = nil,
+        preserveSelection: Bool = false,
         allowDuringFinderRouting: Bool = false,
         finderClaim: FinderCommandClaim? = nil
     ) {
         guard allowDuringFinderRouting || !isInteractionBlocked else { return }
         guard let workingCopy = selectedWorkingCopy else { return }
-
-        let selected: [SvnDockStatusEntry]
+        let candidates: [SvnDockStatusEntry]
         if let entry {
-            selected = entries.filter { $0.id == entry.id && $0.status == .conflicted }
-        } else {
-            selected = entries.filter {
-                selectedEntryIDs.contains($0.id) && $0.status == .conflicted
+            if preserveSelection && selectedEntryIDs.contains(entry.id) {
+                candidates = selectedEntries
+            } else {
+                candidates = statusEntry(withID: entry.id).map { [$0] } ?? []
             }
+        } else {
+            candidates = selectedEntries
         }
-        guard !selected.isEmpty else {
+        presentConflictReview(for: workingCopy, candidates: candidates, finderClaim: finderClaim)
+    }
+
+    private func presentConflictReview(
+        for workingCopy: SvnDockWorkingCopy,
+        candidates: [SvnDockStatusEntry],
+        finderClaim: FinderCommandClaim?
+    ) {
+        let conflicts = candidates.filter { $0.status == .conflicted }
+            .sorted { $0.relativePath.localizedStandardCompare($1.relativePath) == .orderedAscending }
+        guard !conflicts.isEmpty else {
             present(SvnDockServiceError.noConflictedFiles, title: "无法解决冲突")
             return
         }
-
-        let allowsReplacement = selected.allSatisfy {
-            $0.nodeKind == .file && $0.conflictKinds == [.text]
-        }
         pendingResolve = PendingResolve(
-            workingCopy: workingCopy,
-            relativePaths: selected.map(\.relativePath),
-            displayName: selected.count == 1 ? selected[0].fileName : "\(selected.count) 个项目",
-            allowsFileReplacement: allowsReplacement,
+            review: SvnDockConflictReview(
+                workingCopy: workingCopy, entries: conflicts,
+                excludedSelectionCount: candidates.count - conflicts.count
+            ),
             finderClaim: finderClaim
         )
         isPresentingResolveConfirmation = true
+    }
+
+    func conflictDiff(for entry: SvnDockStatusEntry, in review: SvnDockConflictReview) async throws -> String {
+        guard pendingResolve?.review.id == review.id,
+              review.entries.contains(where: { $0.id == entry.id && $0.relativePath == entry.relativePath }),
+              workingCopies.contains(where: { $0.id == review.workingCopy.id && $0.rootURL == review.workingCopy.rootURL }) else {
+            throw SvnDockServiceError.unavailable("冲突审阅范围已变化，请重新打开。")
+        }
+        return try await service.diff(relativePath: entry.relativePath, in: review.workingCopy)
     }
 
     func cancelResolveConfirmation() {
@@ -1245,15 +1279,26 @@ final class SvnDockStore: ObservableObject {
         finalizeAwaitingFinderClaim(finderClaim, outcome: .cancelled)
     }
 
-    func confirmResolve(using resolution: SvnDockConflictResolution) {
-        guard let request = pendingResolve,
+    func confirmResolve(
+        using resolution: SvnDockConflictResolution,
+        reviewed: Bool = false,
+        reviewID: UUID? = nil
+    ) {
+        guard reviewed, let request = pendingResolve,
+              reviewID == request.review.id,
               activeOperation == nil,
-              resolution == .working || request.allowsFileReplacement else {
+              resolution == .working || request.allowsFileReplacement else { return }
+        guard workingCopies.contains(where: {
+            $0.id == request.workingCopy.id && $0.rootURL == request.workingCopy.rootURL
+        }) else {
             cancelResolveConfirmation()
+            present(SvnDockServiceError.unavailable("该工作副本已不在登记列表中，请重新选择。"), title: "无法解决冲突")
             return
         }
 
         pendingResolve = nil
+        invalidateRemoteStatus(for: request.workingCopy.id)
+        invalidateHistory(for: request.workingCopy.id)
         activeOperation = SvnDockOperationState(
             kind: .resolving,
             detail: request.displayName
@@ -1269,6 +1314,7 @@ final class SvnDockStore: ObservableObject {
         _ request: PendingResolve,
         resolution: SvnDockConflictResolution
     ) async {
+        let startedAt = Date()
         let executingClaim: FinderCommandClaim?
         do {
             executingClaim = try await markFinderClaimExecuting(request.finderClaim)
@@ -1283,6 +1329,7 @@ final class SvnDockStore: ObservableObject {
         }
 
         var succeeded = false
+        var resolutionError: Error?
         do {
             try Task.checkCancellation()
             try await service.resolve(
@@ -1292,11 +1339,13 @@ final class SvnDockStore: ObservableObject {
             )
             succeeded = true
         } catch is CancellationError {
+            resolutionError = CancellationError()
             // A conflict strategy is never retried without fresh confirmation.
             if let executingClaim {
                 await quarantineExecutedFinderClaim(executingClaim)
             }
         } catch {
+            resolutionError = error
             if let executingClaim {
                 await quarantineExecutedFinderClaim(executingClaim)
             }
@@ -1310,9 +1359,41 @@ final class SvnDockStore: ObservableObject {
         } else if succeeded, let executingClaim {
             _ = await acknowledgeFinderClaim(executingClaim, outcome: .completed)
         }
+        let outcome: SvnDockOperationRecord.Outcome
+        let summary: String
+        if succeeded, !Task.isCancelled {
+            outcome = .success
+            summary = "已核实 \(request.relativePaths.count) 项冲突标记清除；如有本地变更仍需提交"
+        } else if let verification = resolutionError as? SvnDockResolveVerificationError,
+                  case .remainingConflicts(let paths) = verification {
+            outcome = .failure
+            summary = "处理后仍有 \(paths.count) 项冲突，请刷新检查"
+        } else if resolutionError is SVNCommandBuilderError {
+            outcome = .failure
+            summary = "冲突处理未开始，请检查所选范围"
+        } else if let serviceError = resolutionError as? SvnDockServiceError,
+                  case .noConflictedFiles = serviceError {
+            outcome = .failure
+            summary = "所选冲突状态已变化，请刷新检查"
+        } else {
+            outcome = .uncertain
+            summary = "冲突处理结果待确认，请刷新检查"
+        }
+        recordOperation(.init(
+            workingCopy: request.workingCopy, actionTitle: "解决冲突", startedAt: startedAt,
+            outcome: outcome, summary: summary,
+            detail: "策略：\(resolution.displayName)\n范围：\n\(request.relativePaths.joined(separator: "\n"))"
+                + (resolutionError.map { "\n" + $0.localizedDescription } ?? "")
+                + (outcome == .uncertain ? "\n当前文件或冲突标记可能已改变。请先刷新核实，再决定后续操作；未自动重试。" : "")
+        ))
         activeOperation = nil
-        if succeeded, selectedWorkingCopyID == request.workingCopy.id {
-            await reloadSelectedWorkingCopy()
+        if !Task.isCancelled, selectedWorkingCopyID == request.workingCopy.id {
+            // Even a failed multi-path command can have changed some paths.
+            // Refresh behind the error alert without waiting for its dismissal.
+            await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
+            if statusFilter == .conflicts {
+                selectedEntryIDs = Set(entries.first(where: { $0.status == .conflicted }).map { [$0.id] } ?? [])
+            }
         }
         await processPendingFinderCommands()
     }
@@ -2942,11 +3023,12 @@ private struct PendingRevert: Sendable {
 }
 
 private struct PendingResolve: Sendable {
-    let workingCopy: SvnDockWorkingCopy
-    let relativePaths: [String]
-    let displayName: String
-    let allowsFileReplacement: Bool
+    let review: SvnDockConflictReview
     let finderClaim: FinderCommandClaim?
+    var workingCopy: SvnDockWorkingCopy { review.workingCopy }
+    var relativePaths: [String] { review.relativePaths }
+    var displayName: String { review.displayName }
+    var allowsFileReplacement: Bool { review.allowsFileReplacement }
 }
 
 private struct PendingIgnore: Sendable {

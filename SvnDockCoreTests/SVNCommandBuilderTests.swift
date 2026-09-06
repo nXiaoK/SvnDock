@@ -310,7 +310,7 @@ final class SVNCommandBuilderTests: XCTestCase {
         XCTAssertEqual(
             invocation.arguments,
             [
-                "resolve", "--accept", "working", "--non-interactive",
+                "resolve", "--accept", "working", "--depth", "empty", "--non-interactive",
                 "--", "conflicts/user@example.txt@"
             ]
         )

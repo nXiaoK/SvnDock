@@ -55,9 +55,14 @@ SvnDock does not invoke Git or intentionally modify `.git`.
   copy/move ancestry, directory properties and binary output are supported.
   Selected history entries and paths use a soft blue background with readable
   text in both light and dark appearances.
+- Review exact conflict paths, content/property/tree types and current diffs
+  before choosing a resolution. Mixed selections preserve their conflict subset;
+  whole-file replacement requires explicit consent and eligible file conflicts.
+  Resolve verifies the selected nodes afterward and records incomplete or
+  uncertain results without automatically retrying.
 - Run Update, Commit, Add, Revert, Resolve, Cleanup and safe `svn:ignore`
   workflows.
-- Review the latest 30 Update and Commit results from the bottom operation bar
+- Review the latest 30 Update, Commit and Resolve results from the bottom operation bar
   during the current run, including per-working-copy outcomes and redacted
   copyable details. Multi-copy updates continue after an individual failure.
   Interrupted or unconfirmed commits retain the draft and require checking
