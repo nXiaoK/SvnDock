@@ -9,6 +9,7 @@ final class SvnDockStore: ObservableObject {
     private static let visibleEntryBatchSize = 500
     private static let initialDirectoryChildLimit = 250
     private static let directoryChildBatchSize = 250
+    private static let historyPageSize = 100
 
     private static let finderHandoffNotification = Notification.Name(
         "com.svndock.command-handoff"
@@ -17,7 +18,10 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var workingCopies: [SvnDockWorkingCopy] = []
     @Published var selectedWorkingCopyID: UUID? {
         didSet {
-            if oldValue != selectedWorkingCopyID { clearDiff() }
+            if oldValue != selectedWorkingCopyID {
+                clearDiff()
+                clearHistory()
+            }
         }
     }
     @Published var selectedEntryIDs: Set<SvnDockStatusEntry.ID> = [] {
@@ -64,7 +68,10 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var isLoadingDiff = false
     @Published private(set) var historyEntries: [SvnDockLogEntry] = []
     @Published private(set) var historyTarget: SvnDockHistoryTarget?
-    @Published private(set) var historyLimit = 100
+    @Published private(set) var historyHasMore = false
+    @Published private(set) var historyHasLoaded = false
+    @Published private(set) var historyIsStale = false
+    @Published private(set) var isLoadingMoreHistory = false
     @Published private(set) var isLoadingHistory = false
     @Published private(set) var historyErrorMessage: String?
 
@@ -116,6 +123,20 @@ final class SvnDockStore: ObservableObject {
     private var diffLoadTask: Task<String, Error>?
     private var historyLoadTask: Task<Void, Never>?
     private var historyNeedsReload = false
+    private var historyPageRequest: HistoryPageRequest = .refresh
+    private var historyRetryRequest: HistoryPageRequest?
+
+    private enum HistoryPageRequest: Equatable {
+        case refresh
+        case older(beforeRevision: Int)
+
+        var beforeRevision: Int? {
+            switch self {
+            case .refresh: nil
+            case .older(let revision): revision
+            }
+        }
+    }
     private var isFinderQueueRecoveryPaused = false
     private var finderQueueRecoveryErrorID: UUID?
     private var isDrainingFinderQueue = false
@@ -284,8 +305,9 @@ final class SvnDockStore: ObservableObject {
     var canLoadMoreHistory: Bool {
         !isLoadingHistory
             && historyTarget != nil
-            && historyEntries.count >= historyLimit
-            && historyLimit < 1_000
+            && historyHasMore
+            && !historyIsStale
+            && (historyEntries.last?.revision ?? 0) > 1
     }
 
     private var hasBlockingPresentation: Bool {
@@ -478,6 +500,7 @@ final class SvnDockStore: ObservableObject {
             guard selectedWorkingCopyID == expectedID else { return }
             apply(loadedEntries, to: expectedID)
             invalidateRemoteStatus(for: expectedID)
+            invalidateHistory(for: expectedID)
             let metadata = try? await service.refreshWorkingCopyMetadata(for: workingCopy)
             guard selectedWorkingCopyID == expectedID,
                   let index = workingCopies.firstIndex(where: { $0.id == expectedID }) else { return }
@@ -627,7 +650,10 @@ final class SvnDockStore: ObservableObject {
         }
         let copies = workingCopies.filter { workingCopyIDs.contains($0.id) }
         guard !copies.isEmpty else { return false }
-        for copy in copies { invalidateRemoteStatus(for: copy.id) }
+        for copy in copies {
+            invalidateRemoteStatus(for: copy.id)
+            invalidateHistory(for: copy.id)
+        }
 
         let detail = copies.count == 1 ? copies[0].name : "\(copies.count) 个工作副本"
         var allSucceeded = true
@@ -720,6 +746,7 @@ final class SvnDockStore: ObservableObject {
         )
         pendingCommitClaim = nil
         invalidateRemoteStatus(for: workingCopy.id)
+        invalidateHistory(for: workingCopy.id)
         activeOperation = SvnDockOperationState(
             kind: .committing,
             detail: workingCopy.name
@@ -1814,7 +1841,7 @@ final class SvnDockStore: ObservableObject {
            let target = historyTarget,
            target.workingCopy.id == workingCopy.id,
            historyTargetMatchesCurrentSelection(target) {
-            await loadHistory(target: target, limit: historyLimit)
+            await loadHistory(target: target, request: historyRetryRequest ?? .refresh)
             return
         }
 
@@ -1852,15 +1879,21 @@ final class SvnDockStore: ObservableObject {
             await showHistoryForSelection()
             return
         }
-        await loadHistory(target: target, limit: historyLimit)
+        await loadHistory(target: target, request: .refresh)
+    }
+
+    func retryHistory() async {
+        guard let target = historyTarget else {
+            await showHistoryForSelection()
+            return
+        }
+        await loadHistory(target: target, request: historyRetryRequest ?? .refresh)
     }
 
     func loadMoreHistory() async {
-        guard let target = historyTarget, canLoadMoreHistory else { return }
-        await loadHistory(
-            target: target,
-            limit: min(historyLimit + 100, 1_000)
-        )
+        guard let target = historyTarget, canLoadMoreHistory,
+              let revision = historyEntries.last?.revision else { return }
+        await loadHistory(target: target, request: .older(beforeRevision: revision))
     }
 
     private func showHistory(
@@ -1881,61 +1914,63 @@ final class SvnDockStore: ObservableObject {
             source: source
         )
         inspectorTab = .history
-        // The routing/presentation gate was checked above. Skip the duplicate
-        // asynchronous wait so the target and task are published before
-        // SwiftUI can launch InspectorView's task for the newly selected tab.
-        await loadHistory(
-            target: target,
-            limit: 100,
-            allowDuringFinderRouting: true
-        )
+        // Returning to the same target keeps its loaded pages. The explicit
+        // refresh action starts a new first page at HEAD.
+        if historyTarget?.id == target.id, historyHasLoaded, !historyNeedsReload {
+            return
+        }
+        let request = historyTarget?.id == target.id ? historyRetryRequest ?? .refresh : .refresh
+        // Publish the target before InspectorView can launch its matching task.
+        await loadHistory(target: target, request: request, allowDuringFinderRouting: true)
     }
 
     private func loadHistory(
         target: SvnDockHistoryTarget,
-        limit: Int,
+        request: HistoryPageRequest,
         allowDuringFinderRouting: Bool = false
     ) async {
         if !allowDuringFinderRouting,
            !(await waitForFinderRoutingToFinish()) {
             return
         }
+        guard !Task.isCancelled, selectedWorkingCopyID == target.workingCopy.id else { return }
         if isLoadingHistory,
            historyTarget?.id == target.id,
-           historyLimit == limit,
+           historyPageRequest == request,
            let existingTask = historyLoadTask {
             let existingGeneration = historyLoadGeneration
             await existingTask.value
             guard !Task.isCancelled else { return }
-
-            // Inspector task replacement can cancel the shared request just
-            // before a new task asks for the same target. A completed request
-            // (including a valid empty history) is reusable; a cancelled one
-            // must be restarted if nobody else has already taken ownership.
-            guard existingTask.isCancelled else { return }
-            guard historyLoadGeneration == existingGeneration,
+            // Restart a cancelled shared request only if a newer caller has
+            // not already taken ownership of its target and page.
+            guard existingTask.isCancelled,
+                  historyLoadGeneration == existingGeneration,
                   historyTarget?.id == target.id,
-                  historyLimit == limit,
+                  historyPageRequest == request,
                   !isLoadingHistory else { return }
         }
 
         historyLoadTask?.cancel()
+        if historyTarget?.id != target.id {
+            historyEntries = []
+            historyHasLoaded = false
+            historyHasMore = false
+            historyIsStale = false
+        }
         let generation = UUID()
         historyLoadGeneration = generation
         historyNeedsReload = false
         historyTarget = target
-        historyLimit = limit
-        historyEntries = []
+        historyPageRequest = request
+        historyRetryRequest = nil
         historyErrorMessage = nil
         isLoadingHistory = true
+        isLoadingMoreHistory = request.beforeRevision != nil
+        if request == .refresh { historyIsStale = historyHasLoaded }
 
         let task = Task { [weak self] in
             guard let self else { return }
-            await self.performHistoryLoad(
-                target: target,
-                limit: limit,
-                generation: generation
-            )
+            await self.performHistoryLoad(target: target, request: request, generation: generation)
         }
         historyLoadTask = task
         await withTaskCancellationHandler {
@@ -1947,56 +1982,100 @@ final class SvnDockStore: ObservableObject {
 
     private func performHistoryLoad(
         target: SvnDockHistoryTarget,
-        limit: Int,
+        request: HistoryPageRequest,
         generation: UUID
     ) async {
         do {
-            let loaded = try await service.history(
+            // One look-ahead row distinguishes a full final page from a page
+            // with more visible history, even when revision numbers have gaps.
+            let loaded = try await service.historyPage(
                 for: target.workingCopy,
                 relativePaths: target.relativePaths,
-                limit: limit
+                limit: Self.historyPageSize + 1,
+                beforeRevision: request.beforeRevision
             )
+            try Task.checkCancellation()
             guard historyLoadGeneration == generation,
-                  historyTarget?.id == target.id else { return }
-            historyEntries = loaded
-            isLoadingHistory = false
-            historyLoadTask = nil
+                  historyTarget?.id == target.id,
+                  selectedWorkingCopyID == target.workingCopy.id else { return }
+            guard loaded.allSatisfy({ entry in
+                entry.revision > 0 && request.beforeRevision.map { entry.revision < $0 } != false
+            }) else {
+                throw SvnDockServiceError.unavailable("返回的历史记录超出了请求版本范围，请重试。")
+            }
+            var seen = Set<Int>()
+            let unique = loaded.sorted { $0.revision > $1.revision }
+                .filter { seen.insert($0.revision).inserted }
+            let page = Array(unique.prefix(Self.historyPageSize))
+            if request == .refresh {
+                historyEntries = page
+            } else {
+                let existing = Set(historyEntries.map(\.revision))
+                historyEntries.append(contentsOf: page.filter { !existing.contains($0.revision) })
+            }
+            historyHasMore = loaded.count > Self.historyPageSize
+                && (historyEntries.last?.revision ?? 0) > 1
+            historyHasLoaded = true
+            historyIsStale = false
+            finishHistoryLoad()
             historyNeedsReload = false
+            historyRetryRequest = nil
         } catch is CancellationError {
             guard historyLoadGeneration == generation else { return }
-            isLoadingHistory = false
-            historyLoadTask = nil
+            finishHistoryLoad()
             historyNeedsReload = true
+            historyRetryRequest = request
         } catch {
             guard historyLoadGeneration == generation,
                   historyTarget?.id == target.id else { return }
-            historyEntries = []
+            // A failed page must never advance its cursor or discard useful
+            // rows. Retrying repeats this exact page, including failed refreshes.
             historyErrorMessage = error.localizedDescription
-            isLoadingHistory = false
-            historyLoadTask = nil
+            historyRetryRequest = request
+            finishHistoryLoad()
             historyNeedsReload = false
         }
     }
 
+    private func finishHistoryLoad() {
+        isLoadingHistory = false
+        isLoadingMoreHistory = false
+        historyLoadTask = nil
+    }
+
     private func cancelHiddenHistoryLoad() {
         guard let task = historyLoadTask else { return }
-        historyLoadTask = nil
+        historyRetryRequest = historyPageRequest
         historyLoadGeneration = nil
         historyNeedsReload = true
-        isLoadingHistory = false
+        finishHistoryLoad()
         task.cancel()
     }
 
     private func clearHistory() {
         historyLoadTask?.cancel()
-        historyLoadTask = nil
         historyLoadGeneration = nil
         historyNeedsReload = false
+        historyPageRequest = .refresh
+        historyRetryRequest = nil
         historyTarget = nil
         historyEntries = []
-        historyLimit = 100
+        historyHasMore = false
+        historyHasLoaded = false
+        historyIsStale = false
         historyErrorMessage = nil
-        isLoadingHistory = false
+        finishHistoryLoad()
+    }
+
+    private func invalidateHistory(for workingCopyID: UUID) {
+        guard historyTarget?.workingCopy.id == workingCopyID else { return }
+        historyLoadTask?.cancel()
+        historyLoadGeneration = nil
+        historyRetryRequest = .refresh
+        historyNeedsReload = true
+        historyIsStale = historyHasLoaded
+        historyErrorMessage = nil
+        finishHistoryLoad()
     }
 
     @discardableResult

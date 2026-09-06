@@ -390,7 +390,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
     case revert(paths: [String], depth: SVNDepth)
     case cleanup
     case diff(paths: [String], depth: SVNDepth? = nil)
-    case log(paths: [String], limit: Int)
+    case log(paths: [String], limit: Int, beforeRevision: Int? = nil)
     case revisionLog(repositoryRoot: URL, revision: Int)
     case revisionSummary(repositoryRoot: URL, revision: Int)
     case revisionDiff(repositoryRoot: URL, revision: Int, change: SVNChangedPath)

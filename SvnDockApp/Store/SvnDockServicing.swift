@@ -23,6 +23,12 @@ protocol SvnDockServicing: Sendable {
         relativePaths: [String],
         limit: Int
     ) async throws -> [SvnDockLogEntry]
+    func historyPage(
+        for workingCopy: SvnDockWorkingCopy,
+        relativePaths: [String],
+        limit: Int,
+        beforeRevision: Int?
+    ) async throws -> [SvnDockLogEntry]
     func revisionDetails(revision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SVNRevisionDetails
     func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL,
                       in workingCopy: SvnDockWorkingCopy) async throws -> String
@@ -60,6 +66,18 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func historyPage(
+        for workingCopy: SvnDockWorkingCopy,
+        relativePaths: [String],
+        limit: Int,
+        beforeRevision: Int?
+    ) async throws -> [SvnDockLogEntry] {
+        guard beforeRevision == nil else {
+            throw SvnDockServiceError.unavailable("当前服务不支持加载更早的提交历史。")
+        }
+        return try await history(for: workingCopy, relativePaths: relativePaths, limit: limit)
+    }
+
     func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy {
         workingCopy
     }

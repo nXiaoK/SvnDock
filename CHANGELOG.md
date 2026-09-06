@@ -7,6 +7,12 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Filter loaded history by message, author and revision, combine an author
+  condition, and open a repository revision directly without paging to it.
+  Older-revision pagination replaces repeated HEAD queries and the 1,000-entry
+  cap; failed pages preserve rows and retry their original range.
+  Compact inspectors show a focused revision detail with return navigation,
+  preserving the filtered list and selection when space is limited.
 - Session operation records retain the latest 30 Update and Commit outcomes,
   with per-working-copy details and credential redaction before display or copying.
   Multi-copy updates continue after individual failures; cancellation stops the

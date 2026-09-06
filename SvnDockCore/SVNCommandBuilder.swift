@@ -268,14 +268,30 @@ public struct SVNCommandBuilder: Sendable {
                 arguments.append(contentsOf: ["--", path])
             }
 
-        case let .log(paths, limit):
+        case let .log(paths, limit, beforeRevision):
             guard (1...10_000).contains(limit) else {
                 throw SVNCommandBuilderError.invalidLogLimit(limit)
             }
+            let revisionRange: String
+            if let beforeRevision {
+                guard beforeRevision >= 0 else {
+                    throw SVNCommandBuilderError.invalidRevision(beforeRevision)
+                }
+                guard beforeRevision > 1 else {
+                    throw SVNCommandBuilderError.invalidArgument("log cursor has no earlier revisions")
+                }
+                // The exclusive cursor is reduced only after validation; even
+                // Int.min cannot overflow, and Int.max remains safe.
+                revisionRange = "\(beforeRevision - 1):1"
+            } else {
+                revisionRange = "HEAD:1"
+            }
             // For a working-copy path, Subversion otherwise defaults to
             // BASE:1 and hides commits newer than the local checkout.
+            // Keep local peg identity for older pages so copies and moves keep
+            // following the selected node's ancestry rather than a URL at HEAD.
             arguments = [
-                "log", "--xml", "--revision", "HEAD:1",
+                "log", "--xml", "--revision", revisionRange,
                 "--limit", String(limit)
             ]
             appendCommonOptions(to: &arguments)

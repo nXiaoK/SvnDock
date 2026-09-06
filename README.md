@@ -45,6 +45,10 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Commit drafts retain their message, included paths and preview per working
   copy across closing and restarting. Filter the checklist by path or show only
   included items; new changes do not silently join a saved selection.
+- Filter loaded commit records by message, author or revision, combine an author
+  condition, or open a repository revision directly with `r123` / `123`.
+  History loads 100 records per page using an older-revision cursor, with no
+  1,000-record browsing cap; failed reads preserve rows and retry the same page.
 - Single-click a history entry to update its changed paths, then single-click
   a changed path to preview its historical diff. Double-click either list to
   open a larger commit detail window. Added/deleted/replaced paths,

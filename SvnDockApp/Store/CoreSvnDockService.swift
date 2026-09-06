@@ -280,8 +280,27 @@ actor CoreSvnDockService: SvnDockServicing {
         relativePaths: [String],
         limit: Int
     ) async throws -> [SvnDockLogEntry] {
+        try await historyPage(for: workingCopy, relativePaths: relativePaths, limit: limit, beforeRevision: nil)
+    }
+
+    func historyPage(
+        for workingCopy: SvnDockWorkingCopy,
+        relativePaths: [String],
+        limit: Int,
+        beforeRevision: Int?
+    ) async throws -> [SvnDockLogEntry] {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        let result = try await run(.log(paths: relativePaths, limit: limit), in: coreCopy)
+        if let beforeRevision, beforeRevision <= 1 {
+            guard beforeRevision >= 0 else { throw SVNCommandBuilderError.invalidRevision(beforeRevision) }
+            // The first real SVN revision has no earlier page. Validate the
+            // remaining inputs before returning, without launching a process.
+            let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+            _ = try builder.makeInvocation(for: .log(paths: relativePaths, limit: limit), in: coreCopy)
+            return []
+        }
+        let result = try await run(
+            .log(paths: relativePaths, limit: limit, beforeRevision: beforeRevision), in: coreCopy
+        )
         return try SVNXMLParser.parseLog(result.standardOutput).map {
             SvnDockLogEntry(
                 revision: $0.revision,
