@@ -2,7 +2,7 @@
 
 [English](README.md)
 
-![版本](https://img.shields.io/badge/version-0.3.0-blue)
+![版本](https://img.shields.io/badge/version-0.4.0-blue)
 ![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)
 ![Swift 工具链](https://img.shields.io/badge/Swift_6-toolchain-orange?logo=swift)
 ![许可证](https://img.shields.io/badge/license-MIT-green)
@@ -11,7 +11,7 @@ SvnDock 是一款原生 macOS SVN 客户端，专注多工作副本管理与 Fin
 右键集成。它把常用 SVN 操作放到文件旁边，不需要依赖 IDE。SVN 工作副本中也可以
 同时存在 Git 仓库：SvnDock 不会调用 Git，也不会主动修改 `.git`。
 
-> SvnDock 目前处于开发预览阶段。0.3.0 已覆盖主要工作副本操作和 Finder Sync
+> SvnDock 目前处于开发预览阶段。0.4.0 已覆盖主要工作副本操作和 Finder Sync
 > 扩展。[GitHub Releases](https://github.com/nXiaoK/SvnDock/releases) 提供自动构建的
 > arm64、x64 DMG 测试包，使用可跨账号运行的 ad-hoc 签名，尚未配置 Developer ID
 > 签名与 Apple 公证。
