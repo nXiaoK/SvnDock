@@ -13,6 +13,7 @@ struct HistoryRevisionView: View {
     @StateObject private var model: HistoryRevisionModel
     @State private var reloadID = UUID()
     @State private var showsMessage = false
+    @State private var showsChangedFiles = false
     @Environment(\.openWindow) private var openWindow
 
     init(store: SvnDockStore, request: SvnDockRevisionRequest, expanded: Bool = false) {
@@ -22,39 +23,47 @@ struct HistoryRevisionView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            revisionHeader
-            Divider()
-            if model.isLoading {
-                ProgressView("正在读取本次提交的变更文件…")
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let error = model.errorMessage {
-                errorState("无法读取提交详情", message: error) { reloadID = UUID() }
-            } else if let details = model.details, details.changes.isEmpty {
-                ContentUnavailableView("没有可显示的路径", systemImage: "doc.text",
-                    description: Text("该版本没有可访问的文件变更，或当前账号无法读取变更路径。"))
-            } else if model.details != nil {
-                if expanded {
-                    HSplitView {
-                        changedFiles.frame(minWidth: 240, idealWidth: 310, maxWidth: 480)
-                        filePreview.frame(minWidth: 480)
+        GeometryReader { geometry in
+            // The embedded inspector can have less than 400 pt of vertical
+            // space. Keep its diff in the split view and move path browsing
+            // into a popover before the list squeezes out the diff body.
+            let compact = !expanded && geometry.size.height < 560
+            VStack(spacing: 0) {
+                revisionHeader(compact: compact)
+                Divider()
+                if model.isLoading {
+                    ProgressView("正在读取本次提交的变更文件…")
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else if let error = model.errorMessage {
+                    errorState("无法读取提交详情", message: error) { reloadID = UUID() }
+                } else if let details = model.details, details.changes.isEmpty {
+                    ContentUnavailableView("没有可显示的路径", systemImage: "doc.text",
+                        description: Text("该版本没有可访问的文件变更，或当前账号无法读取变更路径。"))
+                } else if model.details != nil {
+                    if expanded {
+                        HSplitView {
+                            changedFiles.frame(minWidth: 240, idealWidth: 310, maxWidth: 480)
+                            filePreview(compact: false).frame(minWidth: 480)
+                        }
+                    } else {
+                        VSplitView {
+                            if !compact {
+                                changedFiles.frame(minHeight: 90, idealHeight: 130, maxHeight: 220)
+                            }
+                            filePreview(compact: compact).frame(minHeight: 160)
+                        }
                     }
                 } else {
-                    VSplitView {
-                        changedFiles.frame(minHeight: 90, idealHeight: 130, maxHeight: 220)
-                        filePreview.frame(minHeight: 160)
-                    }
+                    Color.clear
                 }
-            } else {
-                Color.clear
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .task(id: LoadID(request: request, reloadID: reloadID)) { await model.load(request) }
         .onDisappear { model.cancel() }
     }
 
-    private var revisionHeader: some View {
+    private func revisionHeader(compact: Bool) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 8) {
                 Text(verbatim: "r\(request.revision)")
@@ -69,6 +78,9 @@ struct HistoryRevisionView: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 0)
+                if compact, let entry = model.details?.entry {
+                    messageButton(entry.message)
+                }
                 if !expanded {
                     Button {
                         openExpanded(path: model.selectedPath)
@@ -88,40 +100,77 @@ struct HistoryRevisionView: View {
                     .accessibilityLabel("刷新提交详情")
             }
             .buttonStyle(SvnDockPlainButtonStyle())
-            if let entry = model.details?.entry {
+            if !compact, let entry = model.details?.entry {
                 HStack(alignment: .top, spacing: 6) {
                     Text(entry.message.isEmpty ? "（无提交说明）" : entry.message)
                         .font(.callout)
                         .lineLimit(expanded ? 2 : 1)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .help(entry.message)
-                    Button { showsMessage = true } label: {
-                        Image(systemName: "text.bubble")
-                            .frame(width: 32, height: 32)
-                    }
-                        .buttonStyle(SvnDockPlainButtonStyle())
-                        .help("查看完整提交说明")
-                        .accessibilityLabel("完整提交说明")
-                        .popover(isPresented: $showsMessage) {
-                            ScrollView {
-                                Text(entry.message.isEmpty ? "（无提交说明）" : entry.message)
-                                    .textSelection(.enabled)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(16)
-                            }
-                            .frame(width: 440, height: 240)
-                        }
+                    messageButton(entry.message)
                 }
             }
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.vertical, compact ? 4 : 8)
         .background(.bar)
         .contextMenu {
             Button("复制版本号") { copy("r\(request.revision)") }
             if let message = model.details?.entry.message {
                 Button("复制提交说明") { copy(message) }
             }
+        }
+    }
+
+    private func messageButton(_ message: String) -> some View {
+        Button { showsMessage = true } label: {
+            Image(systemName: "text.bubble")
+                .frame(width: 32, height: 32)
+        }
+        .buttonStyle(SvnDockPlainButtonStyle())
+        .help(message.isEmpty ? "查看完整提交说明" : "查看完整提交说明：\(message)")
+        .accessibilityLabel("完整提交说明")
+        .popover(isPresented: $showsMessage) {
+            ScrollView {
+                Text(message.isEmpty ? "（无提交说明）" : message)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .frame(width: 440, height: 240)
+        }
+    }
+
+    private var changedFilesButton: some View {
+        Button { showsChangedFiles = true } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "list.bullet")
+                Text("\(model.details?.changes.count ?? 0) 项")
+                Image(systemName: "chevron.down").font(.system(size: 8, weight: .semibold))
+            }
+            .font(.caption)
+            .foregroundStyle(SvnDockTheme.accent)
+            .padding(.horizontal, 6)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(SvnDockPlainButtonStyle())
+        .help("筛选并选择本次提交的变更路径")
+        .accessibilityLabel("选择提交路径，共 \(model.details?.changes.count ?? 0) 项")
+        .accessibilityIdentifier("history.chooseChangedPath")
+        .popover(isPresented: $showsChangedFiles, arrowEdge: .bottom) {
+            VStack(spacing: 0) {
+                HStack {
+                    Text("提交路径").font(.system(size: 14, weight: .semibold))
+                    Spacer()
+                    Button("完成") { showsChangedFiles = false }
+                        .buttonStyle(SvnDockButtonStyle())
+                }
+                .padding(12)
+                Divider()
+                changedFiles
+            }
+            .frame(width: 460, height: 360)
         }
     }
 
@@ -205,10 +254,13 @@ struct HistoryRevisionView: View {
         }
     }
 
-    private var filePreview: some View {
+    private func filePreview(compact: Bool) -> some View {
         VStack(spacing: 0) {
-            if let change = model.selectedChange {
-                HStack(alignment: .top, spacing: 8) {
+            // Keep the path popover's host independent of selectedChange:
+            // filtering to zero matches clears selection while the user types.
+            HStack(alignment: .top, spacing: 8) {
+                if compact { changedFilesButton }
+                if let change = model.selectedChange {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(change.path)
                             .font(.caption.weight(.medium))
@@ -224,31 +276,40 @@ struct HistoryRevisionView: View {
                                 .help("\(source) @ r\(revision)" + (change.isMove ? "；SVN 将移动记录为复制与删除。" : ""))
                         }
                     }
-                    Spacer(minLength: 0)
-                    Button { model.moveSelection(by: -1) } label: {
-                        Image(systemName: "chevron.up")
-                            .frame(width: 32, height: 32)
-                    }
-                        .disabled((model.selectionIndex ?? 0) == 0)
-                        .help("上一项")
-                        .accessibilityLabel("上一个变更文件")
-                    Button { model.moveSelection(by: 1) } label: {
-                        Image(systemName: "chevron.down")
-                            .frame(width: 32, height: 32)
-                    }
-                        .disabled((model.selectionIndex ?? 0) + 1 >= model.filteredChanges.count)
-                        .help("下一项")
-                        .accessibilityLabel("下一个变更文件")
-                    Button { model.select(change.path, force: true) } label: {
-                        Image(systemName: "arrow.clockwise")
-                            .frame(width: 32, height: 32)
-                    }
-                        .disabled(model.isLoadingDiff)
-                        .help("重新读取该文件的历史差异")
+                } else {
+                    Text("选择变更路径")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(height: 32)
                 }
-                .buttonStyle(SvnDockPlainButtonStyle())
-                .padding(8)
-                Divider()
+                Spacer(minLength: 0)
+                Button { model.moveSelection(by: -1) } label: {
+                    Image(systemName: "chevron.up")
+                        .frame(width: 32, height: 32)
+                }
+                    .disabled(model.selectedChange == nil || (model.selectionIndex ?? 0) == 0)
+                    .help("上一项")
+                    .accessibilityLabel("上一个变更文件")
+                Button { model.moveSelection(by: 1) } label: {
+                    Image(systemName: "chevron.down")
+                        .frame(width: 32, height: 32)
+                }
+                    .disabled(model.selectedChange == nil || (model.selectionIndex ?? 0) + 1 >= model.filteredChanges.count)
+                    .help("下一项")
+                    .accessibilityLabel("下一个变更文件")
+                Button {
+                    if let change = model.selectedChange { model.select(change.path, force: true) }
+                } label: {
+                    Image(systemName: "arrow.clockwise")
+                        .frame(width: 32, height: 32)
+                }
+                    .disabled(model.selectedChange == nil || model.isLoadingDiff)
+                    .help("重新读取该文件的历史差异")
+            }
+            .buttonStyle(SvnDockPlainButtonStyle())
+            .padding(8)
+            Divider()
+            if let change = model.selectedChange {
                 if model.isLoadingDiff {
                     ProgressView("正在读取 r\(request.revision) 的文件差异…")
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
