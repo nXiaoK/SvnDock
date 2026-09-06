@@ -101,17 +101,25 @@ public struct BadgeSnapshot: Codable, Hashable, Sendable {
     /// cleanup for an unregistered nested working copy from deleting badges a
     /// live parent has since refreshed.
     public let entryOwners: [String: UUID]?
+    /// Exact SVN node states; `entries` may instead show descendant summaries.
+    public let directEntries: [String: BadgeKind]?
+    /// A refresh of one root must never make another root appear fresh.
+    public let perRootUpdatedAt: [String: Date]?
 
     public init(
         schemaVersion: Int = FinderSharedSchema.currentVersion,
         generatedAt: Date = Date(),
         entries: [String: BadgeKind],
-        entryOwners: [String: UUID]? = nil
+        entryOwners: [String: UUID]? = nil,
+        directEntries: [String: BadgeKind]? = nil,
+        perRootUpdatedAt: [String: Date]? = nil
     ) {
         self.schemaVersion = schemaVersion
         self.generatedAt = generatedAt
         self.entries = entries
         self.entryOwners = entryOwners
+        self.directEntries = directEntries
+        self.perRootUpdatedAt = perRootUpdatedAt
     }
 }
 
@@ -373,9 +381,10 @@ public actor FinderSharedStore {
                 throw FinderSharedStoreError.badgeOwnerWithoutEntry(path)
             }
         }
+        try validateBadgeMetadata(snapshot)
         try ensureBaseDirectory()
         try withBadgeSnapshotLock {
-            try encode(snapshot).write(to: badgeSnapshotURL, options: .atomic)
+            try writeBadgeSnapshotUnlocked(snapshot)
         }
     }
 
@@ -385,11 +394,15 @@ public actor FinderSharedStore {
     public func replaceBadgeEntries(
         forWorkingCopyID workingCopyID: UUID,
         underWorkingCopyRoot rootPath: String,
-        with replacement: [String: BadgeKind]
+        with replacement: [String: BadgeKind],
+        directEntries: [String: BadgeKind]? = nil,
+        updatedAt: Date = Date()
     ) throws {
         try mutateBadgeEntries(
             underWorkingCopyRoot: rootPath,
             replacement: replacement,
+            directReplacement: directEntries,
+            updatedAt: updatedAt,
             mode: .registered(id: workingCopyID)
         )
     }
@@ -404,6 +417,8 @@ public actor FinderSharedStore {
         try mutateBadgeEntries(
             underWorkingCopyRoot: rootPath,
             replacement: [:],
+            directReplacement: nil,
+            updatedAt: Date(),
             mode: .unregistered(id: workingCopyID)
         )
     }
@@ -416,6 +431,8 @@ public actor FinderSharedStore {
     private func mutateBadgeEntries(
         underWorkingCopyRoot rootPath: String,
         replacement: [String: BadgeKind],
+        directReplacement: [String: BadgeKind]?,
+        updatedAt: Date,
         mode: BadgeMutationMode
     ) throws {
         try validateAbsolute(rootPath)
@@ -436,6 +453,15 @@ public actor FinderSharedStore {
                 )
             }
             standardizedReplacement[standardizedPath] = badge
+        }
+        var standardizedDirect: [String: BadgeKind] = [:]
+        for (path, badge) in directReplacement ?? [:] {
+            try validateAbsolute(path)
+            let path = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard standardizedReplacement[path] != nil else {
+                throw FinderSharedStoreError.badgeOwnerWithoutEntry(path)
+            }
+            standardizedDirect[path] = badge
         }
 
         try ensureBaseDirectory()
@@ -471,11 +497,16 @@ public actor FinderSharedStore {
                 }
             var entries: [String: BadgeKind]
             var owners: [String: UUID]
+            var direct: [String: BadgeKind]
+            var updatedByRoot: [String: Date]
             if FileManager.default.fileExists(atPath: badgeSnapshotURL.path) {
                 let snapshot = try decode(BadgeSnapshot.self, from: badgeSnapshotURL)
                 try validateSchema(snapshot.schemaVersion)
                 entries = snapshot.entries
                 owners = snapshot.entryOwners ?? [:]
+                direct = snapshot.directEntries ?? [:]
+                updatedByRoot = snapshot.perRootUpdatedAt ?? [:]
+                try validateBadgeMetadata(snapshot)
                 for path in entries.keys {
                     try validateAbsolute(path)
                 }
@@ -488,6 +519,8 @@ public actor FinderSharedStore {
             } else {
                 entries = [:]
                 owners = [:]
+                direct = [:]
+                updatedByRoot = [:]
             }
 
             switch mode {
@@ -501,6 +534,7 @@ public actor FinderSharedStore {
                         })
                 }
                 owners = owners.filter { entries[$0.key] != nil }
+                direct = direct.filter { entries[$0.key] != nil }
                 let ownedReplacement = standardizedReplacement.filter { path, _ in
                     !nestedRoots.contains(where: {
                         Self.path(path, isInside: $0.path)
@@ -509,7 +543,11 @@ public actor FinderSharedStore {
                 entries.merge(ownedReplacement) { _, replacement in replacement }
                 for path in ownedReplacement.keys {
                     owners[path] = id
+                    // A normal sparse App refresh intentionally drops cached
+                    // green nodes until the next observed-directory refresh.
+                    direct[path] = standardizedDirect[path]
                 }
+                updatedByRoot[standardizedRoot] = updatedAt
 
             case let .unregistered(id):
                 // Remove only entries that still belong to the retired UUID.
@@ -529,12 +567,14 @@ public actor FinderSharedStore {
                     })
                 }
                 owners = owners.filter { entries[$0.key] != nil }
+                direct = direct.filter { entries[$0.key] != nil }
+                if !enabledRoots.contains(where: { $0.path == standardizedRoot }) {
+                    updatedByRoot.removeValue(forKey: standardizedRoot)
+                }
             }
 
-            try encode(BadgeSnapshot(entries: entries, entryOwners: owners)).write(
-                to: badgeSnapshotURL,
-                options: .atomic
-            )
+            try writeBadgeSnapshotUnlocked(BadgeSnapshot(entries: entries, entryOwners: owners,
+                directEntries: direct, perRootUpdatedAt: updatedByRoot))
         }
     }
 
@@ -553,7 +593,26 @@ public actor FinderSharedStore {
                 throw FinderSharedStoreError.badgeOwnerWithoutEntry(path)
             }
         }
+        try validateBadgeMetadata(snapshot)
         return snapshot
+    }
+
+    private func validateBadgeMetadata(_ snapshot: BadgeSnapshot) throws {
+        for path in snapshot.directEntries?.keys ?? Dictionary<String, BadgeKind>().keys {
+            try validateAbsolute(path)
+            guard snapshot.entries[path] != nil else { throw FinderSharedStoreError.badgeOwnerWithoutEntry(path) }
+        }
+        for path in snapshot.perRootUpdatedAt?.keys ?? Dictionary<String, Date>().keys {
+            try validateAbsolute(path)
+        }
+    }
+
+    private func writeBadgeSnapshotUnlocked(_ snapshot: BadgeSnapshot) throws {
+        let data = try encode(snapshot)
+        // Finder's reader rejects larger documents. Preserve the previous
+        // snapshot and its timestamps instead of publishing unreadable state.
+        guard data.count <= 8 * 1_024 * 1_024 else { throw CocoaError(.fileWriteOutOfSpace) }
+        try data.write(to: badgeSnapshotURL, options: .atomic)
     }
 
     /// Adds one immutable command file. A UUID filename avoids cross-process

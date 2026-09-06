@@ -11,6 +11,8 @@ protocol SvnDockServicing: Sendable {
     func unregisterWorkingCopy(id: UUID) async throws
 
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot
+    func refreshFinderBadges(for workingCopy: SvnDockWorkingCopy, directoryPaths: [String], preferredPaths: [String]) async throws
+    func finderTarget(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFinderTarget
     func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy
     func checkRemoteStatus(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockRemoteStatusSnapshot
     func directoryChildren(
@@ -69,6 +71,18 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func finderTarget(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFinderTarget {
+        throw SvnDockServiceError.unavailable("当前服务不支持读取 Finder 所选项目。")
+    }
+
+    func refreshFinderBadges(for workingCopy: SvnDockWorkingCopy, directoryPaths: [String]) async throws {
+        try await refreshFinderBadges(for: workingCopy, directoryPaths: directoryPaths, preferredPaths: [])
+    }
+
+    func refreshFinderBadges(for workingCopy: SvnDockWorkingCopy, directoryPaths: [String], preferredPaths: [String]) async throws {
+        throw SvnDockServiceError.unavailable("当前服务不支持后台刷新 Finder 状态。")
+    }
+
     func ignoredEntries(for workingCopy: SvnDockWorkingCopy) async throws -> [SvnDockStatusEntry] {
         throw SvnDockServiceError.unavailable("当前服务不支持查看已忽略项目。")
     }

@@ -24,6 +24,14 @@ final class FinderSync: FIFinderSync {
     /// drop `representedObject`. A bounded token map keeps each menu tied to
     /// its own immutable selection instead of relying on one global snapshot.
     private var retainedMenuPayloads: [Int: RetainedCommandMenuPayload] = [:]
+    // These fields are confined to the main thread, including polling and
+    // callbacks forwarded from Finder's delivery thread.
+    private var badgeTracker = FinderBadgeTracker()
+    private let badgeRequestInstanceID = UUID()
+    private var badgePollTimer: Timer?
+    private var badgePollTarget: FinderBadgePollTarget?
+    private var lastBadgeRequestAt = Date.distantPast
+    private var lastBadgeRequestError: String?
 
     override init() {
         let container = SharedContainer()
@@ -43,24 +51,32 @@ final class FinderSync: FIFinderSync {
             object: nil,
             suspensionBehavior: .deliverImmediately
         )
+        let target = FinderBadgePollTarget(owner: self)
+        let timer = Timer(timeInterval: 5, target: target, selector: #selector(FinderBadgePollTarget.fire(_:)),
+                          userInfo: nil, repeats: true)
+        badgePollTarget = target
+        badgePollTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
     deinit {
+        badgePollTimer?.invalidate()
+        try? container.writeBadgeRequest(instanceID: badgeRequestInstanceID, directories: [])
         DistributedNotificationCenter.default().removeObserver(self)
     }
 
     override func beginObservingDirectory(at url: URL) {
         // SVN status is produced by the main app/agent and arrives as a badge
         // snapshot. Starting observation intentionally performs no repository I/O.
-        reloadSharedState()
+        performOnMain(#selector(observeDirectory(_:)), value: url)
     }
 
-    override func endObservingDirectory(at url: URL) {}
+    override func endObservingDirectory(at url: URL) {
+        performOnMain(#selector(stopObservingDirectory(_:)), value: url)
+    }
 
     override func requestBadgeIdentifier(for url: URL) {
-        let identifier = state.badge(for: url)?.finderBadgeIdentifier
-            ?? FinderBadgeIdentifier.none
-        controller.setBadgeIdentifier(identifier, for: url)
+        performOnMain(#selector(applyBadgeRequest(_:)), value: url)
     }
 
     override func menu(for menuKind: FIMenuKind) -> NSMenu {
@@ -81,22 +97,39 @@ final class FinderSync: FIFinderSync {
 
         let payload = retainCommandMenuPayload(urls: selection.urls, root: root)
         let statuses = selection.urls.compactMap(state.badge(for:))
+        let isFresh = selection.urls.allSatisfy { state.isFresh(for: $0) }
         let isRoot = selection.urls.count == 1 && selection.urls[0].path == root.path
         let isSingleItem = selection.urls.count == 1
-        let singleStatus = isSingleItem ? state.badge(for: selection.urls[0]) : nil
+        // Ancestor badges describe a subtree, never an exact node's ability
+        // to be added, ignored or marked resolved. Stale/legacy data is unknown.
+        let singleStatus = isSingleItem && isFresh ? state.directBadge(for: selection.urls[0]) : nil
         let hasConflict = statuses.contains(.conflicted)
         let hasUnversioned = statuses.contains(.unversioned)
         let hasVersionedChange = statuses.contains(where: \.isLocalChange)
 
         let contextStatus: String
-        if hasConflict {
+        let contextBadgeIdentifier: String
+        if !isFresh {
+            contextStatus = "状态待刷新"
+            contextBadgeIdentifier = FinderBadgeIdentifier.stale
+        } else if hasConflict {
             contextStatus = "有冲突"
+            contextBadgeIdentifier = FinderBadgeIdentifier.conflicted
         } else if hasVersionedChange {
             contextStatus = "有本地修改"
+            contextBadgeIdentifier = FinderBadgeIdentifier.modified
         } else if hasUnversioned {
             contextStatus = "未纳管"
+            contextBadgeIdentifier = FinderBadgeIdentifier.unversioned
+        } else if statuses.contains(.ignored) {
+            contextStatus = "已忽略"
+            contextBadgeIdentifier = FinderBadgeIdentifier.ignored
+        } else if statuses.count == selection.urls.count && statuses.allSatisfy({ $0 == .clean }) {
+            contextStatus = "正常"
+            contextBadgeIdentifier = FinderBadgeIdentifier.clean
         } else {
-            contextStatus = "SVN 工作副本"
+            contextStatus = "状态待确认"
+            contextBadgeIdentifier = FinderBadgeIdentifier.unknown
         }
         let contextTitle = root.displayName ?? root.canonicalURL?.lastPathComponent ?? "SvnDock"
         let contextItem = NSMenuItem(
@@ -105,29 +138,33 @@ final class FinderSync: FIFinderSync {
             keyEquivalent: ""
         )
         contextItem.isEnabled = false
+        if let spec = FinderBadgeSymbolSpec.all.first(where: { $0.identifier == contextBadgeIdentifier }) {
+            contextItem.image = badgeImage(for: spec)
+        }
         submenu.addItem(contextItem)
         submenu.addItem(.separator())
 
-        submenu.addItem(makeCommandItem("刷新状态", action: #selector(refresh(_:)), payload: payload))
-        submenu.addItem(makeCommandItem("更新", action: #selector(update(_:)), payload: payload))
-        submenu.addItem(makeCommandItem("提交…", action: #selector(commit(_:)), payload: payload))
-        submenu.addItem(.separator())
-
-        if !isRoot {
-            submenu.addItem(makeCommandItem("添加到 SVN", action: #selector(add(_:)), payload: payload))
-            if isSingleItem {
-                submenu.addItem(makeCommandItem("查看差异", action: #selector(diff(_:)), payload: payload))
-            }
-            submenu.addItem(makeCommandItem("还原…", action: #selector(revert(_:)), payload: payload))
-        }
+        let commitTitle = selection.urls.count > 1 ? "提交所选 \(selection.urls.count) 项…"
+            : isRoot ? "提交工作副本…" : "提交所选项目…"
+        submenu.addItem(makeCommandItem(commitTitle, action: #selector(commit(_:)), payload: payload))
 
         // Badge snapshots are only a menu-visibility hint. The main app must
         // reload authoritative SVN state before executing any of these actions.
-        // A clean versioned item has no badge, so history remains available
-        // when the cached status is absent; an explicitly unversioned item does
-        // not have repository history.
+        // Unknown cached status keeps history/diff available for validation in
+        // the app; an explicitly unversioned or ignored item has no history.
         if isSingleItem, isRoot || (singleStatus != .unversioned && singleStatus != .ignored) {
+            let isDirectory = isRoot
+                || (try? selection.urls[0].resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
             submenu.addItem(makeCommandItem("查看历史…", action: #selector(log(_:)), payload: payload))
+            submenu.addItem(makeCommandItem(isDirectory ? "查看目录属性差异" : "查看差异",
+                                           action: #selector(diff(_:)), payload: payload))
+        }
+        submenu.addItem(.separator())
+        submenu.addItem(makeCommandItem("刷新状态", action: #selector(refresh(_:)), payload: payload))
+        submenu.addItem(makeCommandItem("更新", action: #selector(update(_:)), payload: payload))
+        if !isRoot {
+            submenu.addItem(makeCommandItem("添加到 SVN", action: #selector(add(_:)), payload: payload))
+            submenu.addItem(makeCommandItem("还原…", action: #selector(revert(_:)), payload: payload))
         }
 
         // Keep the first conflict workflow deliberately narrow: one exact
@@ -303,16 +340,71 @@ final class FinderSync: FIFinderSync {
     }
 
     private func reloadSharedState() {
-        let state = self.state
         state.reload()
+        performOnMain(#selector(applySharedState), value: nil)
+    }
+
+    @objc fileprivate func pollSharedState() {
+        reloadSharedState()
+    }
+
+    private func performOnMain(_ selector: Selector, value: URL?) {
+        // NSObject forwarding avoids sharing mutable UI bookkeeping across
+        // dispatch closures; wait when Finder expects an initial badge.
+        if Thread.isMainThread {
+            if let value { _ = perform(selector, with: value) }
+            else { _ = perform(selector) }
+        } else {
+            performSelector(onMainThread: selector, with: value, waitUntilDone: true)
+        }
+    }
+
+    @objc private func observeDirectory(_ url: URL) {
+        state.reload()
+        badgeTracker.observe(url, roots: state.registeredRoots())
+        applySharedState()
+    }
+
+    @objc private func stopObservingDirectory(_ url: URL) {
+        badgeTracker.stopObserving(url)
+        publishBadgeRequests(force: true)
+    }
+
+    @objc private func applyBadgeRequest(_ url: URL) {
+        let identifier = state.badgeIdentifier(for: url)
+        badgeTracker.request(url, identifier: identifier, roots: state.registeredRoots())
+        controller.setBadgeIdentifier(identifier, for: url)
+        publishBadgeRequests(force: false)
+    }
+
+    @objc private func applySharedState() {
+        // Read latest state on the main thread so queued callbacks cannot
+        // restore old badges. Repaint only paths Finder already requested.
+        for update in badgeTracker.badgeUpdates(using: { state.badgeIdentifier(for: $0) }) {
+            controller.setBadgeIdentifier(update.identifier, for: update.url)
+        }
+        let roots = state.registeredRoots()
+        badgeTracker.pruneUnregistered(roots: roots)
         // Finder monitors every registered root recursively. Registering each
         // descendant would be both redundant and prohibitively expensive for
         // large working copies.
-        if Thread.isMainThread {
-            Self.updateObservedDirectories(using: state)
-        } else {
-            DispatchQueue.main.async {
-                Self.updateObservedDirectories(using: state)
+        Self.updateObservedDirectories(using: state)
+        publishBadgeRequests(force: false)
+    }
+
+    private func publishBadgeRequests(force: Bool) {
+        let now = Date()
+        guard force || now.timeIntervalSince(lastBadgeRequestAt) >= 5 else { return }
+        lastBadgeRequestAt = now
+        do {
+            try container.writeBadgeRequest(instanceID: badgeRequestInstanceID,
+                directories: badgeTracker.directoryRequests(roots: state.registeredRoots()))
+            lastBadgeRequestError = nil
+        } catch {
+            let detail = error.localizedDescription
+            if lastBadgeRequestError != detail {
+                Self.logger.error("Unable to publish Finder observation: \(detail, privacy: .public)")
+                lastBadgeRequestError = detail
             }
         }
     }
@@ -364,6 +456,22 @@ final class FinderSync: FIFinderSync {
     private func makeItem(title: String, action: Selector) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         item.target = self
+        let symbol: String
+        switch NSStringFromSelector(action) {
+        case "commit:": symbol = "square.and.arrow.up"
+        case "log:": symbol = "clock.arrow.circlepath"
+        case "diff:": symbol = "doc.on.doc"
+        case "refresh:": symbol = "arrow.clockwise"
+        case "update:": symbol = "arrow.down.circle"
+        case "add:": symbol = "plus.circle"
+        case "revert:": symbol = "arrow.uturn.backward"
+        case "resolve:": symbol = "checkmark.shield"
+        case "copyRepositoryURL:": symbol = "link"
+        case "cleanup:": symbol = "wrench.and.screwdriver"
+        case "ignoreName:", "ignoreExtension:": symbol = "eye.slash"
+        default: symbol = "arrow.up.forward.app"
+        }
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
         return item
     }
 
@@ -387,46 +495,32 @@ final class FinderSync: FIFinderSync {
     }
 
     private func registerBadgeImages() {
-        registerBadge(
-            identifier: FinderBadgeIdentifier.conflicted,
-            symbol: "exclamationmark.octagon.fill",
-            label: "SVN 冲突"
-        )
-        registerBadge(
-            identifier: FinderBadgeIdentifier.modified,
-            symbol: "pencil.circle.fill",
-            label: "SVN 已修改"
-        )
-        registerBadge(
-            identifier: FinderBadgeIdentifier.added,
-            symbol: "plus.circle.fill",
-            label: "SVN 已添加"
-        )
-        registerBadge(
-            identifier: FinderBadgeIdentifier.deleted,
-            symbol: "minus.circle.fill",
-            label: "SVN 已删除"
-        )
-        registerBadge(
-            identifier: FinderBadgeIdentifier.unversioned,
-            symbol: "questionmark.circle.fill",
-            label: "SVN 未纳管"
-        )
-        registerBadge(
-            identifier: FinderBadgeIdentifier.missing,
-            symbol: "xmark.circle.fill",
-            label: "SVN 文件缺失"
-        )
+        for spec in FinderBadgeSymbolSpec.all {
+            guard let image = badgeImage(for: spec) else { continue }
+            controller.setBadgeImage(image, label: spec.label, forBadgeIdentifier: spec.identifier)
+        }
     }
 
-    private func registerBadge(identifier: String, symbol: String, label: String) {
-        guard let image = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: label
-        ) else { return }
+    private func badgeImage(for spec: FinderBadgeSymbolSpec) -> NSImage? {
+        let color: NSColor
+        switch spec.color {
+        case .green: color = .systemGreen
+        case .yellow: color = .systemYellow
+        case .red: color = .systemRed
+        case .blue: color = .systemBlue
+        case .gray: color = .systemGray
+        }
+        guard let image = NSImage(systemSymbolName: spec.symbol, accessibilityDescription: spec.label)?
+            .withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) else { return nil }
         image.isTemplate = false
-        controller.setBadgeImage(image, label: label, forBadgeIdentifier: identifier)
+        return image
     }
+}
+
+private final class FinderBadgePollTarget: NSObject {
+    weak var owner: FinderSync?
+    init(owner: FinderSync) { self.owner = owner }
+    @objc func fire(_ timer: Timer) { owner?.pollSharedState() }
 }
 
 /// Freezes the selection visible when Finder built the menu. Finder may omit

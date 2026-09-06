@@ -81,10 +81,11 @@ public struct SVNCommandBuilder: Sendable {
 
         switch operation {
         case let .status(options):
-            // Avoid `--verbose`: it emits every clean versioned node and makes
-            // large working copies needlessly expensive. Changed and remote
-            // entries still carry the revision information needed by the UI.
+            // Normal change lists remain sparse. Finder opts into normal nodes
+            // only for explicitly bounded directory listings.
             arguments = ["status", "--xml"]
+            if options.includeUnchanged { arguments.append("--verbose") }
+            if options.ignoreExternals { arguments.append("--ignore-externals") }
             if options.showRemoteUpdates {
                 arguments.append("--show-updates")
             }

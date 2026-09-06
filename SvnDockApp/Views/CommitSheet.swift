@@ -33,21 +33,28 @@ struct CommitSheet: View {
                 loadError = "无法恢复草稿：\(error.localizedDescription)"
             }
         }
-        let includedIDs = loadError != nil ? [] : SvnDockCommitDraft.initialIncludedEntryIDs(
+        let explicitIDs = store.commitInitialSelectedEntryIDs
+        let includedIDs = loadError != nil && explicitIDs == nil ? [] : SvnDockCommitDraft.initialIncludedEntryIDs(
             entries: store.committableEntries,
             selectedEntryIDs: store.selectedEntryIDs,
-            savedDraft: savedDraft
+            savedDraft: savedDraft,
+            explicitEntryIDs: explicitIDs
         )
         _draftWorkingCopy = State(initialValue: workingCopy)
         _message = State(initialValue: savedDraft?.message ?? "")
-        _draftNotice = State(initialValue: savedDraft == nil ? "说明与勾选自动保留" : "已恢复此工作副本的草稿；新变更未自动勾选")
+        _draftNotice = State(initialValue: explicitIDs != nil
+            ? "已按本次 Finder 选择勾选；提交说明继续使用草稿"
+            : savedDraft == nil ? "说明与勾选自动保留" : "已恢复此工作副本的草稿；新变更未自动勾选")
         _draftError = State(initialValue: loadError)
         _includedEntryIDs = State(initialValue: includedIDs)
         _selectionSummary = State(initialValue: SelectionSummary(
             entries: store.committableEntries, includedIDs: includedIDs
         ))
         _previewEntryID = State(initialValue:
-            store.committableEntries.first(where: { $0.relativePath == savedDraft?.previewRelativePath })?.id
+            store.committableEntries.first(where: {
+                $0.relativePath == savedDraft?.previewRelativePath
+                    && (explicitIDs == nil || includedIDs.contains($0.id))
+            })?.id
                 ?? store.committableEntries.first(where: { includedIDs.contains($0.id) })?.id
                 ?? store.committableEntries.first?.id
         )

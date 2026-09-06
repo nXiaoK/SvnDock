@@ -50,7 +50,7 @@ struct SvnDockApplication: App {
         .defaultSize(width: 1_240, height: 800)
 
         Settings {
-            SvnDockSettingsView(preferences: preferences)
+            SvnDockSettingsView(preferences: preferences, finderStatusMessage: store.finderBadgeStatusMessage)
         }
 
         MenuBarExtra("SvnDock", systemImage: "externaldrive",

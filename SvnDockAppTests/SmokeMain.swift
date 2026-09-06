@@ -15,6 +15,8 @@ struct AppRegressionSmoke {
         try await ResolveServiceRegressionChecks.run()
         try await IgnoredItemsRegressionChecks.run()
         try await IgnoredItemsStoreRegressionChecks.run()
+        try await FinderRoutingRegressionChecks.run()
+        try await FinderBadgeServiceRegressionChecks.run()
         try HistoryQueryRegressionChecks.run()
         try await HistoryPagingRegressionChecks.run()
         try await HistoryPageServiceRegressionChecks.run()

@@ -18,6 +18,37 @@ struct StatusListView: View {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
 
+            if store.statusFilter == .all, store.searchQuery.isEmpty,
+               let entry = store.finderTargetOutsideChangeList {
+                Button {
+                    store.selectedEntryIDs = [entry.id]
+                    store.inspectorTab = .diff
+                } label: {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label("Finder 中所选项目", systemImage: "cursorarrow")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                        HStack {
+                            Text(entry.relativePath)
+                                .font(.system(size: 12, weight: .medium))
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                            Spacer(minLength: 4)
+                            SvnDockStatusPill(status: entry.status)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(12)
+                    .background(SvnDockTheme.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(SvnDockPlainButtonStyle())
+                .disabled(store.isInteractionBlocked)
+                .help(entry.relativePath)
+                .padding(.horizontal, 12)
+                .padding(.bottom, 10)
+            }
+
             if store.statusCounts.conflicts > 0 && store.statusFilter != .ignored {
                 VStack(alignment: .leading, spacing: 8) {
                     Label("\(store.statusCounts.conflicts) 个项目存在冲突", systemImage: "exclamationmark.triangle")

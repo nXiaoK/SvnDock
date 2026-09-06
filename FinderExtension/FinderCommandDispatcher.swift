@@ -84,7 +84,10 @@ final class FinderCommandDispatcher {
         }
         components.queryItems = items.isEmpty ? nil : items
         guard let url = components.url else { return }
-        NSWorkspace.shared.open(url)
+        if !NSWorkspace.shared.open(url) {
+            Self.logger.error("macOS could not open the SvnDock URL handler; Finder request remains queued when one was created")
+            NSSound.beep()
+        }
     }
 
     private static func uniqueCanonicalURLs(_ urls: [URL]) -> [URL] {

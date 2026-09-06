@@ -365,7 +365,7 @@ struct HistoryInspectorView: View {
             revision: selectedRevision, selectedTargetID: selectedTargetID,
             currentTargetID: store.historyTarget?.id, entries: entries
         ), let target = store.historyTarget else { return nil }
-        return SvnDockRevisionRequest(workingCopyID: target.workingCopy.id, revision: revision)
+        return target.revisionRequest(for: revision)
     }
 
     private func clearFilteredSelection() {
@@ -386,7 +386,7 @@ struct HistoryInspectorView: View {
         cancelCompactSelection()
         selectedRevision = revision
         selectedTargetID = target.id
-        openWindow(value: SvnDockRevisionRequest(workingCopyID: target.workingCopy.id, revision: revision))
+        openWindow(value: target.revisionRequest(for: revision))
     }
 
     private func openRevision() {
@@ -397,7 +397,7 @@ struct HistoryInspectorView: View {
         guard let target = store.historyTarget else { return }
         // A repository revision is independent from this path's loaded logs.
         // Keep list selection unchanged; the detail loader verifies existence.
-        openWindow(value: SvnDockRevisionRequest(workingCopyID: target.workingCopy.id, revision: revision))
+        openWindow(value: target.revisionRequest(for: revision))
     }
 
     private func copy(_ text: String) {

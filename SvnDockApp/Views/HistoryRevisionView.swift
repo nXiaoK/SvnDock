@@ -328,7 +328,8 @@ struct HistoryRevisionView: View {
                 }
             } else {
                 ContentUnavailableView("选择变更文件", systemImage: "doc.text.magnifyingglass",
-                    description: Text("选择本次提交中的一个路径，预览提交前后的差异。"))
+                    description: Text(model.preferredPathNotice
+                        ?? "选择本次提交中的一个路径，预览提交前后的差异。"))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

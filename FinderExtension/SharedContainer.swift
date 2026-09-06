@@ -15,6 +15,7 @@ enum SharedContainerError: LocalizedError {
     case cannotCreateQueue(Error)
     case cannotEncodeRequest(Error)
     case cannotWriteRequest(Error)
+    case invalidBadgeRequestDirectory
 
     var errorDescription: String? {
         switch self {
@@ -36,6 +37,8 @@ enum SharedContainerError: LocalizedError {
             return "Cannot encode the Finder command: \(error.localizedDescription)"
         case .cannotWriteRequest(let error):
             return "Cannot write the Finder command: \(error.localizedDescription)"
+        case .invalidBadgeRequestDirectory:
+            return "The Finder badge request directory must be private and owned by the current user."
         }
     }
 }
@@ -52,6 +55,7 @@ final class SharedContainer: SharedStateLoading {
     static let rootsFileName = "registered-roots.json"
     static let badgeFileName = "badge-snapshot.json"
     static let queueDirectoryName = "command-queue"
+    static let badgeRequestDirectoryName = "finder-badge-requests"
 
     /// Avoid decoding an unexpectedly large/corrupt file in Finder's process.
     private static let maximumSharedFileSize = 8 * 1_024 * 1_024
@@ -250,8 +254,49 @@ final class SharedContainer: SharedStateLoading {
         return BadgeSnapshotDocument(
             schemaVersion: document.schemaVersion,
             generatedAt: document.generatedAt,
-            entries: canonicalEntries
+            entries: canonicalEntries,
+            directEntries: document.directEntries.map { entries in
+                var canonical: [String: BadgeKind] = [:]
+                for (path, kind) in entries where path.hasPrefix("/") {
+                    canonical[URL(fileURLWithPath: path).standardizedFileURL.path] = kind
+                }
+                return canonical
+            },
+            perRootUpdatedAt: document.perRootUpdatedAt.map { entries in
+                var canonical: [String: String] = [:]
+                for (path, date) in entries where path.hasPrefix("/") {
+                    canonical[URL(fileURLWithPath: path).standardizedFileURL.path] = date
+                }
+                return canonical
+            }
         )
+    }
+
+    /// Writes a bounded observation heartbeat, never a command or app wakeup.
+    /// The Core reader checks ownership, mode, schema, root and path boundaries.
+    func writeBadgeRequest(instanceID: UUID, directories: [FinderBadgeDirectoryRequest]) throws {
+        try validateConfiguration()
+        guard let sharedDirectoryURL else {
+            throw SharedContainerError.missingApplicationGroup(appGroupIdentifier)
+        }
+        let directory = sharedDirectoryURL.appendingPathComponent(Self.badgeRequestDirectoryName, isDirectory: true)
+        try fileManager.createDirectory(at: directory, withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+        var attributes = stat()
+        guard lstat(directory.path, &attributes) == 0,
+              attributes.st_mode & mode_t(S_IFMT) == mode_t(S_IFDIR),
+              attributes.st_uid == getuid(), attributes.st_mode & 0o777 == 0o700 else {
+            throw SharedContainerError.invalidBadgeRequestDirectory
+        }
+        let data = try FinderBadgeRequestDocument.encoded(id: instanceID, directories: directories)
+        let temporary = directory.appendingPathComponent(".\(UUID().uuidString).tmp")
+        defer { try? fileManager.removeItem(at: temporary) }
+        try data.write(to: temporary, options: .withoutOverwriting)
+        try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+        let destination = directory.appendingPathComponent(instanceID.uuidString.lowercased()).appendingPathExtension("json")
+        guard rename(temporary.path, destination.path) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
     }
 
     /// Atomically adds a request to the append-only inbox. The main app must
@@ -332,6 +377,8 @@ final class SharedStateStore: @unchecked Sendable {
     private let reloadLock = NSLock()
     private var roots: [RegisteredRoot] = []
     private var badgeEntries: [String: BadgeKind] = [:]
+    private var directBadgeEntries: [String: BadgeKind] = [:]
+    private var rootUpdateDates: [String: Date] = [:]
     private var rootsRevision: SharedFileRevision?
     private var badgesRevision: SharedFileRevision?
 
@@ -351,12 +398,17 @@ final class SharedStateStore: @unchecked Sendable {
         let rootsChanged = currentRootsRevision == nil || currentRootsRevision != rootsRevision
         let badgesChanged = currentBadgesRevision == nil || currentBadgesRevision != badgesRevision
         let loadedRoots = rootsChanged ? (try? container.loadRegisteredRoots()) ?? [] : nil
-        let loadedBadges = badgesChanged ? (try? container.loadBadgeSnapshot().entries) ?? [:] : nil
+        let loadedBadges = badgesChanged ? (try? container.loadBadgeSnapshot())
+            ?? BadgeSnapshotDocument(schemaVersion: 1, generatedAt: nil, entries: [:]) : nil
 
         lock.lock()
         defer { lock.unlock() }
         if let loadedRoots { roots = loadedRoots }
-        if let loadedBadges { badgeEntries = loadedBadges }
+        if let loadedBadges {
+            badgeEntries = loadedBadges.entries
+            directBadgeEntries = loadedBadges.directEntries ?? [:]
+            rootUpdateDates = (loadedBadges.perRootUpdatedAt ?? [:]).compactMapValues(FinderBadgeFreshness.date(from:))
+        }
         rootsRevision = currentRootsRevision
         badgesRevision = currentBadgesRevision
         return roots
@@ -373,6 +425,32 @@ final class SharedStateStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         return badgeEntries[path]
+    }
+
+    func directBadge(for url: URL) -> BadgeKind? {
+        lock.lock()
+        defer { lock.unlock() }
+        return directBadgeEntries[url.standardizedFileURL.path]
+    }
+
+    func badgeIdentifier(for url: URL, at now: Date = Date()) -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !url.standardizedFileURL.pathComponents.contains(".svn"),
+              let root = RegisteredRootResolver.deepestRoot(containing: url, among: roots) else {
+            return FinderBadgeIdentifier.none
+        }
+        guard FinderBadgeFreshness.isFresh(rootUpdateDates[root.path], at: now) else {
+            return FinderBadgeIdentifier.stale
+        }
+        return badgeEntries[url.standardizedFileURL.path]?.finderBadgeIdentifier ?? FinderBadgeIdentifier.unknown
+    }
+
+    func isFresh(for url: URL, at now: Date = Date()) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard let root = RegisteredRootResolver.deepestRoot(containing: url, among: roots) else { return false }
+        return FinderBadgeFreshness.isFresh(rootUpdateDates[root.path], at: now)
     }
 
     func root(containing url: URL) -> RegisteredRoot? {

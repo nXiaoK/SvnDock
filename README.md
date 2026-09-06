@@ -2,7 +2,7 @@
 
 [简体中文](README.zh-CN.md)
 
-![Version](https://img.shields.io/badge/version-0.3.0-blue)
+![Version](https://img.shields.io/badge/version-0.4.0-blue)
 ![macOS](https://img.shields.io/badge/macOS-14%2B-black?logo=apple)
 ![Swift toolchain](https://img.shields.io/badge/Swift_6-toolchain-orange?logo=swift)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -12,7 +12,7 @@ and Finder integration. It keeps common SVN operations close to the files while
 remaining independent of an IDE. A directory may also contain a Git repository:
 SvnDock does not invoke Git or intentionally modify `.git`.
 
-> SvnDock is a development preview. Version 0.3.0 supports the main working-copy
+> SvnDock is a development preview. Version 0.4.0 supports the main working-copy
 > workflows and a Finder Sync extension. [GitHub Releases](https://github.com/nXiaoK/SvnDock/releases)
 > provides automated arm64 and x64 DMG test builds. These use portable ad-hoc
 > signatures; Developer ID signing and Apple notarization are not configured.
@@ -171,6 +171,21 @@ details.
    Security → Extensions**.
 4. Enable **SvnDock Finder**, open SvnDock and register an existing SVN working
    copy.
+
+SvnDock Settings also has **打开 Finder 扩展设置…** for the system's current
+extension management interface. Keep the App running while browsing registered
+working copies: green checks mean unchanged, yellow pencils mean modified, red
+warnings mean conflicted, and blue plus signs mean added. Gray symbols identify
+unversioned, ignored, unknown, or stale states. macOS controls icon placement.
+
+Right-click files in Finder and open **SvnDock** to commit the current selection,
+view that file's history, or compare local differences. Finder selection takes
+priority over a saved draft's checked files; the commit message is preserved.
+History details prefer the requested file within a multi-file revision. Normal
+files can show an empty diff, and folder differences show directory properties.
+Automatic refresh reads the directories Finder is using without adding all
+unchanged files to SvnDock's workspace list. Quitting SvnDock stops background
+updates; cached badges become gray after a minute.
 
 Keep only one discoverable copy of the app. If Finder retains an older extension
 instance, toggle the extension off and on before restarting Finder.

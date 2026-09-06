@@ -4,6 +4,7 @@ import SwiftUI
 
 struct SvnDockSettingsView: View {
     @ObservedObject var preferences: SvnDockPreferences
+    var finderStatusMessage: String? = nil
     @State private var finderExtensionEnabled = false
 
     var body: some View {
@@ -98,6 +99,19 @@ struct SvnDockSettingsView: View {
                  : "在系统扩展管理中开启“SvnDock Finder”，即可在 Finder 中查看 SVN 状态和使用右键菜单。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            Text("绿色：未修改 · 黄色：已修改 · 红色：冲突 · 蓝色：已添加 · 灰色：未纳管、已忽略或待刷新")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("保持 SvnDock 运行，即可自动更新 Finder 当前浏览目录的状态。角标位置由 macOS 决定；退出 App 后，旧状态会显示为待刷新。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let finderStatusMessage {
+                Text(finderStatusMessage)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("finderBadgeRefreshStatus")
+            }
 
             Button {
                 FIFinderSyncController.showExtensionManagementInterface()

@@ -124,7 +124,7 @@ actor CoreSvnDockService: SvnDockServicing {
         let executableURL = try executableLocator.locate()
         let builder = try SVNCommandBuilder(executableURL: executableURL)
         let invocation = try builder.makeInvocation(
-            for: .status(SVNStatusOptions(showRemoteUpdates: false, includeIgnored: false)),
+            for: .status(SVNStatusOptions(includeIgnored: true, ignoreExternals: true)),
             in: coreCopy
         )
         let runner = processRunner
@@ -149,11 +149,14 @@ actor CoreSvnDockService: SvnDockServicing {
                 let missingInfoByPath = try await Self.missingStatusInfo(
                     for: entries, in: coreCopy, builder: builder, runner: runner
                 )
-                let replacement = Self.badgeReplacement(entries, in: coreCopy)
+                let roots = try await badgeStore.loadRegisteredRoots().roots
+                let excluded = roots.filter { $0.enabled && $0.id != coreCopy.id && Self.path($0.path, isInside: coreCopy.canonicalPath) }.map(\.path)
+                let replacement = FinderBadgeBuilder.build(from: entries, in: coreCopy, excludingRoots: excluded)
                 try await badgeStore.replaceBadgeEntries(
                     forWorkingCopyID: coreCopy.id,
                     underWorkingCopyRoot: coreCopy.localPath.standardizedFileURL.path,
-                    with: replacement
+                    with: replacement.entries,
+                    directEntries: replacement.directEntries
                 )
                 return StatusListingSnapshot(entries: entries, missingInfoByPath: missingInfoByPath)
             }
@@ -169,6 +172,145 @@ actor CoreSvnDockService: SvnDockServicing {
         }
         postSharedStateChanged()
         return SvnDockStatusSnapshot(entries: uiEntries)
+    }
+
+    func refreshFinderBadges(for workingCopy: SvnDockWorkingCopy, directoryPaths: [String], preferredPaths: [String] = []) async throws {
+        guard !directoryPaths.isEmpty else { return }
+        let copy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let requested = try builder.normalizedLocalPaths(Array(Set(directoryPaths)).sorted().prefix(32).map { $0 }, in: copy, command: "Finder status")
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        let badgeStore = sharedStore
+        try await scheduler.enqueue(for: copy.id) {
+            try await operationLock.withLock(for: copy.id) {
+                let roots = try await badgeStore.loadRegisteredRoots().roots.filter(\.enabled)
+                guard roots.contains(where: { $0.id == copy.id && URL(fileURLWithPath: $0.path).standardizedFileURL.path == copy.canonicalPath }) else {
+                    throw FinderSharedStoreError.badgeRootNotRegistered(copy.canonicalPath)
+                }
+                let excluded = roots.filter { $0.id != copy.id && Self.path($0.path, isInside: copy.canonicalPath) }.map(\.path)
+                let sparse = try await Self.finderStatus(paths: [], depth: nil, includeUnchanged: false, in: copy, builder: builder, runner: runner)
+                var combined = Dictionary(sparse.map { ($0.fileURL(relativeTo: copy).path, $0) }, uniquingKeysWith: { _, latest in latest })
+                for directory in requested {
+                    try Task.checkCancellation()
+                    let url = Self.absoluteURL(for: directory, in: copy)
+                    guard !excluded.contains(where: { Self.path(url.path, isInside: $0) }) else { continue }
+                    // SVN treats ignored and unversioned directories as opaque.
+                    // Never inspect requests below either kind of ancestor.
+                    var ancestor = url
+                    var opaque = false
+                    while Self.path(ancestor.path, isInside: copy.canonicalPath) {
+                        if let entry = combined[ancestor.path], entry.status == .ignored || entry.status == .unversioned || entry.status == .external || entry.isFileExternal == true {
+                            opaque = true
+                            break
+                        }
+                        if ancestor.path == copy.canonicalPath { break }
+                        ancestor.deleteLastPathComponent()
+                    }
+                    guard !opaque else { continue }
+                    // Invalid observation hints do not stop valid windows from
+                    // refreshing. Check the metadata before issuing status.
+                    guard (try? Self.validatedFinderPath(directory, in: copy)) != nil,
+                          (try? Self.validatedDirectoryURL(for: directory, in: copy)) != nil else { continue }
+                    let infoResult = try await runner.run(builder.makeInvocation(for: .infoTargets(paths: [directory]), in: copy))
+                    guard infoResult.succeeded,
+                          let infos = try? SVNXMLParser.parseInfos(infoResult.standardOutput),
+                          let info = infos.first(where: { Self.absoluteURL(for: $0.path, in: copy) == url }),
+                          info.kind == .directory,
+                          Self.belongsToWorkingCopy(info, copy: copy) else { continue }
+                    let immediate = try await Self.finderStatus(paths: [directory], depth: .immediates, includeUnchanged: true, in: copy, builder: builder, runner: runner)
+                    _ = try Self.validatedFinderPath(directory, in: copy)
+                    for entry in immediate {
+                        let path = entry.fileURL(relativeTo: copy).path
+                        // Depth is also enforced when parsing, so malformed or
+                        // unexpectedly recursive output cannot expand the scope.
+                        guard path == url.path || URL(fileURLWithPath: path).deletingLastPathComponent() == url else { continue }
+                        combined[path] = entry
+                    }
+                }
+                let preferred = preferredPaths.filter { path in
+                    requested.contains { Self.absoluteURL(for: $0, in: copy).path == URL(fileURLWithPath: path).deletingLastPathComponent().path }
+                }.prefix(2_048).map { $0 }
+                let badges = FinderBadgeBuilder.build(from: Array(combined.values), in: copy, excludingRoots: excluded, preferredPaths: preferred)
+                try await badgeStore.replaceBadgeEntries(forWorkingCopyID: copy.id,
+                    underWorkingCopyRoot: copy.canonicalPath, with: badges.entries, directEntries: badges.directEntries)
+            }
+        }
+        postSharedStateChanged()
+    }
+
+    func finderTarget(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFinderTarget {
+        let copy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let target = try builder.normalizedLocalPaths([relativePath], in: copy, command: "Finder target")[0]
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        let pair = try await scheduler.enqueue(for: copy.id) {
+            try await operationLock.withLock(for: copy.id) {
+                _ = try Self.validatedFinderPath(target, in: copy)
+                let result = try await runner.run(builder.makeInvocation(for: .infoTargets(paths: [target]), in: copy))
+                guard result.succeeded else {
+                    throw SvnDockServiceError.unavailable("所选项目没有当前工作副本中的版本记录，请刷新 Finder 后重试。")
+                }
+                let infos = try SVNXMLParser.parseInfos(result.standardOutput)
+                guard let info = infos.first(where: { Self.absoluteURL(for: $0.path, in: copy) == Self.absoluteURL(for: target, in: copy) }),
+                      Self.belongsToWorkingCopy(info, copy: copy) else {
+                    throw SvnDockServiceError.unavailable("所选项目属于其它工作副本，请从所属工作副本打开。")
+                }
+                let entries = try await Self.finderStatus(paths: [target], depth: .empty, includeUnchanged: true, in: copy, builder: builder, runner: runner)
+                guard let entry = Self.statusEntry(for: target, entries: entries, in: copy),
+                      entry.status != .unversioned, entry.status != .ignored, entry.status != .external,
+                      entry.status != .none, entry.isFileExternal != true else {
+                    throw SvnDockServiceError.unavailable("所选项目没有可查看的 SVN 版本记录，请刷新 Finder 后重试。")
+                }
+                if case .unknown = entry.status {
+                    throw SvnDockServiceError.unavailable("无法确认所选项目的 SVN 状态，请刷新后重试。")
+                }
+                _ = try Self.validatedFinderPath(target, in: copy)
+                return (entry, info)
+            }
+        }
+        let entry = pair.0
+        let info = pair.1
+        let effectiveStatus: SvnDockStatusKind = entry.isTreeConflicted || entry.status == .conflicted || entry.propertyStatus == .conflicted
+            ? .conflicted : (entry.status == .normal && entry.propertyStatus.isLocalChange ? .modified : mapStatus(entry.status))
+        let value = SvnDockStatusEntry(workingCopyID: copy.id, relativePath: target,
+            nodeKind: info.kind == .directory ? .directory : .file, status: effectiveStatus,
+            conflictKinds: conflictKinds(for: entry), changelist: entry.changelist,
+            workingCopySchedule: info.schedule, workingCopyRevision: entry.revision)
+        var repositoryPath: String?
+        if let url = info.url, let root = info.repositoryRootURL,
+           url.scheme == root.scheme, url.host == root.host, url.port == root.port,
+           url.pathComponents.starts(with: root.pathComponents) {
+            repositoryPath = "/" + url.pathComponents.dropFirst(root.pathComponents.count).joined(separator: "/")
+        }
+        return SvnDockFinderTarget(entry: value, repositoryRelativePath: repositoryPath)
+    }
+
+    private static func finderStatus(paths: [String], depth: SVNDepth?, includeUnchanged: Bool,
+                                     in copy: SvnDockCore.WorkingCopy, builder: SVNCommandBuilder,
+                                     runner: any ProcessRunning) async throws -> [SvnDockCore.StatusEntry] {
+        let result = try await runner.run(builder.makeInvocation(for: .status(SVNStatusOptions(
+            includeIgnored: true, includeUnchanged: includeUnchanged, ignoreExternals: true, depth: depth, paths: paths)), in: copy))
+        guard result.succeeded else { throw SVNProcessFailure(result: result) }
+        // Bound parsing and snapshot growth even for one enormous directory.
+        guard result.standardOutput.count <= 16 * 1_024 * 1_024 else { throw CocoaError(.fileReadTooLarge) }
+        return try SVNXMLParser.parseStatus(result.standardOutput, workingCopyURL: copy.localPath, resolveNodeKinds: false)
+    }
+
+    private static func belongsToWorkingCopy(_ info: SVNInfo, copy: SvnDockCore.WorkingCopy) -> Bool {
+        info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL == copy.localPath.resolvingSymlinksInPath().standardizedFileURL
+    }
+
+    private static func validatedFinderPath(_ path: String, in copy: SvnDockCore.WorkingCopy) throws -> URL {
+        try validateResolvedBoundary(relativePaths: [path], in: copy)
+        let target = absoluteURL(for: path, in: copy)
+        let relative = target.pathComponents.dropFirst(copy.localPath.standardizedFileURL.pathComponents.count).joined(separator: "/")
+        let expected = copy.localPath.resolvingSymlinksInPath().appendingPathComponent(relative).standardizedFileURL
+        guard target.resolvingSymlinksInPath().standardizedFileURL == expected else {
+            throw SvnDockServiceError.unavailable("Finder 所选路径经过符号链接，请直接打开工作副本内的原始路径。")
+        }
+        return target
     }
 
     func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy {
@@ -1481,26 +1623,6 @@ actor CoreSvnDockService: SvnDockServicing {
         return relativePath.isEmpty ? "." : relativePath
     }
 
-    private static func badgeReplacement(
-        _ entries: [SvnDockCore.StatusEntry],
-        in workingCopy: SvnDockCore.WorkingCopy
-    ) -> [String: BadgeKind] {
-        let rootPath = workingCopy.localPath.standardizedFileURL.path
-        var replacement: [String: BadgeKind] = [:]
-
-        var rootBadge: BadgeKind?
-        for entry in entries where entry.hasLocalChanges {
-            let path = entry.fileURL(relativeTo: workingCopy).standardizedFileURL.path
-            let badge = BadgeKind(statusEntry: entry)
-            replacement[path] = badge
-            rootBadge = Self.higherPriority(rootBadge, badge)
-        }
-        if let rootBadge {
-            replacement[rootPath] = rootBadge
-        }
-        return replacement
-    }
-
     private func removeBadges(
         for removedWorkingCopyID: UUID,
         under root: URL
@@ -1524,24 +1646,6 @@ actor CoreSvnDockService: SvnDockServicing {
         candidate == root || candidate.hasPrefix(root.hasSuffix("/") ? root : root + "/")
     }
 
-    private static func higherPriority(_ lhs: BadgeKind?, _ rhs: BadgeKind) -> BadgeKind {
-        guard let lhs else { return rhs }
-        return badgePriority(rhs) < badgePriority(lhs) ? rhs : lhs
-    }
-
-    private static func badgePriority(_ badge: BadgeKind) -> Int {
-        switch badge {
-        case .conflicted: 0
-        case .missing: 1
-        case .deleted: 2
-        case .replaced: 3
-        case .modified: 4
-        case .added: 5
-        case .unversioned: 6
-        case .ignored: 7
-        case .clean: 8
-        }
-    }
 }
 
 private struct DirectoryDiskChild: Sendable {
