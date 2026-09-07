@@ -17,9 +17,41 @@
   the limitation accurately in the commit body and final response. Do not claim
   that unavailable checks passed. Documentation-only changes need a diff review,
   not an application test run.
-- This authorization covers local commits. Push only when the user requests it.
+- Feature updates and bug fixes also have standing authorization to package the
+  App and push after verification, following the workflow below. Follow an
+  explicit request to defer or skip packaging or pushing.
 - If a commit fails, resolve the cause when possible without bypassing hooks or
   inventing Git identity settings. Report any remaining blocker explicitly.
+
+## Automatic App packaging and pushes
+
+- After completing requested feature updates or bug fixes, verify the changes,
+  review the working tree and index, and create the relevant local commits.
+  Then package the committed source and push the completed work without asking
+  for confirmation. For multiple related changes in one task, package the final
+  revision and perform one push after all relevant checks succeed.
+- Use `Scripts/build-release-app.sh` for the current Mac architecture, placing
+  the portable App in a new version- and revision-labelled directory under
+  `dist/`. Also create a ZIP archive using `ditto` so the App can be copied or
+  installed easily. Preserve existing packages and never commit build artifacts.
+- Check the package's architecture, App and Finder extension signatures, and
+  embedded source revision. Verify the ZIP can be extracted with its App
+  signature intact. Package the intended committed code only; preserve unrelated
+  uncommitted changes and use an isolated checkout when needed. Rebuild if the
+  packaged source changes before the push.
+- Push the intended branch to its configured remote using a normal,
+  non-forced push only after packaging and verification succeed. Preserve remote
+  changes if the push is rejected; inspect and resolve the cause safely instead
+  of overwriting history. Reverify and repackage if integration changes source.
+- If a required check, packaging step, or push fails, resolve the cause when
+  possible and report any remaining blocker accurately. Never report an
+  unverified package or an unsuccessful push as completed.
+- Provide clickable paths to the App and ZIP, the supported architecture and
+  macOS version, relevant verification results, the commit hash and subject,
+  and the push result. Note signing or runtime requirements that affect use.
+- This workflow applies to feature updates and bug fixes. Read-only reviews,
+  planning, questions, and documentation-only changes do not require packaging
+  or pushing unless the user requests it.
 
 ## Commit message quality
 
