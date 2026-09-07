@@ -60,6 +60,8 @@ protocol SvnDockServicing: Sendable {
         using resolution: SvnDockConflictResolution,
         in workingCopy: SvnDockWorkingCopy
     ) async throws
+    func prepareIgnoreRecommendations(in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRecommendationPlan
+    func applyIgnoreRecommendations(_ plan: SvnDockIgnoreRecommendationPlan, selectedIDs: Set<String>) async throws
     func addIgnoreRules(
         _ rules: [SvnDockIgnoreRule],
         in workingCopy: SvnDockWorkingCopy
@@ -71,6 +73,14 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func prepareIgnoreRecommendations(in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRecommendationPlan {
+        throw SvnDockServiceError.unavailable("当前服务不支持推荐忽略项。")
+    }
+
+    func applyIgnoreRecommendations(_ plan: SvnDockIgnoreRecommendationPlan, selectedIDs: Set<String>) async throws {
+        throw SvnDockServiceError.unavailable("当前服务不支持推荐忽略项。")
+    }
+
     func finderTarget(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFinderTarget {
         throw SvnDockServiceError.unavailable("当前服务不支持读取 Finder 所选项目。")
     }

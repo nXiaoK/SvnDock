@@ -6,6 +6,7 @@ struct AppRegressionSmoke {
         try await SVNSafetyRegressionChecks.run()
 #if !SVNDOCK_SAFETY_SMOKE
         try StatusTreeRegressionChecks.run()
+        try await IgnoreRecommendationRegressionChecks.run()
         try await CommitDraftRegressionChecks.run()
         try await SelectedCommitRegressionChecks.run()
         try ReviewInteractionRegressionChecks.localPreviewBoundaries()

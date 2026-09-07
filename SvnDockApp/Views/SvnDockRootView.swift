@@ -161,6 +161,7 @@ struct SvnDockRootView: View {
         }
         .modifier(UnscheduleAddPresentationModifier(store: store))
         .modifier(IgnoreRemovalPresentationModifier(store: store))
+        .modifier(IgnoreRecommendationsPresentationModifier(store: store))
         .modifier(MissingDeletionPresentationModifier(store: store))
     }
 
@@ -484,3 +485,16 @@ private struct UnscheduleAddPresentationModifier: ViewModifier {
     )
 }
 #endif
+
+private struct IgnoreRecommendationsPresentationModifier: ViewModifier {
+    @ObservedObject var store: SvnDockStore
+    func body(content: Content) -> some View {
+        content.sheet(isPresented: $store.isPresentingIgnoreRecommendations, onDismiss: {
+            Task { await store.processPendingFinderCommands() }
+        }) {
+            if let workingCopy = store.ignoreRecommendationWorkingCopy {
+                IgnoreRecommendationsSheet(store: store, workingCopy: workingCopy)
+            }
+        }
+    }
+}

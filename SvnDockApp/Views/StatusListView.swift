@@ -20,6 +20,22 @@ struct StatusListView: View {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
             treeToolbar
+            if store.selectedWorkingCopy != nil {
+                Button { store.requestIgnoreRecommendations() } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "sparkles")
+                        Text("推荐忽略项…")
+                        Spacer()
+                        Text("按项目识别").foregroundStyle(.secondary)
+                    }
+                    .font(.system(size: 11))
+                    .padding(.horizontal, 10).padding(.vertical, 8)
+                    .background(SvnDockTheme.subtleSurface, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .buttonStyle(.plain)
+                .disabled(store.isInteractionBlocked)
+                .padding(.horizontal, 12).padding(.bottom, 8)
+            }
 
             if store.statusFilter == .all, store.searchQuery.isEmpty,
                let entry = store.finderTargetOutsideChangeList {
@@ -235,7 +251,7 @@ struct StatusListView: View {
             // Finder and keyboard selection should reveal a hidden descendant.
             for entry in store.selectedEntries {
                 collapsedPaths = collapsedPaths.filter {
-                    entry.relativePath != $0 && !entry.relativePath.hasPrefix($0 + "/")
+                    entry.relativePath == $0 || ($0 != "." && !entry.relativePath.hasPrefix($0 + "/"))
                 }
             }
         }

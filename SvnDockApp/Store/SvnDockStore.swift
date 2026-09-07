@@ -108,6 +108,8 @@ final class SvnDockStore: ObservableObject {
     @Published var isPresentingRevertConfirmation = false
     @Published var isPresentingRemovalConfirmation = false
     @Published var isPresentingResolveConfirmation = false
+    @Published var isPresentingIgnoreRecommendations = false
+    @Published private(set) var ignoreRecommendationWorkingCopy: SvnDockWorkingCopy?
     @Published var isPresentingIgnoreConfirmation = false
     @Published var isPresentingIgnoreRemovalConfirmation = false
 
@@ -362,6 +364,7 @@ final class SvnDockStore: ObservableObject {
             || isPresentingRevertConfirmation
             || isPresentingRemovalConfirmation
             || isPresentingResolveConfirmation
+            || isPresentingIgnoreRecommendations
             || isPresentingIgnoreConfirmation
             || isPresentingIgnoreRemovalConfirmation
             || presentedError != nil
@@ -1308,7 +1311,7 @@ final class SvnDockStore: ObservableObject {
         }
         // Revert groups are not one transaction. Keep the operation gate until
         // an independent read finishes, even if the mutation task was cancelled.
-        let verificationError = await refreshAfterRevert(in: request.workingCopy)
+        let verificationError = await refreshAfterMutation(in: request.workingCopy, operationTitle: "还原")
         let cancelled = Task.isCancelled || mutationError is CancellationError
             || (mutationError as? SvnDockRevertFailure)?.wasCancelled == true
         let outcome: SvnDockOperationRecord.Outcome = verificationError != nil || cancelled
@@ -1326,7 +1329,7 @@ final class SvnDockStore: ObservableObject {
         await processPendingFinderCommands()
     }
 
-    private func refreshAfterRevert(in workingCopy: SvnDockWorkingCopy) async -> String? {
+    private func refreshAfterMutation(in workingCopy: SvnDockWorkingCopy, operationTitle: String) async -> String? {
         invalidateRemoteStatus(for: workingCopy.id)
         invalidateHistory(for: workingCopy.id)
         guard selectedWorkingCopyID == workingCopy.id else { return nil }
@@ -1343,7 +1346,7 @@ final class SvnDockStore: ObservableObject {
             apply(snapshot, to: workingCopy.id)
             return nil
         case let .failure(error):
-            let message = "无法确认还原后的状态，旧变更列表已失效。请刷新成功后再选择项目执行操作。\n\(error.localizedDescription)"
+            let message = "无法确认\(operationTitle)后的状态，旧变更列表已失效。请刷新成功后再选择项目执行操作。\n\(error.localizedDescription)"
             statusRecoveryMessage = message
             return message
         }
@@ -1682,6 +1685,49 @@ final class SvnDockStore: ObservableObject {
             }
         }
         await processPendingFinderCommands()
+    }
+
+    func requestIgnoreRecommendations() {
+        guard !isInteractionBlocked, let workingCopy = selectedWorkingCopy else { return }
+        ignoreRecommendationWorkingCopy = workingCopy
+        isPresentingIgnoreRecommendations = true
+    }
+
+    func prepareIgnoreRecommendations(in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRecommendationPlan {
+        guard activeOperation == nil, workingCopy.id == selectedWorkingCopyID else { throw CancellationError() }
+        let plan = try await service.prepareIgnoreRecommendations(in: workingCopy)
+        try Task.checkCancellation()
+        guard workingCopy.id == selectedWorkingCopyID, isPresentingIgnoreRecommendations else { throw CancellationError() }
+        return plan
+    }
+
+    func confirmIgnoreRecommendations(_ plan: SvnDockIgnoreRecommendationPlan, selectedIDs: Set<String>) {
+        guard isPresentingIgnoreRecommendations, activeOperation == nil,
+              plan.workingCopy.id == selectedWorkingCopyID,
+              !selectedIDs.isEmpty, selectedIDs.isSubset(of: Set(plan.items.map(\.id))) else { return }
+        activeOperation = .init(kind: .ignoring, detail: "添加 \(selectedIDs.count) 项推荐忽略规则")
+        isPresentingIgnoreRecommendations = false
+        Task { [weak self] in
+            guard let self else { return }
+            let start = Date()
+            var failure: Error?
+            do { try await service.applyIgnoreRecommendations(plan, selectedIDs: selectedIDs) }
+            catch { failure = error }
+            let verification = await refreshAfterMutation(in: plan.workingCopy, operationTitle: "添加忽略规则")
+            let outcome: SvnDockOperationRecord.Outcome = verification != nil || failure is CancellationError
+                ? .uncertain : failure == nil ? .success : .failure
+            let detail = [failure?.localizedDescription, verification].compactMap { $0 }.joined(separator: "\n")
+            recordOperation(.init(workingCopy: plan.workingCopy, actionTitle: "添加推荐忽略项", startedAt: start,
+                outcome: outcome,
+                summary: outcome == .success ? "已添加 \(selectedIDs.count) 项规则，文件保留在本地，待提交属性变更"
+                    : "部分目录可能已经更新，请检查当前状态；未自动重试",
+                detail: detail.isEmpty ? nil : detail))
+            if !detail.isEmpty {
+                presentedError = .init(title: "推荐忽略项结果需要检查", message: detail)
+            }
+            activeOperation = nil
+            await processPendingFinderCommands()
+        }
     }
 
     func requestIgnoreConfirmation(

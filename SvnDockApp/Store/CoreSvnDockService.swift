@@ -800,10 +800,54 @@ actor CoreSvnDockService: SvnDockServicing {
         }
     }
 
+    func prepareIgnoreRecommendations(in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRecommendationPlan {
+        let copy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        return try await scheduler.enqueue(for: copy.id) {
+            try await operationLock.withLock(for: copy.id) {
+                try await Self.ignoreRecommendations(in: workingCopy, coreCopy: copy, builder: builder, runner: runner)
+            }
+        }
+    }
+
+    func applyIgnoreRecommendations(_ plan: SvnDockIgnoreRecommendationPlan, selectedIDs: Set<String>) async throws {
+        guard !selectedIDs.isEmpty, selectedIDs.isSubset(of: Set(plan.items.map(\.id))) else {
+            throw SvnDockServiceError.invalidIgnoreTarget("请选择本次扫描得到的忽略项。")
+        }
+        let rules = plan.items.filter { selectedIDs.contains($0.id) }.map(\.rule)
+        try await performIgnoreRules(rules, in: plan.workingCopy, recommendationPlan: plan)
+    }
+
+    private static func ignoreRecommendations(in workingCopy: SvnDockWorkingCopy,
+        coreCopy: SvnDockCore.WorkingCopy, builder: SVNCommandBuilder,
+        runner: any ProcessRunning) async throws -> SvnDockIgnoreRecommendationPlan {
+        let infoResult = try await runner.run(builder.makeInvocation(for: .info, in: coreCopy))
+        guard infoResult.succeeded else { throw SVNProcessFailure(result: infoResult) }
+        let info = try SVNXMLParser.parseInfo(infoResult.standardOutput)
+        guard let url = workingCopy.repositoryURL, let uuid = workingCopy.repositoryUUID,
+              info.url == url, info.repositoryUUID == uuid,
+              info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL.path
+                == workingCopy.rootURL.resolvingSymlinksInPath().standardizedFileURL.path else {
+            throw SvnDockServiceError.invalidIgnoreTarget("工作副本地址或身份已变化。请刷新工作副本并重新扫描，未添加忽略规则。")
+        }
+        let result = try await runner.run(builder.makeInvocation(for: .status(SVNStatusOptions(
+            includeIgnored: true, includeUnchanged: true, ignoreExternals: true)), in: coreCopy))
+        guard result.succeeded else { throw SVNProcessFailure(result: result) }
+        let statuses = try SVNXMLParser.parseStatus(result.standardOutput, workingCopyURL: coreCopy.localPath, resolveNodeKinds: false)
+        return try SvnDockIgnoreRecommendationScanner.scan(in: workingCopy, statuses: statuses)
+    }
+
     func addIgnoreRules(
         _ rules: [SvnDockIgnoreRule],
         in workingCopy: SvnDockWorkingCopy
     ) async throws {
+        try await performIgnoreRules(rules, in: workingCopy, recommendationPlan: nil)
+    }
+
+    private func performIgnoreRules(_ rules: [SvnDockIgnoreRule], in workingCopy: SvnDockWorkingCopy,
+                                   recommendationPlan: SvnDockIgnoreRecommendationPlan?) async throws {
         guard !rules.isEmpty else { return }
 
         for rule in rules {
@@ -819,6 +863,16 @@ actor CoreSvnDockService: SvnDockServicing {
 
         try await scheduler.enqueue(for: coreCopy.id) {
             try await operationLock.withLock(for: coreCopy.id) {
+                if let recommendationPlan {
+                    // Recheck the whole selection under the same lease as the
+                    // writes. A stale scan must not hide newly versioned files.
+                    let fresh = try await Self.ignoreRecommendations(in: recommendationPlan.workingCopy,
+                        coreCopy: coreCopy, builder: builder, runner: runner)
+                    let available = Set(fresh.items.map(\.rule))
+                    guard rules.allSatisfy({ available.contains($0) }) else {
+                        throw SvnDockServiceError.invalidIgnoreTarget("推荐项的状态或项目结构已变化，请重新扫描。未添加任何规则。")
+                    }
+                }
                 for parentPath in groupedRules.keys.sorted() {
                     try Task.checkCancellation()
                     guard let rulesForParent = groupedRules[parentPath] else { continue }
@@ -828,6 +882,14 @@ actor CoreSvnDockService: SvnDockServicing {
                         relativePaths: [parentPath] + targetPaths,
                         in: coreCopy
                     )
+
+                    if recommendationPlan != nil {
+                        let root = coreCopy.localPath.resolvingSymlinksInPath().standardizedFileURL
+                        let parent = parentPath == "." ? root : root.appendingPathComponent(parentPath)
+                        guard SvnDockIgnoreRecommendationScanner.safeDirectory(parent, root: root) else {
+                            throw SvnDockServiceError.invalidIgnoreTarget("忽略目标父目录已变为符号链接或外部工作副本，请重新扫描。")
+                        }
+                    }
 
                     // svn:ignore can only be stored on a versioned directory.
                     // Always schedule only the parent chain. Status can return
