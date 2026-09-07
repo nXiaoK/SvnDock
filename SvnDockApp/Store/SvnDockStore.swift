@@ -260,6 +260,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     var entries: [SvnDockStatusEntry] { statusSnapshot.entries }
+    var finderBadgeWarning: String? { statusSnapshot.finderBadgeWarning }
     var selectedEntries: [SvnDockStatusEntry] { selectedStatusEntries { _ in true } }
     var statusCounts: SvnDockStatusCounts { statusSnapshot.counts }
     var missingEntryCount: Int { statusSnapshot.missingEntries.count }

@@ -36,6 +36,14 @@ recommended; a versioned `.idea` can still receive recommendations for its
 unversioned personal workspace files. Applying the selection preserves files
 and existing ignore rules, with no automatic SVN commit.
 
+Large imports keep their complete SVN status and commit selection in the App.
+Finder's shared badge cache is independently bounded to its reader's 8 MiB
+limit, prioritizing working-copy summaries, conflicts and shallow paths while
+keeping exact states separate from directory summaries. Omitted Finder entries
+remain unknown. A badge-cache write failure displays a warning alongside the
+fresh SVN status instead of discarding the refresh or repeating an Add; cache
+capacity is never reported as disk exhaustion.
+
 ## Xcode target settings
 
 The repository-level `project.yml` already applies these settings when the

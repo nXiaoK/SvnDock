@@ -7,6 +7,8 @@ import Foundation
 
 public enum FinderSharedSchema {
     public static let currentVersion = 1
+    // Keep in sync with the Finder extension's bounded shared-file reader.
+    public static let maximumBadgeSnapshotBytes = 8 * 1_024 * 1_024
     public static let registeredRootsFileName = "registered-roots.json"
     public static let badgeSnapshotFileName = "badge-snapshot.json"
     public static let commandQueueDirectoryName = "command-queue"
@@ -176,6 +178,7 @@ public enum FinderSharedStoreError: Error, LocalizedError, Equatable, Sendable {
     case badgePathOutsideWorkingCopy(path: String, root: String)
     case badgeRootNotRegistered(String)
     case badgeOwnerWithoutEntry(String)
+    case badgeSnapshotMetadataTooLarge
     case cannotLockBadgeSnapshot(Int32)
     case unsafeBadgeSnapshotLock
     case commandIdentifierMismatch(expected: UUID, actual: UUID)
@@ -200,6 +203,8 @@ public enum FinderSharedStoreError: Error, LocalizedError, Equatable, Sendable {
             return "Finder badges cannot be published for an unregistered working copy: \(root)"
         case let .badgeOwnerWithoutEntry(path):
             return "Finder badge ownership has no matching entry: \(path)"
+        case .badgeSnapshotMetadataTooLarge:
+            return "Finder 角标缓存的工作副本元数据超出大小限制，未更新角标。"
         case let .cannotLockBadgeSnapshot(code):
             return "Unable to lock the Finder badge snapshot (errno \(code))"
         case .unsafeBadgeSnapshotLock:
@@ -608,10 +613,39 @@ public actor FinderSharedStore {
     }
 
     private func writeBadgeSnapshotUnlocked(_ snapshot: BadgeSnapshot) throws {
-        let data = try encode(snapshot)
-        // Finder's reader rejects larger documents. Preserve the previous
-        // snapshot and its timestamps instead of publishing unreadable state.
-        guard data.count <= 8 * 1_024 * 1_024 else { throw CocoaError(.fileWriteOutOfSpace) }
+        var data = try encode(snapshot)
+        let limit = FinderSharedSchema.maximumBadgeSnapshotBytes
+        if data.count > limit {
+            // Badges are an optional cache, not the authoritative status list.
+            // Compact the merged document (including other roots), retaining
+            // root summaries, urgent states and shallow paths first. Summaries
+            // already include all descendants, even when their badges are
+            // omitted. An omitted exact state stays unknown in Finder.
+            let roots = Set(snapshot.perRootUpdatedAt?.keys.map { $0 } ?? [])
+            let ordered = snapshot.entries.map { path, badge in
+                (path: path, root: roots.contains(path), priority: FinderBadgeBuilder.priority(badge),
+                 depth: path.utf8.filter { $0 == 47 }.count)
+            }.sorted {
+                if $0.root != $1.root { return $0.root }
+                if $0.priority != $1.priority { return $0.priority < $1.priority }
+                if $0.depth != $1.depth { return $0.depth < $1.depth }
+                return $0.path < $1.path
+            }
+            var count = ordered.count
+            while data.count > limit {
+                guard count > 0 else { throw FinderSharedStoreError.badgeSnapshotMetadataTooLarge }
+                // Use actual encoded bytes, including escaped/Unicode paths
+                // and ownership metadata, rather than a path-count estimate.
+                count = min(count - 1, Int(Double(count) * Double(limit) / Double(data.count) * 0.9))
+                let retained = Set(ordered.prefix(count).map(\.path))
+                let bounded = BadgeSnapshot(schemaVersion: snapshot.schemaVersion, generatedAt: snapshot.generatedAt,
+                    entries: snapshot.entries.filter { retained.contains($0.key) },
+                    entryOwners: snapshot.entryOwners?.filter { retained.contains($0.key) },
+                    directEntries: snapshot.directEntries?.filter { retained.contains($0.key) },
+                    perRootUpdatedAt: snapshot.perRootUpdatedAt)
+                data = try encode(bounded)
+            }
+        }
         try data.write(to: badgeSnapshotURL, options: .atomic)
     }
 

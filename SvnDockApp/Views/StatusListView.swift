@@ -20,6 +20,12 @@ struct StatusListView: View {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
             treeToolbar
+            if let warning = store.finderBadgeWarning {
+                Label(warning, systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16).padding(.bottom, 8)
+            }
             if store.selectedWorkingCopy != nil {
                 Button { store.requestIgnoreRecommendations() } label: {
                     HStack(spacing: 6) {

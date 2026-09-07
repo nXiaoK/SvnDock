@@ -5,6 +5,7 @@ enum FinderBadgeRegressionChecks {
     static func run() async throws {
         try badgeDerivation()
         try await snapshotOwnershipAndFreshness()
+        try await largeSnapshotsRemainReadable()
         try await requestsRemainBoundedAndRegistered()
         print("Finder badge core checks passed: exact states, folder summaries, bounded clean priority, per-root freshness, private requests and registration boundaries")
     }
@@ -104,6 +105,47 @@ enum FinderBadgeRegressionChecks {
         try check(removed.perRootUpdatedAt?[first.canonicalPath] == nil
                     && removed.directEntries?[nestedPath] == .clean,
                   "unregister clears only the retired root's metadata")
+    }
+
+    private static func largeSnapshotsRemainReadable() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("finder-large-snapshot-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let store = try FinderSharedStore(directoryURL: temporary)
+        let first = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/large-first"))
+        let second = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/large-second"))
+        _ = try await store.register(first)
+        _ = try await store.register(second)
+        let firstDate = Date(timeIntervalSince1970: 100)
+        let secondDate = Date(timeIntervalSince1970: 200)
+        try await store.replaceBadgeEntries(forWorkingCopyID: first.id, underWorkingCopyRoot: first.canonicalPath,
+            with: [first.canonicalPath: .modified], directEntries: [first.canonicalPath: .clean], updatedAt: firstDate)
+        let longName = String(repeating: "目录\\\"", count: 15)
+        let statuses = (0..<20_000).map { StatusEntry(path: "src/\(longName)-\($0).txt", status: .added) }
+            + [StatusEntry(path: "src/conflict.txt", status: .conflicted), StatusEntry(path: "src", status: .normal)]
+        let badges = FinderBadgeBuilder.build(from: statuses, in: second)
+        try await store.replaceBadgeEntries(forWorkingCopyID: second.id, underWorkingCopyRoot: second.canonicalPath,
+            with: badges.entries, directEntries: badges.directEntries, updatedAt: secondDate)
+        let data = try Data(contentsOf: temporary.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName))
+        let snapshot = try await store.loadBadgeSnapshot()
+        try check(data.count <= FinderSharedSchema.maximumBadgeSnapshotBytes
+                    && snapshot.entries.count < badges.entries.count,
+                  "large Unicode/escaped paths are compacted below the Finder reader's actual byte limit")
+        try check(snapshot.entries[first.canonicalPath] == .modified
+                    && snapshot.directEntries?[first.canonicalPath] == .clean
+                    && snapshot.perRootUpdatedAt?[first.canonicalPath] == firstDate,
+                  "compacting another root preserves the first root's summary, exact state and freshness")
+        try check(snapshot.entries[second.canonicalPath] == .conflicted
+                    && snapshot.entries[second.canonicalPath + "/src"] == .conflicted
+                    && snapshot.directEntries?[second.canonicalPath + "/src"] == .clean
+                    && snapshot.directEntries?[second.canonicalPath + "/src/conflict.txt"] == .conflicted
+                    && snapshot.perRootUpdatedAt?[second.canonicalPath] == secondDate,
+                  "conflicts and full-tree summaries survive without inventing exact directory conflicts")
+        try check(snapshot.entryOwners?.allSatisfy { snapshot.entries[$0.key] != nil } == true
+                    && snapshot.directEntries?.allSatisfy { snapshot.entries[$0.key] != nil } == true,
+                  "ownership and direct-state metadata are compacted with their matching display entries")
+        let omitted = badges.entries.keys.first { snapshot.entries[$0] == nil }
+        try check(omitted != nil && snapshot.directEntries?[omitted!] == nil,
+                  "omitted badges remain unknown, never clean or eligible through an ancestor summary")
     }
 
     private static func requestsRemainBoundedAndRegistered() async throws {

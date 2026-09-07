@@ -297,10 +297,12 @@ struct SvnDockStatusSnapshot: Sendable {
     let groupedMissingCount: Int
     let committableEntries: [SvnDockStatusEntry]
     let counts: SvnDockStatusCounts
+    let finderBadgeWarning: String?
 
     private let entryIndex: [SvnDockStatusEntry.ID: Int]
 
-    init(entries unsortedEntries: [SvnDockStatusEntry]) {
+    init(entries unsortedEntries: [SvnDockStatusEntry], finderBadgeWarning: String? = nil) {
+        self.finderBadgeWarning = finderBadgeWarning
         var enrichedEntries = unsortedEntries
         var missingIndices: [SvnDockStatusEntry.ID: Int] = [:]
         for (index, entry) in unsortedEntries.enumerated()

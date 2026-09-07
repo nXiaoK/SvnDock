@@ -71,7 +71,7 @@ public enum FinderBadgeBuilder {
         return priority(rhs) < priority(lhs) ? rhs : lhs
     }
 
-    private static func priority(_ badge: BadgeKind) -> Int {
+    static func priority(_ badge: BadgeKind) -> Int {
         switch badge {
         case .conflicted: 0
         case .missing: 1

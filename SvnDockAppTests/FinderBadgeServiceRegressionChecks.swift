@@ -85,8 +85,52 @@ enum FinderBadgeServiceRegressionChecks {
                   "an ordinary sparse refresh conservatively drops cached green nodes")
         try check(try String(contentsOf: fixture.copy.rootURL.appendingPathComponent("cache/nested/sentinel.txt"), encoding: .utf8) == "opaque sentinel\n",
                   "Finder observation never mutates ignored contents")
+        try await largeImportRefresh(executable: executable)
         print("Finder badge backend integration passed: real clean/modified/conflict states, ancestor summaries, opaque directories, foreign/symlink rejection and explicit Unicode paths")
         return true
+    }
+
+    @MainActor
+    private static func largeImportRefresh(executable: URL) async throws {
+        let fixture = try FinderBadgeFixture(executable: executable)
+        defer { try? FileManager.default.removeItem(at: fixture.temporary) }
+        try await fixture.create()
+        try FileManager.default.createDirectory(at: fixture.copy.rootURL.appendingPathComponent("incoming"), withIntermediateDirectories: false)
+        let count = 24_000
+        let runner = LargeImportStatusRunner(base: fixture.runner, count: count)
+        let service = try CoreSvnDockService(sharedStore: fixture.shared,
+            executableLocator: .init(candidatePaths: [executable.path]), processRunner: runner)
+        let store = SvnDockStore(service: service)
+        _ = await store.load()
+        try check(store.entries.count == 1 && store.entries.first?.status == .unversioned,
+                  "large import begins with one unversioned project")
+        store.selectedEntryIDs = Set(store.entries.map(\.id))
+        let added = await store.addSelectedEntries()
+        try check(added && store.presentedError == nil && store.finderBadgeWarning == nil
+                    && store.entries.count == count + 1 && store.statusCounts.changed == count + 1
+                    && store.entries.allSatisfy { $0.status == .added },
+                  "adding a large project replaces stale UI state with every added node despite the badge size limit")
+        let badgeURL = fixture.shared.directoryURL.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName)
+        let data = try Data(contentsOf: badgeURL)
+        let badges = try await fixture.shared.loadBadgeSnapshot()
+        try check(data.count <= FinderSharedSchema.maximumBadgeSnapshotBytes && badges.entries.count < store.entries.count,
+                  "only the optional Finder cache is bounded; App operation and commit lists stay complete")
+
+        // A cache I/O failure must not make a successful SVN read disappear.
+        try FileManager.default.removeItem(at: badgeURL)
+        try FileManager.default.createDirectory(at: badgeURL, withIntermediateDirectories: false)
+        await runner.useLatestSmallStatus()
+        await store.reloadSelectedWorkingCopy()
+        try check(store.presentedError == nil && store.finderBadgeWarning != nil
+                    && store.entries.count == 1 && store.entries.first?.relativePath == "latest.txt"
+                    && store.entries.first?.status == .modified,
+                  "cache failure shows a separate warning while publishing the latest authoritative SVN state")
+        try FileManager.default.removeItem(at: badgeURL)
+        await store.reloadSelectedWorkingCopy()
+        try check(store.finderBadgeWarning == nil && store.entries.count == 1,
+                  "a later successful badge publication clears the cache warning")
+        try check(await runner.addCount == 1, "refresh and cache recovery never repeat the add command")
+        print("Large import refresh checks passed: complete status, bounded badges, cache failure warning and no repeated add")
     }
 
     private static func expectRejected(_ operation: () async throws -> Void) async throws {
@@ -157,6 +201,44 @@ private struct FinderBadgeFixture: Sendable {
             currentDirectoryURL: directory ?? copy.rootURL))
         guard result.succeeded else { throw FinderBadgeServiceFailure(message: "fixture SVN failed: \(result.standardErrorString)") }
         return result
+    }
+}
+
+private actor LargeImportStatusRunner: ProcessRunning {
+    let base: any ProcessRunning
+    let largeStatus: Data
+    private(set) var addCount = 0
+    private var latestSmallStatus = false
+
+    init(base: any ProcessRunning, count: Int) {
+        self.base = base
+        let name = String(repeating: "large-module-", count: 10)
+        let entries = [Self.entry("incoming", status: "added")]
+            + (0..<count).map { Self.entry("incoming/\(name)\($0).txt", status: "added") }
+        largeStatus = Self.status(entries.joined())
+    }
+
+    func useLatestSmallStatus() { latestSmallStatus = true }
+
+    func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
+        switch invocation.arguments.first {
+        case "add":
+            addCount += 1
+            return .init(terminationStatus: 0, terminationReason: .exit, standardOutput: Data(), standardError: Data())
+        case "status":
+            let data = latestSmallStatus ? Self.status(Self.entry("latest.txt", status: "modified"))
+                : addCount > 0 ? largeStatus : Self.status(Self.entry("incoming", status: "unversioned"))
+            return .init(terminationStatus: 0, terminationReason: .exit, standardOutput: data, standardError: Data())
+        default:
+            return try await base.run(invocation)
+        }
+    }
+
+    private static func entry(_ path: String, status: String) -> String {
+        "<entry path=\"\(path)\"><wc-status item=\"\(status)\" props=\"none\"/></entry>"
+    }
+    private static func status(_ entries: String) -> Data {
+        Data("<status><target path=\".\">\(entries)</target></status>".utf8)
     }
 }
 

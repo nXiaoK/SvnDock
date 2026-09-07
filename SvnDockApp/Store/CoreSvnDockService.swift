@@ -149,16 +149,26 @@ actor CoreSvnDockService: SvnDockServicing {
                 let missingInfoByPath = try await Self.missingStatusInfo(
                     for: entries, in: coreCopy, builder: builder, runner: runner
                 )
-                let roots = try await badgeStore.loadRegisteredRoots().roots
-                let excluded = roots.filter { $0.enabled && $0.id != coreCopy.id && Self.path($0.path, isInside: coreCopy.canonicalPath) }.map(\.path)
-                let replacement = FinderBadgeBuilder.build(from: entries, in: coreCopy, excludingRoots: excluded)
-                try await badgeStore.replaceBadgeEntries(
-                    forWorkingCopyID: coreCopy.id,
-                    underWorkingCopyRoot: coreCopy.localPath.standardizedFileURL.path,
-                    with: replacement.entries,
-                    directEntries: replacement.directEntries
-                )
-                return StatusListingSnapshot(entries: entries, missingInfoByPath: missingInfoByPath)
+                var badgeWarning: String?
+                do {
+                    let roots = try await badgeStore.loadRegisteredRoots().roots
+                    let excluded = roots.filter { $0.enabled && $0.id != coreCopy.id && Self.path($0.path, isInside: coreCopy.canonicalPath) }.map(\.path)
+                    let replacement = FinderBadgeBuilder.build(from: entries, in: coreCopy, excludingRoots: excluded)
+                    try await badgeStore.replaceBadgeEntries(
+                        forWorkingCopyID: coreCopy.id,
+                        underWorkingCopyRoot: coreCopy.localPath.standardizedFileURL.path,
+                        with: replacement.entries,
+                        directEntries: replacement.directEntries
+                    )
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    // A successful SVN status read remains authoritative even
+                    // if this optional Finder cache cannot be published.
+                    badgeWarning = "本地 SVN 状态已刷新，但 Finder 角标未更新：\(error.localizedDescription)"
+                }
+                return StatusListingSnapshot(entries: entries, missingInfoByPath: missingInfoByPath,
+                                             finderBadgeWarning: badgeWarning)
             }
         }
 
@@ -185,7 +195,7 @@ actor CoreSvnDockService: SvnDockServicing {
             return value
         }
         postSharedStateChanged()
-        return SvnDockStatusSnapshot(entries: uiEntries)
+        return SvnDockStatusSnapshot(entries: uiEntries, finderBadgeWarning: listing.finderBadgeWarning)
     }
 
     func refreshFinderBadges(for workingCopy: SvnDockWorkingCopy, directoryPaths: [String], preferredPaths: [String] = []) async throws {
@@ -1756,6 +1766,7 @@ private struct MissingStatusInfo: Sendable {
 private struct StatusListingSnapshot: Sendable {
     let entries: [SvnDockCore.StatusEntry]
     let missingInfoByPath: [String: MissingStatusInfo]
+    let finderBadgeWarning: String?
 }
 
 private struct DirectoryListingSnapshot: Sendable {
