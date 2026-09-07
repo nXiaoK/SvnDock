@@ -15,7 +15,7 @@ struct IgnoreRecommendationsSheet: View {
                 Image(systemName: "sparkles").font(.system(size: 24)).foregroundStyle(SvnDockTheme.accent)
                 VStack(alignment: .leading, spacing: 5) {
                     Text("推荐忽略项").font(.system(size: 21, weight: .semibold))
-                    Text(workingCopy.name + " · 根据项目结构识别常见的生成文件")
+                    Text(workingCopy.name + " · 识别工具配置、依赖和构建输出")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
@@ -41,7 +41,7 @@ struct IgnoreRecommendationsSheet: View {
                 }
                 if plan.items.isEmpty {
                     SvnDockEmptyState(symbol: "checkmark.shield", title: "没有需要添加的推荐项",
-                        message: "常见生成目录不存在、已被忽略或已纳管时，不会重复推荐。")
+                        message: "常见工具配置和生成目录不存在、已被忽略或已纳管时，不会重复推荐。")
                 } else {
                     ScrollView {
                         LazyVStack(alignment: .leading, spacing: 0) {

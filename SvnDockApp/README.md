@@ -25,6 +25,17 @@ property changed in the meantime. Inherited `svn:global-ignores` and client
 configuration are not edited. A successful removal selects the restored item
 under **未纳管**; the parent property change still needs a commit.
 
+The workspace's **推荐忽略项…** scans existing unversioned items, including
+`.git` metadata (directories or worktree reference files), `.github`, `.idea`,
+and `outputs`, plus build-system outputs such as Maven modules' `target`
+directories next to `pom.xml`. Tool metadata and output directories are kept
+opaque after recommendation so their contents do not consume the scan budget.
+The review sheet explains that GitHub/IDE configuration and deliverables may
+need to be shared in SVN and can be unchecked. Versioned items are not
+recommended; a versioned `.idea` can still receive recommendations for its
+unversioned personal workspace files. Applying the selection preserves files
+and existing ignore rules, with no automatic SVN commit.
+
 ## Xcode target settings
 
 The repository-level `project.yml` already applies these settings when the

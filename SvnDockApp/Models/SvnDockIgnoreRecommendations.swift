@@ -43,7 +43,7 @@ enum SvnDockIgnoreRecommendationScanner {
             }
         }
         let opaqueNames: Set<String> = [".svn", ".git", ".hg", "node_modules", "vendor", "Pods", "Carthage",
-            ".build", "DerivedData", "target", "build", "dist", "bin", "obj", ".venv", "venv", "env",
+            ".github", "outputs", ".build", "DerivedData", "target", "build", "dist", "bin", "obj", ".venv", "venv", "env",
             "__pycache__", ".next", ".nuxt", ".output", ".gradle", ".dart_tool", ".tox", "coverage"]
         var pending: [(path: String, depth: Int, projects: Set<String>)] = [(".", 0, [])]
         var offset = 0
@@ -70,7 +70,9 @@ enum SvnDockIgnoreRecommendationScanner {
                 inspected += 1
                 guard inspected <= limits.entries else { partial = true; break }
                 let name = url.lastPathComponent
-                guard name != ".svn", name != ".git", name != ".hg" else { continue }
+                // Git metadata can be ignored by SVN, but must remain opaque
+                // to the scanner. Never inspect SVN's own administrative data.
+                guard name != ".svn", name != ".hg" else { continue }
                 let path = current.path == "." ? name : current.path + "/" + name
                 guard !blocked.contains(path),
                       let type = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.type] as? FileAttributeType,
@@ -137,6 +139,20 @@ enum SvnDockIgnoreRecommendationScanner {
                                        projects: Set<String>) -> (project: String, reason: String)? {
         if !directory, [".DS_Store", "Thumbs.db", "desktop.ini"].contains(name) {
             return ("系统文件", "操作系统生成的目录元数据")
+        }
+        if name == ".git" {
+            return ("Git", "Git 本地仓库元数据或工作树引用；忽略后仍保留在磁盘上")
+        }
+        if directory {
+            switch name {
+            case ".github":
+                return ("GitHub", "GitHub 工作流和协作配置；如需在 SVN 中共享，请取消勾选")
+            case ".idea":
+                return ("JetBrains IDE", "IDE 项目配置和工作区状态；如需在 SVN 中共享，请取消勾选")
+            case "outputs":
+                return ("项目输出", "常见输出目录；如包含需要纳管的交付文件，请取消勾选")
+            default: break
+            }
         }
         if (parent as NSString).lastPathComponent == ".idea",
            (!directory && ["workspace.xml", "tasks.xml", "usage.statistics.xml"].contains(name)
