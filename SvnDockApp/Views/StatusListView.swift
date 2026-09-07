@@ -703,7 +703,7 @@ private struct StatusTreeEntryRowView: View {
         }
 
         if !selection.addableEntries.isEmpty {
-            Button("添加 \(selection.countLabel(selection.addableEntries.count)) 到 SVN") {
+            Button(selection.addActionTitle) {
                 store.selectedEntryIDs = selection.entryIDs
                 let ids = Set(selection.addableEntries.map(\.id))
                 Task { await store.addSelectedEntries(entryIDs: ids) }

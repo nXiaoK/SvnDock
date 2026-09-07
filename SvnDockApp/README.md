@@ -36,6 +36,13 @@ recommended; a versioned `.idea` can still receive recommendations for its
 unversioned personal workspace files. Applying the selection preserves files
 and existing ignore rules, with no automatic SVN commit.
 
+During a first import, storing `svn:ignore` schedules only the necessary parent
+directories. This can expose client or inherited ignore rules that SVN could
+not report below an unversioned ancestor. Recommended items that consequently
+become ignored remain valid; versioned or missing items still reject the
+operation. The parent then shows **已添加**, and its **添加目录内容到 SVN**
+action recursively adds the remaining source while respecting ignore rules.
+
 Large imports keep their complete SVN status and commit selection in the App.
 Finder's shared badge cache is independently bounded to its reader's 8 MiB
 limit, prioritizing working-copy summaries, conflicts and shallow paths while

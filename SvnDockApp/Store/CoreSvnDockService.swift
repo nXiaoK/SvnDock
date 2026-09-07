@@ -992,7 +992,8 @@ actor CoreSvnDockService: SvnDockServicing {
                     try Self.validateIgnoreTargets(
                         rulesForParent,
                         entries: currentEntries,
-                        in: coreCopy
+                        in: coreCopy,
+                        allowAlreadyIgnored: recommendationPlan != nil
                     )
 
                 // Do not touch the working copy when every requested rule was
@@ -1555,16 +1556,21 @@ actor CoreSvnDockService: SvnDockServicing {
     private static func validateIgnoreTargets(
         _ rules: [SvnDockIgnoreRule],
         entries: [SvnDockCore.StatusEntry],
-        in workingCopy: SvnDockCore.WorkingCopy
+        in workingCopy: SvnDockCore.WorkingCopy,
+        allowAlreadyIgnored: Bool = false
     ) throws {
         for rule in rules {
+            // A scan below an unversioned ancestor cannot see inherited or
+            // client ignore rules. Scheduling the parent at depth empty can
+            // expose those rules and turn the selected child into "ignored".
+            // It is still unversioned and safe to add the reviewed exact rule.
             guard let entry = statusEntry(
                 for: rule.targetRelativePath,
                 entries: entries,
                 in: workingCopy
-            ), entry.status == .unversioned else {
+            ), entry.status == .unversioned || (allowAlreadyIgnored && entry.status == .ignored) else {
                 throw SvnDockServiceError.invalidIgnoreTarget(
-                    "所选项目已经不再是未纳管状态，请刷新后重试。"
+                    "“\(rule.targetRelativePath)”的当前状态不允许添加忽略规则，请刷新后重新选择。"
                 )
             }
             if rule.mode == .fileExtension, entry.kind != .file {

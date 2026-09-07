@@ -80,6 +80,7 @@ struct IgnoreRecommendationsSheet: View {
             Divider()
             VStack(alignment: .leading, spacing: 8) {
                 Text("文件保留在磁盘上。规则合并到各父目录的 svn:ignore；必要时仅添加父目录链，属性变更需另行提交。")
+                Text("父目录显示“已添加”后，仍可右键“添加目录内容到 SVN”，添加其余未忽略文件。")
                 Text("仅推荐当前存在的未纳管项目。请取消勾选需要纳管的自定义目录；已有规则和已纳管文件保留。")
             }
             .font(.system(size: 11)).foregroundStyle(.secondary)

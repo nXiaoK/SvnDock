@@ -161,7 +161,7 @@ private struct SelectionInspector: View {
                 .svnDockSurface(cornerRadius: 9)
 
                 VStack(alignment: .leading, spacing: 10) {
-                    Button("添加 \(selection.countLabel(selection.addableEntries.count)) 到 SVN") {
+                    Button(selection.addActionTitle) {
                         let ids = Set(selection.addableEntries.map(\.id))
                         Task { await store.addSelectedEntries(entryIDs: ids) }
                     }

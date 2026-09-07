@@ -17,6 +17,12 @@ struct StatusActionSelection {
     var addableEntries: [SvnDockStatusEntry] {
         entries.filter { $0.status == .unversioned || ($0.status == .added && $0.nodeKind == .directory) }
     }
+    var addActionTitle: String {
+        if entries.count == 1, addableEntries.first?.status == .added {
+            return "添加目录内容到 SVN"
+        }
+        return "添加 \(countLabel(addableEntries.count)) 到 SVN"
+    }
     var revertibleEntries: [SvnDockStatusEntry] { entries.filter { $0.status.isChange } }
     var directoryCount: Int { entries.filter { $0.nodeKind == .directory }.count }
 

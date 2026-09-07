@@ -13,7 +13,11 @@ enum IgnoreRecommendationRegressionChecks {
         defer { try? FileManager.default.removeItem(at: directory) }
         let repo = directory.appendingPathComponent("repo", isDirectory: true)
         let root = directory.appendingPathComponent("wc", isDirectory: true)
-        let runner = RecommendationRunner(config: directory.appendingPathComponent("config"))
+        let config = directory.appendingPathComponent("config")
+        try FileManager.default.createDirectory(at: config, withIntermediateDirectories: false)
+        let clientConfiguration = "[miscellany]\nglobal-ignores = .DS_Store\n"
+        try Data(clientConfiguration.utf8).write(to: config.appendingPathComponent("config"))
+        let runner = RecommendationRunner(config: config)
         let admin = try await ProcessRunner().run(.init(executableURL: executable.deletingLastPathComponent().appendingPathComponent("svnadmin"), arguments: ["create", repo.path]))
         try check(admin.succeeded, "disposable repository creation succeeds")
         func svn(_ args: [String], cwd: URL? = nil) async throws -> ProcessResult {
@@ -32,6 +36,7 @@ enum IgnoreRecommendationRegressionChecks {
         _ = try await svn(["add", "tracked"])
         _ = try await svn(["propset", "svn:ignore", "existing-rule", "tracked"])
         _ = try await svn(["propset", "custom:keep", "preserved", "tracked"])
+        _ = try await svn(["propset", "svn:global-ignores", ".build", "."])
         _ = try await svn(["commit", "-m", "Seed tracked project", "."])
         let contents = ["web/package.json", "web/package-lock.json", "web/src/App.vue", "web/node_modules/pkg/index.js",
                         "web/dist/output.js", "web/.idea/workspace.xml", "web/.idea/modules.xml",
@@ -44,7 +49,9 @@ enum IgnoreRecommendationRegressionChecks {
                         "imported/outputs/result.txt", "imported/backend/pom.xml", "imported/backend/parent/module/pom.xml",
                         "imported/backend/parent/module/src/Main.java", "imported/backend/parent/module/target/classes/Main.class",
                         "imported/backend/inherited-module/target/classes/Inherited.class",
-                        "worktree/.git", "worktree/src/keep.swift", "plain/target/important.txt"]
+                        "worktree/.git", "worktree/src/keep.swift", "plain/target/important.txt",
+                        "first-import/.DS_Store", "first-import/.git/config", "first-import/outputs/report.txt",
+                        "first-import/Package.swift", "first-import/.build/debug/tool", "first-import/src/main.swift"]
         for path in contents { try write(path) }
         // A first import often already has a scheduled parent after applying
         // other ignore rules, while its nested Maven modules remain unversioned.
@@ -74,6 +81,9 @@ enum IgnoreRecommendationRegressionChecks {
                   "project markers enable scoped recommendations for common build systems")
         let importedSelection: Set<String> = ["imported/.git", "imported/.github", "imported/.idea", "imported/outputs",
                                              "imported/backend/parent/module/target", "imported/backend/inherited-module/target", "worktree/.git"]
+        let firstImportSelection: Set<String> = ["first-import/.DS_Store", "first-import/.git", "first-import/outputs", "first-import/.build"]
+        try check(firstImportSelection.isSubset(of: ids),
+                  "recommendations below an unversioned first import include client/inherited ignored names not yet reported by SVN")
         try check(importedSelection.isSubset(of: ids), "first imports detect Git, GitHub, IDEA, outputs and nested Maven targets")
         try check(!plan.isPartial && plan.scannedDirectories < 80,
                   "large recommended output directories cannot exhaust the scan budget before nested Maven modules")
@@ -126,7 +136,7 @@ enum IgnoreRecommendationRegressionChecks {
         store.requestIgnoreRecommendations()
         let currentCopy = try require(store.selectedWorkingCopy)
         let fresh = try await store.prepareIgnoreRecommendations(in: currentCopy)
-        let selected = importedSelection.union(["web/node_modules", "tracked/node_modules", "web/.idea", "tracked/.idea/workspace.xml"])
+        let selected = importedSelection.union(firstImportSelection).union(["web/node_modules", "tracked/node_modules", "web/.idea", "tracked/.idea/workspace.xml"])
         store.confirmIgnoreRecommendations(fresh, selectedIDs: selected)
         store.confirmIgnoreRecommendations(fresh, selectedIDs: selected)
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
@@ -155,7 +165,41 @@ enum IgnoreRecommendationRegressionChecks {
                   "scheduling a nested ignore parent never recursively adds module source")
         let revision = try await svn(["info", "--show-item", "revision", repo.absoluteString])
         try check(revision.standardOutputString == "1\n", "one-click ignore never creates a repository commit")
-        print("Ignore recommendation checks passed: tool metadata, opaque outputs, nested Maven imports, bounded scans, WC boundaries, stale batches, repeat clicks, property merge and content preservation")
+        let firstParent = try require(store.entries.first { $0.relativePath == "first-import" })
+        let parentAction = StatusActionSelection.context(for: firstParent, selectedEntries: [firstParent])
+        try check(firstParent.status == .added && firstParent.nodeKind == .directory
+                    && parentAction.addableEntries.count == 1 && parentAction.addActionTitle == "添加目录内容到 SVN",
+                  "a parent scheduled for ignore properties keeps a clear, enabled recursive Add action")
+        let firstRules = try await svn(["propget", "--strict", "svn:ignore", "first-import"])
+        try check(Set(firstRules.standardOutputString.split(separator: "\n").map(String.init))
+                    == Set([".DS_Store", ".git", ".build", "outputs"]),
+                  "client and inherited ignored targets still receive the reviewed portable exact-name rules")
+        let added = await store.addSelectedEntries(entryIDs: [firstParent.id])
+        try check(added && store.presentedError == nil
+                    && store.entries.contains { $0.relativePath == "first-import/src/main.swift" && $0.status == .added }
+                    && !store.entries.contains { entry in firstImportSelection.contains(where: {
+                        entry.relativePath == $0 || entry.relativePath.hasPrefix($0 + "/")
+                    }) },
+                  "Add on the scheduled parent adds source while excluding every ignored subtree")
+        try check(try String(contentsOf: config.appendingPathComponent("config"), encoding: .utf8) == clientConfiguration,
+                  "recommendations never rewrite client ignore configuration")
+        let inheritedRules = try await svn(["propget", "--strict", "svn:global-ignores", "."])
+        try check(inheritedRules.standardOutputString == ".build\n", "inherited ignore properties remain unchanged")
+        // The commit sheet reviews individual nodes. Selecting only a folder
+        // intentionally commits its properties without unselected child edits.
+        let reviewedPaths = store.committableEntries.filter {
+            $0.relativePath == "first-import" || $0.relativePath.hasPrefix("first-import/")
+        }.map(\.relativePath)
+        try await service.commit(workingCopy: currentCopy, relativePaths: reviewedPaths, message: "Import only reviewed source")
+        let importedFiles = try await svn(["list", "--recursive", repo.appendingPathComponent("first-import", isDirectory: true).absoluteString])
+        try check(Set(importedFiles.standardOutputString.split(separator: "\n").map(String.init))
+                    == Set(["Package.swift", "src/", "src/main.swift"]),
+                  "the explicit project commit uploads only source, excluding Git metadata and generated files")
+        for path in contents {
+            try check(try String(contentsOf: root.appendingPathComponent(path), encoding: .utf8) == "fixture content",
+                      "ignore, recursive Add and explicit commit preserve local contents")
+        }
+        print("Ignore recommendation checks passed: client/inherited ignore transitions, parent Add action, explicit project commit, metadata, nested Maven imports, stale batches and content preservation")
     }
 
     private static func check(_ condition: Bool, _ message: String) throws {
