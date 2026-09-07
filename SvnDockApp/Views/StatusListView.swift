@@ -5,6 +5,8 @@ struct StatusListView: View {
     @ObservedObject var store: SvnDockStore
 
     @Environment(\.openWindow) private var openWindow
+    @State private var collapsedPaths = Set<String>()
+    @State private var compactDirectories = true
 
     private var statusCounts: [SvnDockStatusFilter: Int] {
         let counts = store.statusCounts
@@ -17,6 +19,7 @@ struct StatusListView: View {
         VStack(spacing: 0) {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
+            treeToolbar
 
             if store.statusFilter == .all, store.searchQuery.isEmpty,
                let entry = store.finderTargetOutsideChangeList {
@@ -200,6 +203,7 @@ struct StatusListView: View {
                 }
                 .listStyle(.plain)
                 .scrollContentBackground(.hidden)
+                .environment(\.defaultMinListRowHeight, 28)
                 // Native primary actions preserve immediate List selection,
                 // including Command/Shift clicks and keyboard navigation.
                 // A row-level double-tap gesture consumes those mouse events.
@@ -209,8 +213,11 @@ struct StatusListView: View {
                     guard !store.isInteractionBlocked, entryIDs.count == 1 else { return }
                     store.selectedEntryIDs = entryIDs
                     guard let entry = store.primarySelectedEntry else { return }
-                    if store.canExpandDirectory(entry) {
-                        store.toggleDirectoryExpansion(for: entry)
+                    if let node = statusTreeRows.compactMap({ row -> SvnDockStatusTree.Node? in
+                        if case let .node(node) = row.kind, node.entry?.id == entry.id { return node }
+                        return nil
+                    }).first, !node.children.isEmpty || store.canExpandDirectory(entry) {
+                        toggle(node)
                     } else {
                         openDiffWindow(for: entry)
                     }
@@ -221,6 +228,17 @@ struct StatusListView: View {
             statusFooter
         }
         .background(SvnDockTheme.surface)
+        .onChange(of: store.selectedWorkingCopyID) { collapsedPaths = [] }
+        .onChange(of: store.statusFilter) { collapsedPaths = [] }
+        .onChange(of: store.searchQuery) { collapsedPaths = [] }
+        .onChange(of: store.selectedEntryIDs) {
+            // Finder and keyboard selection should reveal a hidden descendant.
+            for entry in store.selectedEntries {
+                collapsedPaths = collapsedPaths.filter {
+                    entry.relativePath != $0 && !entry.relativePath.hasPrefix($0 + "/")
+                }
+            }
+        }
     }
 
     private func workspaceHeader(counts: [SvnDockStatusFilter: Int]) -> some View {
@@ -376,83 +394,123 @@ struct StatusListView: View {
         }
     }
 
+    private var treeToolbar: some View {
+        HStack(spacing: 10) {
+            Label("目录树", systemImage: "list.bullet.indent")
+                .foregroundStyle(SvnDockTheme.secondaryText)
+            Spacer(minLength: 0)
+            Button { collapsedPaths = statusTree.directoryPaths } label: {
+                Image(systemName: "chevron.up.chevron.down")
+            }
+            .help("全部收起")
+            .accessibilityLabel("收起全部目录")
+            Button { collapsedPaths = [] } label: {
+                Image(systemName: "arrow.up.left.and.arrow.down.right")
+            }
+            .help("展开已载入的目录")
+            .accessibilityLabel("展开已载入的目录")
+            Menu {
+                Toggle("合并连续的空目录层级", isOn: $compactDirectories)
+            } label: { Image(systemName: "ellipsis") }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        .font(.system(size: 11))
+        .buttonStyle(.plain)
+        .disabled(store.isInteractionBlocked)
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+    }
+
+    private var statusTree: SvnDockStatusTree {
+        var entries = store.displayedEntries
+        var seen = Set(entries.map(\.id))
+        func collect(_ entry: SvnDockStatusEntry) {
+            guard store.isDirectoryExpanded(entry) else { return }
+            for child in store.visibleDirectoryChildren(for: entry) {
+                if seen.insert(child.id).inserted { entries.append(child) }
+                collect(child)
+            }
+        }
+        for entry in store.displayedEntries { collect(entry) }
+        return SvnDockStatusTree(entries: entries, compact: compactDirectories)
+    }
+
+    private func isExpanded(_ node: SvnDockStatusTree.Node) -> Bool {
+        !collapsedPaths.contains(node.path) && (!node.children.isEmpty
+            || node.entry.map { store.isDirectoryExpanded($0) } == true)
+    }
+
+    private func toggle(_ node: SvnDockStatusTree.Node) {
+        if isExpanded(node) {
+            collapsedPaths.insert(node.path)
+        } else {
+            collapsedPaths.remove(node.path)
+            if let entry = node.entry, store.canExpandDirectory(entry),
+               !store.isDirectoryExpanded(entry) {
+                store.toggleDirectoryExpansion(for: entry)
+            }
+        }
+    }
+
     private var statusTreeRows: [StatusTreeRow] {
         var rows: [StatusTreeRow] = []
-        var nestedEntryIDs = Set<SvnDockStatusEntry.ID>()
-        for entry in store.displayedEntries {
-            collectNestedEntryIDs(for: entry, into: &nestedEntryIDs)
+        func append(_ node: SvnDockStatusTree.Node, depth: Int) {
+            rows.append(.init(id: "tree::" + node.path, depth: depth, kind: .node(node)))
+            guard isExpanded(node) else { return }
+            for child in node.children { append(child, depth: depth + 1) }
+            if let entry = node.entry {
+                if store.isLoadingDirectory(entry) {
+                    rows.append(.loading(parent: entry, depth: depth + 1))
+                } else if let message = store.directoryError(for: entry) {
+                    rows.append(.error(parent: entry, message: message, depth: depth + 1))
+                } else if store.hasMoreDirectoryChildren(for: entry) {
+                    rows.append(.more(parent: entry, count: store.remainingDirectoryChildCount(for: entry), depth: depth + 1))
+                }
+            }
         }
-
-        var appendedEntryIDs = Set<SvnDockStatusEntry.ID>()
-        for entry in store.displayedEntries where !nestedEntryIDs.contains(entry.id) {
-            appendStatusTreeRows(
-                for: entry,
-                depth: 0,
-                appendedEntryIDs: &appendedEntryIDs,
-                to: &rows
-            )
-        }
+        for root in statusTree.roots { append(root, depth: 0) }
         return rows
-    }
-
-    private func collectNestedEntryIDs(
-        for entry: SvnDockStatusEntry,
-        into nestedEntryIDs: inout Set<SvnDockStatusEntry.ID>
-    ) {
-        guard store.isDirectoryExpanded(entry) else { return }
-        for child in store.visibleDirectoryChildren(for: entry) {
-            nestedEntryIDs.insert(child.id)
-            collectNestedEntryIDs(for: child, into: &nestedEntryIDs)
-        }
-    }
-
-    private func appendStatusTreeRows(
-        for entry: SvnDockStatusEntry,
-        depth: Int,
-        appendedEntryIDs: inout Set<SvnDockStatusEntry.ID>,
-        to rows: inout [StatusTreeRow]
-    ) {
-        guard appendedEntryIDs.insert(entry.id).inserted else { return }
-        rows.append(.entry(entry, depth: depth))
-        guard store.isDirectoryExpanded(entry) else { return }
-
-        for child in store.visibleDirectoryChildren(for: entry) {
-            appendStatusTreeRows(
-                for: child,
-                depth: depth + 1,
-                appendedEntryIDs: &appendedEntryIDs,
-                to: &rows
-            )
-        }
-
-        if store.isLoadingDirectory(entry) {
-            rows.append(.loading(parent: entry, depth: depth + 1))
-        } else if let message = store.directoryError(for: entry) {
-            rows.append(.error(parent: entry, message: message, depth: depth + 1))
-        } else if store.hasMoreDirectoryChildren(for: entry) {
-            rows.append(.more(
-                parent: entry,
-                count: store.remainingDirectoryChildCount(for: entry),
-                depth: depth + 1
-            ))
-        }
     }
 
     @ViewBuilder
     private func statusTreeRow(_ row: StatusTreeRow) -> some View {
         switch row.kind {
-        case let .entry(entry):
-            StatusTreeEntryRowView(
-                store: store,
-                entry: entry,
-                depth: row.depth,
-                openDiffWindow: openDiffWindow(for:)
-            )
-                .svnDockCardSelection()
-                .tag(entry.id)
-                .listRowInsets(EdgeInsets(top: 0, leading: 12, bottom: 8, trailing: 12))
-                .listRowSeparator(.hidden)
-                .listRowBackground(Color.clear)
+        case let .node(node):
+            Group {
+                if let entry = node.entry {
+                    StatusTreeEntryRowView(
+                        store: store, entry: entry, depth: row.depth,
+                        childCount: node.children.reduce(0) { $0 + $1.itemCount },
+                        canExpand: !node.children.isEmpty || store.canExpandDirectory(entry),
+                        expanded: isExpanded(node), toggle: { toggle(node) },
+                        openDiffWindow: openDiffWindow(for:)
+                    )
+                    .tag(entry.id)
+                } else {
+                    Button { toggle(node) } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: isExpanded(node) ? "chevron.down" : "chevron.right")
+                                .font(.system(size: 9, weight: .semibold)).frame(width: 16)
+                            Image(systemName: isExpanded(node) ? "folder.fill" : "folder")
+                                .foregroundStyle(SvnDockTheme.secondaryText).frame(width: 18)
+                            Text(node.name).lineLimit(1).truncationMode(.middle)
+                            Text("\(node.itemCount) 项").foregroundStyle(.secondary).font(.system(size: 11))
+                            Spacer(minLength: 0)
+                        }
+                        .font(.system(size: 12))
+                        .padding(.leading, CGFloat(row.depth) * 16 + 6)
+                        .frame(height: 28)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help(node.path + "（分组目录，仅用于导航）")
+                }
+            }
+            .svnDockCardSelection()
+            .listRowInsets(EdgeInsets(top: 0, leading: 6, bottom: 0, trailing: 6))
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         case .loading:
             directoryMessage(depth: row.depth) {
                 ProgressView()
@@ -519,7 +577,7 @@ struct StatusListView: View {
 
 private struct StatusTreeRow: Identifiable {
     enum Kind {
-        case entry(SvnDockStatusEntry)
+        case node(SvnDockStatusTree.Node)
         case loading(parent: SvnDockStatusEntry)
         case error(parent: SvnDockStatusEntry, message: String)
         case more(parent: SvnDockStatusEntry, count: Int)
@@ -528,10 +586,6 @@ private struct StatusTreeRow: Identifiable {
     let id: String
     let depth: Int
     let kind: Kind
-
-    static func entry(_ entry: SvnDockStatusEntry, depth: Int) -> Self {
-        Self(id: entry.id, depth: depth, kind: .entry(entry))
-    }
 
     static func loading(parent: SvnDockStatusEntry, depth: Int) -> Self {
         Self(id: "directory-loading::\(parent.id)", depth: depth, kind: .loading(parent: parent))
@@ -562,49 +616,58 @@ private struct StatusTreeEntryRowView: View {
     @ObservedObject var store: SvnDockStore
     let entry: SvnDockStatusEntry
     let depth: Int
+    let childCount: Int
+    let canExpand: Bool
+    let expanded: Bool
+    let toggle: () -> Void
     let openDiffWindow: (SvnDockStatusEntry) -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
-            expansionControl
-            StatusEntryRow(entry: entry)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 12)
-        .background(
-            store.selectedEntryIDs.contains(entry.id) ? SvnDockTheme.selection : SvnDockTheme.surface,
-            in: RoundedRectangle(cornerRadius: 10)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 10)
-                .stroke(
-                    store.selectedEntryIDs.contains(entry.id)
-                        ? SvnDockTheme.accent.opacity(0.2) : SvnDockTheme.border,
-                    lineWidth: 1
-                )
-                .allowsHitTesting(false)
-        }
-        .padding(.leading, CGFloat(depth) * 16)
-        .contentShape(RoundedRectangle(cornerRadius: 10))
-        .contextMenu { entryContextMenu }
-    }
-
-    @ViewBuilder
-    private var expansionControl: some View {
-        if store.canExpandDirectory(entry) {
-            Button {
-                store.toggleDirectoryExpansion(for: entry)
-            } label: {
-                Image(systemName: store.isDirectoryExpanded(entry)
-                    ? "chevron.down"
-                    : "chevron.right")
-                    .font(.caption.weight(.semibold))
-                    .frame(width: 32, height: 32)
+        HStack(spacing: 6) {
+            Button(action: toggle) {
+                Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+                    .frame(width: 16, height: 28)
                     .contentShape(Rectangle())
             }
-            .buttonStyle(SvnDockPlainButtonStyle())
-            .help(store.isDirectoryExpanded(entry) ? "收起目录" : "展开目录")
+            .buttonStyle(.plain)
+            .disabled(!canExpand)
+            .opacity(canExpand ? 1 : 0)
+            .accessibilityLabel(expanded ? "收起目录" : "展开目录")
+            StatusTreeFileIcon(entry: entry)
+            Text(entry.fileName)
+                .font(.system(size: 12, weight: entry.nodeKind == .directory ? .medium : .regular))
+                .foregroundStyle(entry.status == .unversioned ? SvnDockTheme.text : entry.status.tint)
+                .lineLimit(1).truncationMode(.middle)
+                .layoutPriority(1)
+            if childCount > 0 {
+                Text("\(childCount) 项").font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 2)
+            if entry.switchedAncestorPath != nil {
+                Image(systemName: "arrow.triangle.branch").foregroundStyle(.orange)
+                    .help("此项目位于已切换分支的子树")
+            }
+            if let remote = entry.repositoryStatus, remote != .clean {
+                Image(systemName: "arrow.down.circle").foregroundStyle(remote.tint)
+                    .help("仓库端：\(remote.displayName)")
+            }
+            Text(entry.status.displayName)
+                .font(.system(size: 9, weight: .medium))
+                .foregroundStyle(entry.status.tint)
+                .fixedSize()
         }
+        .padding(.leading, CGFloat(depth) * 16 + 6)
+        .padding(.trailing, 6)
+        .frame(height: 28)
+        .background(store.selectedEntryIDs.contains(entry.id) ? SvnDockTheme.selection : .clear,
+                    in: RoundedRectangle(cornerRadius: 4))
+        .contentShape(Rectangle())
+        .help(entry.relativePath + " · " + entry.status.displayName
+              + (entry.missingDescendantCount > 0 ? " · 含 \(entry.missingDescendantCount) 个缺失子项" : ""))
+        .contextMenu { entryContextMenu }
+        .accessibilityElement(children: .contain)
     }
 
     @ViewBuilder
@@ -756,53 +819,37 @@ private struct StatusTreeEntryRowView: View {
     }
 }
 
-private struct StatusEntryRow: View {
+struct StatusTreeFileIcon: View {
     let entry: SvnDockStatusEntry
 
-    var body: some View {
-        HStack(spacing: 10) {
-            SvnDockFileIcon(entry: entry, size: 38)
+    private var fileType: (String, Color)? {
+        switch (entry.relativePath as NSString).pathExtension.lowercased() {
+        case "js", "jsx", "mjs", "cjs": ("JS", .orange)
+        case "ts", "tsx": ("TS", .blue)
+        case "vue": ("V", SvnDockTheme.green)
+        case "swift": ("S", .orange)
+        case "java", "kt": ("J", .orange)
+        case "py": ("PY", .blue)
+        case "json", "yml", "yaml": ("{}", .purple)
+        case "md", "txt": ("M", SvnDockTheme.secondaryText)
+        default: nil
+        }
+    }
 
-            VStack(alignment: .leading, spacing: 6) {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(entry.fileName)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(SvnDockTheme.text)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    SvnDockStatusPill(status: entry.status)
-                        .fixedSize()
-                }
-                HStack(spacing: 6) {
-                    Text(entry.parentPath.isEmpty ? "/" : entry.parentPath)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if let changelist = entry.changelist {
-                        Text(changelist)
-                            .lineLimit(1)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 2)
-                            .background(SvnDockTheme.secondaryText.opacity(0.08), in: RoundedRectangle(cornerRadius: 4))
-                    }
-                    if let repositoryStatus = entry.repositoryStatus, repositoryStatus != .clean {
-                        Image(systemName: "arrow.down.circle.fill")
-                            .foregroundStyle(repositoryStatus.tint)
-                            .help("仓库端：\(repositoryStatus.displayName)")
-                    }
-                }
-                .font(.system(size: 11))
-                .foregroundStyle(SvnDockTheme.secondaryText)
-                if entry.missingDescendantCount > 0 {
-                    Text("含 \(entry.missingDescendantCount) 个缺失子项")
-                        .font(.system(size: 10))
-                        .foregroundStyle(SvnDockTheme.secondaryText)
-                }
+    var body: some View {
+        Group {
+            if entry.nodeKind == .directory {
+                Image(systemName: "folder.fill").foregroundStyle(SvnDockTheme.accent.opacity(0.75))
+            } else if let (label, color) = fileType {
+                Text(label).font(.system(size: 8, weight: .bold, design: .monospaced))
+                    .foregroundStyle(color)
+                    .frame(width: 17, height: 17)
+                    .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 3))
+            } else {
+                Image(systemName: "doc").foregroundStyle(SvnDockTheme.secondaryText)
             }
         }
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(entry.relativePath)，\(entry.status.displayName)")
+        .frame(width: 18, height: 20)
+        .accessibilityHidden(true)
     }
 }

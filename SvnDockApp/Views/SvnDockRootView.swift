@@ -21,7 +21,7 @@ struct SvnDockRootView: View {
                     Divider().overlay(SvnDockTheme.border)
                     HSplitView {
                         StatusListView(store: store)
-                            .frame(minWidth: 300, idealWidth: 348, maxWidth: 400)
+                            .frame(minWidth: 300, idealWidth: 370, maxWidth: 560)
                         InspectorView(store: store)
                             .frame(minWidth: 430, maxWidth: .infinity, maxHeight: .infinity)
                     }

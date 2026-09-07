@@ -5,6 +5,7 @@ struct AppRegressionSmoke {
     static func main() async throws {
         try await SVNSafetyRegressionChecks.run()
 #if !SVNDOCK_SAFETY_SMOKE
+        try StatusTreeRegressionChecks.run()
         try await CommitDraftRegressionChecks.run()
         try await SelectedCommitRegressionChecks.run()
         try ReviewInteractionRegressionChecks.localPreviewBoundaries()
