@@ -27,6 +27,14 @@ jobs:
       - name: Show toolchain
         run: swift --version
 
+      - name: Ensure real SVN integration tests can run
+        run: |
+          if ! command -v svn >/dev/null || ! command -v svnadmin >/dev/null; then
+            brew install subversion
+          fi
+          svn --version --quiet
+          svnadmin --version --quiet
+
       - name: Run unit tests
         run: swift test --disable-sandbox
 
