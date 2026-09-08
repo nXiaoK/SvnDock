@@ -242,21 +242,50 @@ public struct SVNCommandBuilder: Sendable {
                          "--new", try repositoryTarget(repositoryRoot, revision: revision)]
             appendCommonOptions(to: &arguments)
 
+        case let .revisionCopyDeletionSummary(repositoryRoot, revision, change):
+            try validateHistoryRevision(revision)
+            guard change.kind == .directory, change.deletesCopySource,
+                  let sourcePath = change.copyFromPath, let sourceRevision = change.copyFromRevision else {
+                throw SVNCommandBuilderError.invalidArgument("A copied directory deletion is required")
+            }
+            guard sourceRevision >= 0, sourceRevision < revision else {
+                throw SVNCommandBuilderError.invalidRevision(sourceRevision)
+            }
+            let source = try SVNRepositoryPath.validate(sourcePath)
+            arguments = ["diff", "--summarize", "--xml", "--depth", "infinity",
+                         "--old", try repositoryTarget(repositoryRoot, revision: sourceRevision),
+                         "--new", try repositoryTarget(repositoryRoot, revision: 0)]
+            appendCommonOptions(to: &arguments)
+            arguments.append(contentsOf: ["--", source])
+
         case let .revisionDiff(repositoryRoot, revision, change):
             try validateHistoryRevision(revision)
             let path = try SVNRepositoryPath.validate(change.path)
             arguments = ["diff", "--internal-diff", "--depth", "empty"]
-            if change.comparesCopySource,
+            if change.comparesCopySource || change.deletesCopySource,
                let sourcePath = change.copyFromPath, let sourceRevision = change.copyFromRevision {
                 guard sourceRevision >= 0, sourceRevision < revision else {
                     throw SVNCommandBuilderError.invalidRevision(sourceRevision)
                 }
                 let source = try SVNRepositoryPath.validate(sourcePath)
-                arguments.append(contentsOf: [
-                    "--old", try repositoryTarget(repositoryRoot.appendingPathComponent(source), revision: sourceRevision),
-                    "--new", try repositoryTarget(repositoryRoot.appendingPathComponent(path), revision: revision)
-                ])
-                appendCommonOptions(to: &arguments)
+                if change.deletesCopySource {
+                    // The copied destination never existed in either N-1 or N.
+                    // Compare the actual source with the empty repository at r0
+                    // so SVN can show its complete deletion without resolving a
+                    // nonexistent destination peg URL.
+                    arguments.append(contentsOf: [
+                        "--old", try repositoryTarget(repositoryRoot, revision: sourceRevision),
+                        "--new", try repositoryTarget(repositoryRoot, revision: 0)
+                    ])
+                    appendCommonOptions(to: &arguments)
+                    arguments.append(contentsOf: ["--", source])
+                } else {
+                    arguments.append(contentsOf: [
+                        "--old", try repositoryTarget(repositoryRoot.appendingPathComponent(source), revision: sourceRevision),
+                        "--new", try repositoryTarget(repositoryRoot.appendingPathComponent(path), revision: revision)
+                    ])
+                    appendCommonOptions(to: &arguments)
+                }
             } else {
                 // Anchoring both sides at repository roots also supports nodes
                 // missing on either side and paths that disappeared after N.

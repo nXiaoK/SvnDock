@@ -321,7 +321,7 @@ struct HistoryRevisionView: View {
                 } else {
                     DiffContentView(
                         text: model.diffText, initialMode: expanded ? .sideBySide : .unified,
-                        oldTitle: "r\(change.comparesCopySource ? change.copyFromRevision ?? request.revision - 1 : request.revision - 1)",
+                        oldTitle: "r\((change.comparesCopySource || change.deletesCopySource) ? change.copyFromRevision ?? request.revision - 1 : request.revision - 1)",
                         newTitle: "r\(request.revision)"
                     )
                     .id("\(request.id)::\(change.path)")

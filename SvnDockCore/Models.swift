@@ -406,6 +406,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
     case log(paths: [String], limit: Int, beforeRevision: Int? = nil)
     case revisionLog(repositoryRoot: URL, revision: Int)
     case revisionSummary(repositoryRoot: URL, revision: Int)
+    case revisionCopyDeletionSummary(repositoryRoot: URL, revision: Int, change: SVNChangedPath)
     case revisionDiff(repositoryRoot: URL, revision: Int, change: SVNChangedPath)
     case resolve(paths: [String], accept: SVNConflictChoice)
     case properties(paths: [String])
@@ -415,7 +416,7 @@ public enum SVNOperationKind: Codable, Hashable, Sendable {
         switch self {
         case .update, .commit, .add, .delete, .revert, .cleanup, .resolve, .setIgnore:
             return true
-        case .status, .info, .infoTargets, .diff, .log, .revisionLog, .revisionSummary, .revisionDiff, .properties:
+        case .status, .info, .infoTargets, .diff, .log, .revisionLog, .revisionSummary, .revisionCopyDeletionSummary, .revisionDiff, .properties:
             return false
         }
     }

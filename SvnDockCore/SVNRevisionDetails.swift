@@ -28,6 +28,13 @@ public struct SVNChangedPath: Identifiable, Codable, Hashable, Sendable {
     public var comparesCopySource: Bool {
         (action == .added || action == .modified) && copyFromPath != nil && copyFromRevision != nil
     }
+
+    /// A descendant removed in the same commit as its ancestor's copy has no
+    /// destination node on either side of the revision. Its old content comes
+    /// from the copied ancestor's source revision.
+    public var deletesCopySource: Bool {
+        action == .deleted && copyFromPath != nil && copyFromRevision != nil
+    }
 }
 
 public struct SVNDiffSummaryEntry: Hashable, Sendable {
@@ -48,13 +55,22 @@ public struct SVNRevisionDetails: Hashable, Sendable {
     }
 
     /// Verbose logs omit descendants of copied/deleted directories. A revision
-    /// summary supplies those files; the log supplies ancestry and replacements.
+    /// summary supplies those files; the log supplies ancestry, replacements,
+    /// and copied descendants deleted before they ever existed at the destination.
     public static func combining(repositoryRootURL root: URL, entry: SVNLogEntry,
                                  summary: [SVNDiffSummaryEntry]) throws -> SVNRevisionDetails {
         let explicit = Dictionary(entry.changedPaths.map { ($0.path, $0) }, uniquingKeysWith: { _, last in last })
+        var items = try summary.map { item in
+            (path: try SVNRepositoryPath.path(for: item.url, in: root), action: item.action, kind: item.kind)
+        }
+        let summaryPaths = Set(items.map(\.path))
+        for logged in explicit.values where !summaryPaths.contains(logged.path) {
+            _ = try SVNRepositoryPath.validate(logged.path)
+            items.append((path: logged.path, action: logged.action, kind: logged.kind))
+        }
         var combined: [String: SVNChangedPath] = [:]
-        for item in summary {
-            let path = try SVNRepositoryPath.path(for: item.url, in: root)
+        for item in items {
+            let path = item.path
             let existing = combined[path]
             let action: SVNChangeAction
             if let logged = explicit[path] {
@@ -64,10 +80,17 @@ public struct SVNRevisionDetails: Hashable, Sendable {
             } else {
                 action = item.action
             }
-            var source = explicit[path]
-            if source?.copyFromPath == nil, source?.action == .modified { source = nil }
+            // Summary-backed deletions existed at the destination in N-1,
+            // including implicit descendants of a copied replacement. Their
+            // old content must never come from the replacement's copy source.
+            let canInheritCopySource = action != .deleted || !summaryPaths.contains(path)
+            var source = canInheritCopySource ? explicit[path] : nil
+            if source?.copyFromPath == nil,
+               source?.action == .modified || (action == .deleted && !summaryPaths.contains(path)) {
+                source = nil
+            }
             var ancestor = path
-            while source == nil, ancestor != "/" {
+            while canInheritCopySource, source == nil, ancestor != "/" {
                 ancestor = (ancestor as NSString).deletingLastPathComponent
                 if ancestor.isEmpty { ancestor = "/" }
                 if let candidate = explicit[ancestor], candidate.copyFromPath != nil {
@@ -103,10 +126,91 @@ public struct SVNRevisionDetails: Hashable, Sendable {
         let moveSources = Set(changes.filter(\.isMove).compactMap(\.copyFromPath))
         return SVNRevisionDetails(repositoryRootURL: root, entry: entry, changes: changes.filter {
             !($0.action == .deleted && moveSources.contains($0.path))
-        }.sorted {
-            if ($0.kind == .directory) != ($1.kind == .directory) { return $0.kind != .directory }
-            return $0.path.localizedStandardCompare($1.path) == .orderedAscending
-        })
+        }.sorted(by: Self.changeOrder))
+    }
+
+    /// Expanding an ancestor already supplies every descendant from the same
+    /// copied tree. Keep separate roots when their copy source or revision differs.
+    public var deletedCopyDirectoriesToExpand: [SVNChangedPath] {
+        let directories = Dictionary(changes.filter { $0.kind == .directory }.map { ($0.path, $0) },
+                                     uniquingKeysWith: { _, last in last })
+        var roots: [SVNChangedPath] = []
+        for change in changes.filter({ $0.kind == .directory && $0.deletesCopySource })
+            .sorted(by: { $0.path.count < $1.path.count }) {
+            var ancestor = change.path
+            var covered = false
+            while ancestor != "/" {
+                ancestor = (ancestor as NSString).deletingLastPathComponent
+                if ancestor.isEmpty { ancestor = "/" }
+                if let parent = directories[ancestor] {
+                    if parent.deletesCopySource, parent.copyFromRevision == change.copyFromRevision,
+                       let source = parent.copyFromPath,
+                       let suffix = Self.descendantSuffix(change.path, under: parent.path) {
+                        covered = change.copyFromPath == Self.appending(suffix, to: source)
+                    }
+                    // A different intervening tree prevents a more distant
+                    // ancestor from supplying this directory's descendants.
+                    break
+                }
+            }
+            if !covered { roots.append(change) }
+        }
+        return roots
+    }
+
+    /// SVN's verbose log records a removed copied directory without its files,
+    /// and the N-1:N summary has no destination tree to expand. A source-to-r0
+    /// summary supplies that tree without relying on current repository contents.
+    public func addingDeletedCopyDescendants(
+        _ summary: [SVNDiffSummaryEntry], of directory: SVNChangedPath
+    ) throws -> SVNRevisionDetails {
+        guard directory.kind == .directory, directory.deletesCopySource,
+              let source = directory.copyFromPath, let sourceRevision = directory.copyFromRevision,
+              sourceRevision >= 0, sourceRevision < entry.revision else {
+            throw SVNCommandBuilderError.invalidArgument("A valid copied directory deletion is required")
+        }
+        _ = try SVNRepositoryPath.validate(directory.path)
+        _ = try SVNRepositoryPath.validate(source)
+        let separateTrees = changes.filter { change in
+            guard change.kind == .directory, change.path != directory.path,
+                  let suffix = Self.descendantSuffix(change.path, under: directory.path) else { return false }
+            return change.action != .deleted || change.copyFromRevision != sourceRevision
+                || change.copyFromPath != Self.appending(suffix, to: source)
+        }
+        var combined = Dictionary(changes.map { ($0.path, $0) }, uniquingKeysWith: { _, last in last })
+        for item in summary {
+            let sourcePath = try SVNRepositoryPath.path(for: item.url, in: repositoryRootURL)
+            guard item.action == .deleted,
+                  let suffix = Self.descendantSuffix(sourcePath, under: source) else {
+                throw SVNCommandBuilderError.invalidArgument("Deletion summary path outside copied source")
+            }
+            let path = Self.appending(suffix, to: directory.path)
+            if separateTrees.contains(where: { Self.descendantSuffix(path, under: $0.path) != nil }) { continue }
+            // Explicit logs remain authoritative for nested copy/replacement
+            // ancestry, while this inventory supplies only omitted descendants.
+            if combined[path] == nil {
+                combined[path] = SVNChangedPath(path: path, action: .deleted, kind: item.kind,
+                    copyFromPath: sourcePath, copyFromRevision: sourceRevision)
+            }
+        }
+        return SVNRevisionDetails(repositoryRootURL: repositoryRootURL, entry: entry,
+            changes: combined.values.sorted(by: Self.changeOrder))
+    }
+
+    private static func descendantSuffix(_ path: String, under root: String) -> String? {
+        if path == root { return "" }
+        if root == "/" { return path }
+        guard path.hasPrefix(root + "/") else { return nil }
+        return String(path.dropFirst(root.count))
+    }
+
+    private static func appending(_ suffix: String, to path: String) -> String {
+        path == "/" && !suffix.isEmpty ? suffix : path + suffix
+    }
+
+    private static func changeOrder(_ lhs: SVNChangedPath, _ rhs: SVNChangedPath) -> Bool {
+        if (lhs.kind == .directory) != (rhs.kind == .directory) { return lhs.kind != .directory }
+        return lhs.path.localizedStandardCompare(rhs.path) == .orderedAscending
     }
 }
 

@@ -24,6 +24,7 @@ struct AppRegressionSmoke {
         try HistoryQueryRegressionChecks.run()
         try await HistoryPagingRegressionChecks.run()
         try await HistoryPageServiceRegressionChecks.run()
+        try await HistoryRevisionServiceRegressionChecks.run()
         try await StoreRegressionChecks.failedStatusCannotAppearCleanOrRetainActions()
         try await StoreRegressionChecks.selectionCancelsDiff()
         try await StoreRegressionChecks.directoryRetryRejectsOldError()

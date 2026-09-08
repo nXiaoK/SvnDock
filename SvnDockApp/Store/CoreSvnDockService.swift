@@ -490,10 +490,20 @@ actor CoreSvnDockService: SvnDockServicing {
         }
         try Task.checkCancellation()
         let summary = try await run(.revisionSummary(repositoryRoot: root, revision: revision), in: copy)
-        return try SVNRevisionDetails.combining(
+        var details = try SVNRevisionDetails.combining(
             repositoryRootURL: root, entry: entry,
             summary: SVNXMLParser.parseDiffSummary(summary.standardOutput)
         )
+        for directory in details.deletedCopyDirectoriesToExpand {
+            try Task.checkCancellation()
+            let descendants = try await run(
+                .revisionCopyDeletionSummary(repositoryRoot: root, revision: revision, change: directory), in: copy
+            )
+            details = try details.addingDeletedCopyDescendants(
+                SVNXMLParser.parseDiffSummary(descendants.standardOutput), of: directory
+            )
+        }
+        return details
     }
 
     func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL,
