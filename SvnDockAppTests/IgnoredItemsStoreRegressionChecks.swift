@@ -7,11 +7,61 @@ import SvnDockCore
 enum IgnoredItemsStoreRegressionChecks {
     @MainActor
     static func run() async throws {
+        try await batchIgnoreCapturesSelection()
         try await loadingStaysOnDemandAndSeparate()
         try await obsoleteLoadsCannotReplaceTheSelectedCopy()
         try await confirmationAndRemovalOutcomes()
         try await obsoletePreparationCannotOpenConfirmation()
         print("Ignored items store checks passed: lazy loading, separate counts, stale responses, confirmation and removal outcomes")
+    }
+
+    @MainActor
+    private static func batchIgnoreCapturesSelection() async throws {
+        let service = IgnoredItemsStoreFixtureService()
+        await service.enableBatchTargets()
+        let store = SvnDockStore(service: service)
+        try check(await store.load(), "batch ignore fixture loads")
+        let entries = store.entries
+        let first = entries.first { $0.relativePath == "new.txt" }!
+        let other = entries.first { $0.relativePath == "sub/other.tmp" }!
+        let changed = entries.first { $0.relativePath == "source.swift" }!
+        let noExtension = entries.first { $0.relativePath == "README" }!
+        store.selectedEntryIDs = Set([first, other, changed, noExtension].map(\.id))
+        store.requestIgnoreConfirmation(for: first, mode: .name)
+        try check(store.pendingIgnoreMessage.contains("忽略 3 项")
+                    && store.pendingIgnoreMessage.contains("sub/other.tmp"),
+                  "name ignore confirms every selected unversioned item and its parent")
+        store.cancelIgnoreConfirmation()
+        try check(await service.addedRules.isEmpty, "cancelling does not add rules")
+        store.requestIgnoreConfirmation(for: first, mode: .fileExtension)
+        try check(store.pendingIgnoreMessage.contains("忽略 2 项"),
+                  "extension ignore excludes versioned and extensionless selections")
+        store.selectedEntryIDs = [noExtension.id]
+        store.confirmIgnore()
+        try await waitUntil { store.activeOperation == nil }
+        let rules = await service.addedRules
+        try check(Set(rules.map(\.targetRelativePath)) == ["new.txt", "sub/other.tmp"],
+                  "confirmation captures the original selection before later selection changes")
+        try check(Set(rules.map(\.parentRelativePath)) == [".", "sub"]
+                    && Set(rules.map(\.pattern)) == ["*.txt", "*.tmp"],
+                  "each selected item generates a rule in its own parent")
+        store.selectedEntryIDs = [first.id, other.id]
+        store.requestIgnoreConfirmation(for: noExtension, mode: .name)
+        try check(store.pendingIgnoreMessage.contains("忽略 1 项")
+                    && !store.pendingIgnoreMessage.contains("sub/other.tmp"),
+                  "right-clicking outside the selection targets only that item")
+        store.cancelIgnoreConfirmation()
+        let directory = entries.first { $0.relativePath == "build" }!
+        let child = entries.first { $0.relativePath == "build/child.tmp" }!
+        store.selectedEntryIDs = [directory.id, child.id]
+        store.requestIgnoreConfirmation(for: child, mode: .name)
+        try check(store.pendingIgnoreMessage.contains("忽略 2 项，生成 1 条规则"),
+                  "a selected directory covers its selected descendants")
+        store.confirmIgnore()
+        try await waitUntil { store.activeOperation == nil }
+        let directoryRule = await service.addedRules.last
+        try check(directoryRule?.targetRelativePath == "build" && directoryRule?.parentRelativePath == ".",
+                  "covered children never add their ignored parent to SVN")
     }
 
     @MainActor
@@ -183,6 +233,9 @@ private actor IgnoredItemsStoreFixtureService: SvnDockServicing {
     private var shouldFailRemoval = false
     private var shouldHoldPreparation = false
     private var didRemove = false
+    private var batchTargets = false
+    private(set) var addedRules: [SvnDockIgnoreRule] = []
+    func enableBatchTargets() { batchTargets = true }
     private var pendingLoad: CheckedContinuation<Bool, Never>?
     private var pendingPreparation: CheckedContinuation<Void, Never>?
     private(set) var ignoredCalls = 0
@@ -202,6 +255,12 @@ private actor IgnoredItemsStoreFixtureService: SvnDockServicing {
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
         var entries = [entry("source.swift", status: .modified, copy: workingCopy),
                        entry("new.txt", status: .unversioned, copy: workingCopy)]
+        if batchTargets {
+            entries += [entry("sub/other.tmp", status: .unversioned, copy: workingCopy),
+                        entry("README", status: .unversioned, copy: workingCopy),
+                        entry("build", status: .unversioned, copy: workingCopy, kind: .directory),
+                        entry("build/child.tmp", status: .unversioned, copy: workingCopy)]
+        }
         if didRemove && workingCopy.id == first.id {
             entries.append(entry("cache.tmp", status: .unversioned, copy: workingCopy))
             entries.append(entry(".", status: .modified, copy: workingCopy, kind: .directory))
@@ -263,7 +322,7 @@ private actor IgnoredItemsStoreFixtureService: SvnDockServicing {
     func scheduleMissingDeletion(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     func resolve(relativePaths: [String], using resolution: SvnDockConflictResolution, in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
-    func addIgnoreRules(_ rules: [SvnDockIgnoreRule], in workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
+    func addIgnoreRules(_ rules: [SvnDockIgnoreRule], in workingCopy: SvnDockWorkingCopy) async throws { addedRules += rules }
     func cleanup(workingCopy: SvnDockWorkingCopy) async throws { throw unavailable }
     private var unavailable: SvnDockServiceError { .unavailable("Fixture ignored status is unavailable") }
 }

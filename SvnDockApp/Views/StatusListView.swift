@@ -828,23 +828,26 @@ private struct StatusTreeEntryRowView: View {
             .disabled(!store.canCleanupMissingAdditions(for: entry))
         }
 
+        if !selection.ignorableEntries.isEmpty {
+            Menu("忽略") {
+                Button("按名称忽略 \(selection.countLabel(selection.ignorableEntries.count))…") {
+                    store.requestIgnoreConfirmation(for: selection.ignorableEntries, mode: .name)
+                }
+                if !selection.extensionIgnorableEntries.isEmpty {
+                    Button("按扩展名忽略 \(selection.countLabel(selection.extensionIgnorableEntries.count))…") {
+                        store.requestIgnoreConfirmation(for: selection.extensionIgnorableEntries, mode: .fileExtension)
+                    }
+                }
+                if selection.ignorableEntries.count < selection.entries.count {
+                    Text("仅忽略未纳管项目")
+                }
+            }
+            .disabled(store.isInteractionBlocked)
+        }
+
         if multiple {
             Divider()
             Text("以下操作仅针对：\(entry.fileName)")
-        }
-
-        if entry.status == .unversioned {
-            Menu("忽略") {
-                Button("忽略此名称") {
-                    store.requestIgnoreConfirmation(for: entry, mode: .name)
-                }
-                if entry.nodeKind == .file,
-                   !(entry.relativePath as NSString).pathExtension.isEmpty {
-                    Button("忽略所有 .\((entry.relativePath as NSString).pathExtension) 文件") {
-                        store.requestIgnoreConfirmation(for: entry, mode: .fileExtension)
-                    }
-                }
-            }
         }
 
         if entry.status == .ignored {

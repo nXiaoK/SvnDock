@@ -1819,26 +1819,48 @@ final class SvnDockStore: ObservableObject {
         allowDuringFinderRouting: Bool = false,
         finderClaim: FinderCommandClaim? = nil
     ) {
-        guard allowDuringFinderRouting || !isInteractionBlocked else { return }
-        guard let workingCopy = selectedWorkingCopy,
-              let currentEntry = statusEntry(withID: entry.id),
-              currentEntry.status == .unversioned else {
-            present(
-                SvnDockServiceError.invalidIgnoreTarget("所选项目已经不再是未纳管状态。"),
-                title: "无法添加忽略规则"
-            )
-            return
-        }
+        let selection = StatusActionSelection.context(for: entry, selectedEntries: selectedEntries)
+        requestIgnoreConfirmation(
+            for: mode == .name ? selection.ignorableEntries : selection.extensionIgnorableEntries,
+            mode: mode, allowDuringFinderRouting: allowDuringFinderRouting, finderClaim: finderClaim
+        )
+    }
 
+    func requestIgnoreConfirmation(
+        for entries: [SvnDockStatusEntry],
+        mode: SvnDockIgnoreMode,
+        allowDuringFinderRouting: Bool = false,
+        finderClaim: FinderCommandClaim? = nil
+    ) {
+        guard allowDuringFinderRouting || !isInteractionBlocked else { return }
+        guard let workingCopy = selectedWorkingCopy, !entries.isEmpty else { return }
         do {
-            let rule = try makeIgnoreRule(for: currentEntry, mode: mode)
-            let description = mode == .name
-                ? "忽略名称“\(rule.pattern)”"
-                : "忽略所有“\(rule.pattern)”文件"
+            let currentEntries = try entries.map { entry in
+                guard entry.workingCopyID == workingCopy.id,
+                      let current = statusEntry(withID: entry.id), current.status == .unversioned else {
+                    throw SvnDockServiceError.invalidIgnoreTarget("所选项目已经不再是未纳管状态，请刷新后重试。")
+                }
+                return current
+            }
+            // Ignoring a selected directory already covers its descendants.
+            // Writing a child's ignore property would add that parent to SVN
+            // and undo the intended effect of ignoring the directory itself.
+            let directories = Set(currentEntries.filter { $0.nodeKind == .directory }.map(\.relativePath))
+            let targets = currentEntries.filter { entry in
+                guard mode == .name else { return true }
+                var parent = (entry.relativePath as NSString).deletingLastPathComponent
+                while !parent.isEmpty {
+                    if directories.contains(parent) { return false }
+                    parent = (parent as NSString).deletingLastPathComponent
+                }
+                return true
+            }
+            let rules = try targets.map { try makeIgnoreRule(for: $0, mode: mode) }
+            let preview = rules.prefix(10).map { "\($0.targetRelativePath) → \($0.parentRelativePath) / \($0.pattern)" }.joined(separator: "\n")
+            let remaining = rules.count > 10 ? "\n另有 \(rules.count - 10) 项" : ""
             pendingIgnore = PendingIgnore(
-                workingCopy: workingCopy,
-                rules: [rule],
-                message: "将\(description)，规则写入“\(rule.parentRelativePath)”的 svn:ignore 属性。父目录会显示为已修改，需要提交后才能与团队共享。",
+                workingCopy: workingCopy, rules: rules,
+                message: "工作副本：\(workingCopy.name)\n将按\(mode == .name ? "名称" : "扩展名")忽略 \(currentEntries.count) 项，生成 \(rules.count) 条规则：\n\(preview)\(remaining)\n\n规则写入各自父目录的 svn:ignore 属性；文件保留在本地。按名称忽略目录会包含其子项。扩展名规则会匹配同目录下所有同类文件。需要提交属性变更后才能与团队共享。",
                 finderClaim: finderClaim
             )
             isPresentingIgnoreConfirmation = true

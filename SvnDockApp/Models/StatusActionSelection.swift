@@ -24,6 +24,10 @@ struct StatusActionSelection {
         return "添加 \(countLabel(addableEntries.count)) 到 SVN"
     }
     var revertibleEntries: [SvnDockStatusEntry] { entries.filter { $0.status.isChange } }
+    var ignorableEntries: [SvnDockStatusEntry] { entries.filter { $0.status == .unversioned } }
+    var extensionIgnorableEntries: [SvnDockStatusEntry] {
+        ignorableEntries.filter { $0.nodeKind == .file && !($0.relativePath as NSString).pathExtension.isEmpty }
+    }
     var directoryCount: Int { entries.filter { $0.nodeKind == .directory }.count }
 
     func countLabel(_ count: Int) -> String {
