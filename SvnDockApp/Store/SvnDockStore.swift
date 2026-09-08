@@ -776,29 +776,36 @@ final class SvnDockStore: ObservableObject {
             for copy in copies {
                 try Task.checkCancellation()
                 let startedAt = Date()
+                var mutationError: Error?
                 do {
                     try await service.update(workingCopies: [copy])
                     try Task.checkCancellation()
-                    recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
-                                          outcome: .success, summary: "更新命令完成，请检查本地状态与冲突"))
-                } catch is CancellationError {
-                    recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
-                                          outcome: .uncertain, summary: "更新已中断，本地文件可能已部分更新",
-                                          detail: "请刷新该工作副本的状态，检查冲突后再继续。未自动重试。"))
-                    throw CancellationError()
                 } catch {
-                    allSucceeded = false
-                    recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
-                                          outcome: .failure, summary: "更新未完成，请检查本地状态",
-                                          detail: error.localizedDescription))
+                    mutationError = error
                 }
+                // Every attempted update can change disk state, even on error
+                // or cancellation. Keep the operation gate until an independent
+                // read refreshes this copy's summary, not just the selected one.
+                let verificationError = await refreshAfterMutation(in: copy, operationTitle: "更新", refreshMetadata: true)
+                let cancelled = Task.isCancelled || mutationError is CancellationError
+                let outcome: SvnDockOperationRecord.Outcome = cancelled || verificationError != nil
+                    ? .uncertain : mutationError == nil ? .success : .failure
+                if outcome != .success { allSucceeded = false }
+                let conflicts = workingCopies.first { $0.id == copy.id }?.counts.conflicts ?? 0
+                let summary: String
+                switch outcome {
+                case .success:
+                    summary = conflicts > 0 ? "更新命令完成，发现 \(conflicts) 项冲突需要处理" : "更新命令完成，已刷新本地状态"
+                case .failure:
+                    summary = "更新未完成，已重新读取本地状态；未自动重试"
+                case .uncertain:
+                    summary = "更新结果待确认，本地文件可能已部分更新；未自动重试"
+                }
+                let detail = [mutationError?.localizedDescription, verificationError].compactMap { $0 }.joined(separator: "\n")
+                recordOperation(.init(workingCopy: copy, actionTitle: "更新", startedAt: startedAt,
+                                      outcome: outcome, summary: summary, detail: detail.isEmpty ? nil : detail))
+                if cancelled { throw CancellationError() }
             }
-        }
-
-        if let selectedWorkingCopyID, workingCopyIDs.contains(selectedWorkingCopyID) {
-            await reloadSelectedWorkingCopy(
-                allowDuringFinderRouting: allowDuringFinderRouting
-            )
         }
         return succeeded && allSucceeded
     }
@@ -1331,26 +1338,41 @@ final class SvnDockStore: ObservableObject {
         await processPendingFinderCommands()
     }
 
-    private func refreshAfterMutation(in workingCopy: SvnDockWorkingCopy, operationTitle: String) async -> String? {
+    private func refreshAfterMutation(in workingCopy: SvnDockWorkingCopy, operationTitle: String,
+                                      refreshMetadata: Bool = false) async -> String? {
         invalidateRemoteStatus(for: workingCopy.id)
         invalidateHistory(for: workingCopy.id)
-        guard selectedWorkingCopyID == workingCopy.id else { return nil }
-        clearStatusEntries()
-        selectedEntryIDs = []
+        invalidateStatusSummary(for: workingCopy.id)
+        if selectedWorkingCopyID == workingCopy.id {
+            clearStatusEntries()
+            selectedEntryIDs = []
+        }
         let service = self.service
         let result = await Task.detached { () -> Result<SvnDockStatusSnapshot, Error> in
             do { return .success(try await service.status(for: workingCopy)) }
             catch { return .failure(error) }
         }.value
-        guard selectedWorkingCopyID == workingCopy.id else { return nil }
+        guard workingCopies.contains(where: { $0.id == workingCopy.id && $0.rootURL == workingCopy.rootURL }) else { return nil }
         switch result {
         case let .success(snapshot):
-            apply(snapshot, to: workingCopy.id)
+            if selectedWorkingCopyID == workingCopy.id {
+                apply(snapshot, to: workingCopy.id)
+            } else {
+                applyStatusSummary(snapshot, to: workingCopy.id)
+            }
+            if refreshMetadata {
+                let metadata = await Task.detached { try? await service.refreshWorkingCopyMetadata(for: workingCopy) }.value
+                if let index = workingCopies.firstIndex(where: { $0.id == workingCopy.id && $0.rootURL == workingCopy.rootURL }) {
+                    workingCopies[index].repositoryURL = metadata?.repositoryURL
+                    workingCopies[index].repositoryUUID = metadata?.repositoryUUID
+                    workingCopies[index].revision = metadata?.revision
+                }
+            }
             return nil
         case let .failure(error):
             invalidateStatusSummary(for: workingCopy.id)
             let message = "无法确认\(operationTitle)后的状态，旧变更列表已失效。请刷新成功后再选择项目执行操作。\n\(error.localizedDescription)"
-            statusRecoveryMessage = message
+            if selectedWorkingCopyID == workingCopy.id { statusRecoveryMessage = message }
             return message
         }
     }
@@ -2744,10 +2766,14 @@ final class SvnDockStore: ObservableObject {
         displayedEntries = []
         rebuildStatusPresentation(resetLimit: true, debounce: false)
 
+        applyStatusSummary(loadedSnapshot, to: workingCopyID)
+        if statusFilter == .ignored { loadIgnoredEntriesIfNeeded() }
+    }
+
+    private func applyStatusSummary(_ loadedSnapshot: SvnDockStatusSnapshot, to workingCopyID: UUID) {
         guard let index = workingCopies.firstIndex(where: { $0.id == workingCopyID }) else { return }
         workingCopies[index].counts = loadedSnapshot.counts
         workingCopies[index].lastRefreshedAt = .now
-        if statusFilter == .ignored { loadIgnoredEntriesIfNeeded() }
     }
 
     private func clearStatusEntries() {

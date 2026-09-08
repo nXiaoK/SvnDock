@@ -153,7 +153,12 @@ private struct WorkingCopyRow: View {
                         .foregroundStyle(SvnDockTheme.text)
                         .lineLimit(1)
                     Spacer(minLength: 0)
-                    if workingCopy.counts.changed > 0 || workingCopy.counts.conflicts > 0 {
+                    if workingCopy.lastRefreshedAt == nil {
+                        Image(systemName: "questionmark.circle")
+                            .foregroundStyle(.secondary)
+                            .help("本地状态待确认，请刷新后查看变更与冲突")
+                            .accessibilityLabel("本地状态待确认")
+                    } else if workingCopy.counts.changed > 0 || workingCopy.counts.conflicts > 0 {
                         Text("\(workingCopy.counts.conflicts > 0 ? workingCopy.counts.conflicts : workingCopy.counts.changed)")
                             .font(.system(size: 10, weight: .semibold, design: .rounded))
                             .foregroundStyle(SvnDockTheme.onAccent)

@@ -1,6 +1,9 @@
 import XCTest
 
 final class OperationStoreRegressionTests: XCTestCase {
+    func testUpdateAllRefreshesEveryAttemptedCopy() async throws {
+        try await OperationStoreRegressionChecks.updateAllRefreshesEveryAttemptedCopy()
+    }
     func testUpdateAllRetainsIndividualResults() async throws {
         try await OperationStoreRegressionChecks.updateAllRetainsIndividualResults()
     }

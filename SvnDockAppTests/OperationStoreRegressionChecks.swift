@@ -8,6 +8,7 @@ import SvnDockCore
 enum OperationStoreRegressionChecks {
     static func run() async throws {
         try await updateAllRetainsIndividualResults()
+        try await updateAllRefreshesEveryAttemptedCopy()
         try await cancelledUpdateStopsRemainingCopies()
         try await commitOutcomesReflectExecutionCertainty()
     }
@@ -64,9 +65,55 @@ enum OperationStoreRegressionChecks {
         try check(records.first?.outcome == .uncertain && records.last?.outcome == .success,
                   "cancellation after the service returns preserves prior success and marks the active result uncertain")
         try check(!store.isBusy, "cancellation releases the store's operation state")
+        let verificationCalls = await service.statusCalls
+        try check(Array(verificationCalls.suffix(2)) == copies.prefix(2).map(\.id),
+                  "cancellation still verifies every attempted copy, including the interrupted one")
+        try check(await service.cancelledStatusReads == 0,
+                  "update cancellation does not cancel the independent status verification")
         for _ in 0..<10 { await Task.yield() }
         let finalCalls = await service.updateCalls
         try check(finalCalls == calls, "cancelled operations do not restart in the background")
+    }
+
+    static func updateAllRefreshesEveryAttemptedCopy() async throws {
+        for mode in [OperationResultFixtureService.UpdateMode.succeed, .failSecond, .failVerificationSecond] {
+            let service = OperationResultFixtureService(updateMode: mode)
+            let store = makeStore(service: service)
+            await store.load()
+            let copies = store.workingCopies
+            // Seed every sidebar summary, then update while viewing only the first copy.
+            for copy in copies.dropFirst() { await store.selectWorkingCopyFromMenu(copy.id) }
+            await store.selectWorkingCopyFromMenu(copies[0].id)
+            let previousCalls = await service.statusCalls.count
+            let succeeded = await store.update(workingCopyIDs: Set(copies.map(\.id)))
+            try check(succeeded == (mode == .succeed), "batch result reflects mutation and verification failures")
+            let verificationCalls = await service.statusCalls
+            try check(Array(verificationCalls.dropFirst(previousCalls)) == copies.map(\.id),
+                      "every attempted copy receives one status scan, with no extra selected-copy scan")
+            try check(store.selectedWorkingCopyID == copies[0].id && store.hasLoadedStatus
+                        && store.statusCounts.conflicts == 1 && store.statusRecoveryMessage == nil,
+                      "other copies never replace the selected snapshot or its recovery message")
+            for (index, original) in copies.enumerated() {
+                guard let refreshed = store.workingCopies.first(where: { $0.id == original.id }),
+                      let record = store.operationRecords.first(where: { $0.workingCopyID == original.id }) else {
+                    throw OperationStoreCheckFailure(message: "missing refreshed batch summary")
+                }
+                if mode == .failVerificationSecond && index == 1 {
+                    try check(refreshed.lastRefreshedAt == nil && refreshed.counts == .zero,
+                              "unverified nonselected copy is visibly unknown rather than falsely clean")
+                    try check(record.outcome == .uncertain && record.detail?.contains("状态") == true,
+                              "a successful command with failed verification remains uncertain")
+                } else {
+                    try check(refreshed.lastRefreshedAt != nil && refreshed.counts.conflicts == 1
+                                && refreshed.revision == 99,
+                              "each sidebar summary publishes new conflicts and metadata even after a failed command")
+                    if mode == .succeed {
+                        try check(record.summary.contains("1 项冲突"), "successful updates report discovered conflicts")
+                    }
+                }
+            }
+            try check(await service.updateCalls.count == copies.count, "verification never repeats an update")
+        }
     }
 
     static func commitOutcomesReflectExecutionCertainty() async throws {
@@ -173,7 +220,7 @@ private final class OperationResultMemoryDefaults: UserDefaults, @unchecked Send
 private struct OperationStoreCheckFailure: Error { let message: String }
 
 private actor OperationResultFixtureService: SvnDockServicing {
-    enum UpdateMode: Sendable { case succeed, failSecond, holdSecond }
+    enum UpdateMode: Sendable { case succeed, failSecond, holdSecond, failVerificationSecond }
     enum CommitResult: CaseIterable, Sendable {
         case preflightMissingParent, commandFailure, genericFailure, cancelled, successThenCancelled, success
     }
@@ -184,6 +231,8 @@ private actor OperationResultFixtureService: SvnDockServicing {
     let updateMode: UpdateMode
     let commitResult: CommitResult
     var updateCalls: [[UUID]] = []
+    private(set) var statusCalls: [UUID] = []
+    private(set) var cancelledStatusReads = 0
     var commitCalls: [[String]] = []
     private var updateContinuation: CheckedContinuation<Void, Never>?
     var isHoldingUpdate: Bool { updateContinuation != nil }
@@ -195,15 +244,24 @@ private actor OperationResultFixtureService: SvnDockServicing {
 
     func loadRegisteredWorkingCopies() async throws -> [SvnDockWorkingCopy] { copies }
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
-        SvnDockStatusSnapshot(entries: [
-            .init(workingCopyID: workingCopy.id, relativePath: "file.txt", nodeKind: .file, status: .modified)
+        statusCalls.append(workingCopy.id)
+        if Task.isCancelled { cancelledStatusReads += 1 }
+        let updated = updateCalls.contains { $0.contains(workingCopy.id) }
+        if updateMode == .failVerificationSecond, workingCopy.id == copies[1].id, updated { throw unsupported }
+        return SvnDockStatusSnapshot(entries: [
+            .init(workingCopyID: workingCopy.id, relativePath: "file.txt", nodeKind: .file, status: updated ? .conflicted : .modified)
         ])
+    }
+    func refreshWorkingCopyMetadata(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockWorkingCopy {
+        var copy = workingCopy
+        if updateCalls.contains(where: { $0.contains(copy.id) }) { copy.revision = 99 }
+        return copy
     }
     func update(workingCopies: [SvnDockWorkingCopy]) async throws {
         updateCalls.append(workingCopies.map(\.id))
         guard updateCalls.count == 2 else { return }
         switch updateMode {
-        case .succeed: break
+        case .succeed, .failVerificationSecond: break
         case .failSecond: throw unsupported
         case .holdSecond: await withCheckedContinuation { updateContinuation = $0 }
         }
