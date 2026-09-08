@@ -500,8 +500,10 @@ private final class InfoXMLDelegate: NSObject, XMLParserDelegate {
         case "uuid":
             currentInfo?.repositoryUUID = value.nilIfEmpty
         case "wcroot-abspath":
-            if !value.isEmpty {
-                currentInfo?.workingCopyRootURL = URL(fileURLWithPath: value, isDirectory: true)
+            // Local paths may end in whitespace; trimming can select a
+            // different sibling working copy during registration.
+            if !text.isEmpty {
+                currentInfo?.workingCopyRootURL = URL(fileURLWithPath: text, isDirectory: true)
             }
         case "schedule":
             currentInfo?.schedule = value.nilIfEmpty

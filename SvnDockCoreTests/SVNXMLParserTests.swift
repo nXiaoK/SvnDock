@@ -116,6 +116,30 @@ final class SVNXMLParserTests: XCTestCase {
         XCTAssertNotNil(info.lastCommit?.date)
     }
 
+    func testInfoPreservesPathWhitespaceWhileNormalizingProtocolValues() throws {
+        for path in ["/Users/test/Project ", "/Users/test/Project\t", "/Users/test/Project\n", "/Users/test/Project & Notes  "] {
+            let escapedPath = path.replacingOccurrences(of: "&", with: "&amp;")
+            let xml = """
+            <info><entry kind="dir" path="Project " revision="42">
+              <url> https://svn.example.test/repo/Project%20 </url>
+              <repository><root> https://svn.example.test/repo </root><uuid> fixture </uuid></repository>
+              <wc-info><wcroot-abspath>\(escapedPath)</wcroot-abspath><schedule> normal </schedule><depth> infinity </depth></wc-info>
+              <commit revision="39"><author> bob </author><date> 2026-09-01T08:30:00Z </date></commit>
+            </entry></info>
+            """
+            let info = try SVNXMLParser.parseInfo(Data(xml.utf8))
+            XCTAssertEqual(info.path, "Project ")
+            XCTAssertEqual(info.workingCopyRootURL?.path, path)
+            XCTAssertEqual(info.url?.absoluteString, "https://svn.example.test/repo/Project%20")
+            XCTAssertEqual(info.repositoryRootURL?.absoluteString, "https://svn.example.test/repo")
+            XCTAssertEqual(info.repositoryUUID, "fixture")
+            XCTAssertEqual(info.schedule, "normal")
+            XCTAssertEqual(info.depth, "infinity")
+            XCTAssertEqual(info.lastCommit?.author, "bob")
+            XCTAssertNotNil(info.lastCommit?.date)
+        }
+    }
+
     func testMalformedXMLThrowsStructuredError() {
         XCTAssertThrowsError(try SVNXMLParser.parseStatus(Data("<status><entry>".utf8))) { error in
             guard case SVNXMLParserError.malformedXML = error else {

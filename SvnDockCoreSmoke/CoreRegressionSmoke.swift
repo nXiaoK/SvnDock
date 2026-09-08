@@ -13,11 +13,12 @@ enum CoreRegressionSmoke {
     static func run() async throws {
         try checkDiffParsing()
         try checkLocalPathAliases()
+        try checkXMLPathWhitespace()
         try await checkXMLDates()
         try await checkProcessIO()
         try await checkCancellationWithBlockedInput()
         try await checkCancellationWithHelpers()
-        print("Core regression checks passed: bounded diff scanning, malformed patches, reusable XML dates, process I/O and cancellation")
+        print("Core regression checks passed: bounded diff scanning, malformed patches, exact XML paths, reusable XML dates, process I/O and cancellation")
     }
 
     private static func checkDiffParsing() throws {
@@ -64,6 +65,26 @@ enum CoreRegressionSmoke {
                 _ = try builder.makeInvocation(for: .diff(paths: [outside]), in: copy)
                 throw Failure(description: "Physical aliases must not bypass component boundaries")
             } catch SVNCommandBuilderError.pathOutsideWorkingCopy { }
+        }
+    }
+
+    private static func checkXMLPathWhitespace() throws {
+        for path in ["/tmp/working-copy ", "/tmp/working-copy\t", "/tmp/working-copy\n", "/tmp/working-copy & notes  "] {
+            let escapedPath = path.replacingOccurrences(of: "&", with: "&amp;")
+            let xml = """
+            <info><entry path="working-copy " kind="dir" revision="1">
+              <url> https://svn.example.test/repo/trunk%20 </url>
+              <repository><root> https://svn.example.test/repo </root><uuid> fixture </uuid></repository>
+              <wc-info><wcroot-abspath>\(escapedPath)</wcroot-abspath><schedule> normal </schedule><depth> infinity </depth></wc-info>
+            </entry></info>
+            """
+            let info = try SVNXMLParser.parseInfo(Data(xml.utf8))
+            try check(info.workingCopyRootURL?.path == path && info.path == "working-copy ",
+                      "SVN XML must preserve whitespace in local paths")
+            try check(info.url?.absoluteString == "https://svn.example.test/repo/trunk%20"
+                      && info.repositoryRootURL?.absoluteString == "https://svn.example.test/repo"
+                      && info.repositoryUUID == "fixture" && info.schedule == "normal" && info.depth == "infinity",
+                      "Protocol values must still normalize surrounding whitespace")
         }
     }
 
