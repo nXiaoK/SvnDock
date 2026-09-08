@@ -171,13 +171,20 @@ public struct SVNCommandBuilder: Sendable {
                 arguments.append(contentsOf: ["--depth", depth.rawValue])
             }
             appendCommonOptions(to: &arguments)
-            arguments.append("--")
-            arguments.append(contentsOf: try requiredSafePaths(
+            let targets = try requiredSafePaths(
                 paths,
                 root: root,
                 command: "add",
                 escapePegRevision: true
-            ))
+            )
+            // Keep small additions directly readable in argv while avoiding
+            // process argument limits for large selections or long UTF-8 paths.
+            if targets.count > 1_000 || targets.reduce(0, { $0 + $1.utf8.count + 1 }) > 64_000 {
+                appendFileTargets(targets, to: &arguments, files: &argumentFiles)
+            } else {
+                arguments.append("--")
+                arguments.append(contentsOf: targets)
+            }
 
         case let .delete(paths):
             // Only schedule local working-copy deletion. Keeping disk content

@@ -9,6 +9,7 @@ struct AppRegressionSmoke {
         try await IgnoreRecommendationRegressionChecks.run()
         try await CommitDraftRegressionChecks.run()
         try await SelectedCommitRegressionChecks.run()
+        try await LargeAdditionRegressionChecks.run()
         try ReviewInteractionRegressionChecks.localPreviewBoundaries()
         try ReviewInteractionRegressionChecks.contextSelectionPreservesScope()
         try WorkingCopyStatusRegressionChecks.run()

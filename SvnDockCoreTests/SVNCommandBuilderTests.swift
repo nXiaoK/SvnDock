@@ -126,6 +126,48 @@ final class SVNCommandBuilderTests: XCTestCase {
         )
     }
 
+    func testLargeAddUsesTargetsFileAndPreservesOptionsAndLiteralNewlines() throws {
+        let paths = (0..<4_100).map { "file-\($0).txt" } + ["-option", "测试 space@x.txt", "line\nbreak.txt", "carriage\rreturn.txt"]
+        let invocation = try SVNCommandBuilder(executableURL: executableURL).makeInvocation(
+            for: .add(paths: paths, parents: true, force: true, depth: .infinity),
+            in: WorkingCopy(localPath: rootURL)
+        )
+        XCTAssertEqual(Array(invocation.arguments.prefix(6)), ["add", "--force", "--parents", "--depth", "infinity", "--non-interactive"])
+        XCTAssertEqual(invocation.argumentFiles.count, 1)
+        let targets = try XCTUnwrap(invocation.argumentFiles.first)
+        XCTAssertEqual(invocation.arguments[targets.argumentIndex - 1], "--targets")
+        XCTAssertEqual(targets.contents, Data((paths.dropLast(2).map { "./" + $0 + ($0.contains("@") ? "@" : "") }.joined(separator: "\n") + "\n").utf8))
+        XCTAssertEqual(Array(invocation.arguments.suffix(3)), ["--", "line\nbreak.txt", "carriage\rreturn.txt"])
+        XCTAssertLessThan(invocation.arguments.count, 15)
+    }
+
+    func testAddTargetsFileThresholdsUseCountAndUTF8Bytes() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let copy = WorkingCopy(localPath: rootURL)
+        func invocation(_ paths: [String]) throws -> ProcessInvocation {
+            try builder.makeInvocation(for: .add(paths: paths, parents: false, force: false, depth: nil), in: copy)
+        }
+        XCTAssertTrue(try invocation((0..<1_000).map { "file-\($0)" }).argumentFiles.isEmpty)
+        XCTAssertEqual(try invocation((0..<1_001).map { "file-\($0)" }).argumentFiles.count, 1)
+        let exactLimit = (0..<500).map { String(repeating: "x", count: 123) + String(format: "%04d", $0) }
+        XCTAssertEqual(exactLimit.reduce(0) { $0 + $1.utf8.count + 1 }, 64_000)
+        XCTAssertTrue(try invocation(exactLimit).argumentFiles.isEmpty)
+        XCTAssertEqual(try invocation(exactLimit + ["x"]).argumentFiles.count, 1)
+        let unicode = (0..<400).map { String(repeating: "长", count: 60) + String($0) }
+        XCTAssertLessThan(unicode.joined().count, 64_000)
+        XCTAssertEqual(try invocation(unicode).argumentFiles.count, 1)
+    }
+
+    func testLargeAddRejectsEntireSelectionContainingOutsidePath() throws {
+        let paths = (0..<4_100).map { "file-\($0).txt" } + ["../outside.txt"]
+        XCTAssertThrowsError(try SVNCommandBuilder(executableURL: executableURL).makeInvocation(
+            for: .add(paths: paths, parents: true, force: true, depth: nil),
+            in: WorkingCopy(localPath: rootURL)
+        )) { error in
+            XCTAssertEqual(error as? SVNCommandBuilderError, .pathOutsideWorkingCopy("../outside.txt"))
+        }
+    }
+
     func testRecursiveRevertUnschedulesAddWithoutRemovingFiles() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
         let invocation = try builder.makeInvocation(
