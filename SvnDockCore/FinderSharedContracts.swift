@@ -181,6 +181,7 @@ public enum FinderSharedStoreError: Error, LocalizedError, Equatable, Sendable {
     case badgeSnapshotMetadataTooLarge
     case cannotLockBadgeSnapshot(Int32)
     case unsafeBadgeSnapshotLock
+    case unsafeBadgeSnapshotFile
     case commandIdentifierMismatch(expected: UUID, actual: UUID)
     case invalidCommandFile(String)
     case unsupportedSchemaVersion(Int)
@@ -209,6 +210,8 @@ public enum FinderSharedStoreError: Error, LocalizedError, Equatable, Sendable {
             return "Unable to lock the Finder badge snapshot (errno \(code))"
         case .unsafeBadgeSnapshotLock:
             return "The Finder badge snapshot lock is not a safe private regular file."
+        case .unsafeBadgeSnapshotFile:
+            return "The Finder badge snapshot is not a safe regular file owned by the current account."
         case let .commandIdentifierMismatch(expected, actual):
             return "Finder command identifier mismatch: expected \(expected), found \(actual)"
         case let .invalidCommandFile(fileName):
@@ -504,9 +507,7 @@ public actor FinderSharedStore {
             var owners: [String: UUID]
             var direct: [String: BadgeKind]
             var updatedByRoot: [String: Date]
-            if FileManager.default.fileExists(atPath: badgeSnapshotURL.path) {
-                let snapshot = try decode(BadgeSnapshot.self, from: badgeSnapshotURL)
-                try validateSchema(snapshot.schemaVersion)
+            if let snapshot = try loadBadgeSnapshotForMutationUnlocked() {
                 entries = snapshot.entries
                 owners = snapshot.entryOwners ?? [:]
                 direct = snapshot.directEntries ?? [:]
@@ -580,6 +581,49 @@ public actor FinderSharedStore {
 
             try writeBadgeSnapshotUnlocked(BadgeSnapshot(entries: entries, entryOwners: owners,
                 directEntries: direct, perRootUpdatedAt: updatedByRoot))
+        }
+    }
+
+    private struct BadgeSnapshotVersion: Decodable {
+        let schemaVersion: Int
+    }
+
+    /// Recovery is restricted to decoding damage in this disposable cache.
+    /// Registry validation has already succeeded under the same writer lock;
+    /// filesystem errors, unsupported versions and invalid paths still fail.
+    private func loadBadgeSnapshotForMutationUnlocked() throws -> BadgeSnapshot? {
+        let descriptor = open(badgeSnapshotURL.path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK)
+        guard descriptor >= 0 else {
+            let code = errno
+            if code == ENOENT { return nil }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? handle.close() }
+        var attributes = stat()
+        guard fstat(descriptor, &attributes) == 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        guard attributes.st_uid == geteuid(), attributes.st_nlink == 1,
+              (attributes.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else {
+            throw FinderSharedStoreError.unsafeBadgeSnapshotFile
+        }
+        let data = try handle.readToEnd() ?? Data()
+        do {
+            // Decode the version first: future versions can change other
+            // fields, and must never be mistaken for current-schema damage.
+            let version = try decode(BadgeSnapshotVersion.self, from: data)
+            try validateSchema(version.schemaVersion)
+            return try decode(BadgeSnapshot.self, from: data)
+        } catch is DecodingError {
+            let quarantineURL = directoryURL.appendingPathComponent(
+                "badge-snapshot.corrupt-\(UUID().uuidString.lowercased()).json"
+            )
+            try FileManager.default.moveItem(at: badgeSnapshotURL, to: quarantineURL)
+            // Starting empty discards all untrusted ownership and freshness.
+            // Only the current authoritative replacement will become fresh;
+            // unregister cleanup leaves every remaining root unknown.
+            return nil
         }
     }
 
@@ -801,6 +845,10 @@ public actor FinderSharedStore {
     }
 
     private func decode<Value: Decodable>(_ type: Value.Type, from url: URL) throws -> Value {
+        try decode(type, from: Data(contentsOf: url))
+    }
+
+    private func decode<Value: Decodable>(_ type: Value.Type, from data: Data) throws -> Value {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .custom { decoder in
             let container = try decoder.singleValueContainer()
@@ -813,7 +861,7 @@ public actor FinderSharedStore {
             }
             return date
         }
-        return try decoder.decode(type, from: Data(contentsOf: url))
+        return try decoder.decode(type, from: data)
     }
 
     private func decodeCommand(from url: URL) throws -> FinderCommand {

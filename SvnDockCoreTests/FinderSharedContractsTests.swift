@@ -233,6 +233,8 @@ final class FinderSharedContractsTests: XCTestCase {
         )
         _ = try await firstStore.register(firstCopy)
         _ = try await firstStore.register(secondCopy)
+        try Data("invalid-json".utf8).write(
+            to: directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName))
 
         async let first: Void = firstStore.replaceBadgeEntries(
             forWorkingCopyID: firstCopy.id,
@@ -341,6 +343,186 @@ final class FinderSharedContractsTests: XCTestCase {
             snapshot.entryOwners?["/tmp/svndock-owner-replaced/file.txt"],
             replacement.id
         )
+    }
+
+    func testCorruptBadgeRecoveryPublishesOnlyAuthoritativeRootState() async throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FinderSharedStore(directoryURL: directory)
+        let parent = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-parent"))
+        let child = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-parent/child"))
+        let sibling = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-sibling"))
+        try await store.writeRegisteredRoots([parent, child, sibling])
+        let snapshotURL = directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName)
+        let damaged = Data("{\"schemaVersion\":1,\"entries\":".utf8)
+        try damaged.write(to: snapshotURL, options: .atomic)
+        let refreshedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        try await store.replaceBadgeEntries(forWorkingCopyID: parent.id,
+            underWorkingCopyRoot: parent.localPath.path,
+            with: ["/tmp/recovery-parent/a": .modified, "/tmp/recovery-parent/child/a": .clean],
+            directEntries: ["/tmp/recovery-parent/a": .modified, "/tmp/recovery-parent/child/a": .clean],
+            updatedAt: refreshedAt)
+        let recovered = try await store.loadBadgeSnapshot()
+        XCTAssertEqual(recovered.entries, ["/tmp/recovery-parent/a": .modified])
+        XCTAssertEqual(recovered.directEntries, ["/tmp/recovery-parent/a": .modified])
+        XCTAssertEqual(recovered.entryOwners, ["/tmp/recovery-parent/a": parent.id])
+        XCTAssertEqual(recovered.perRootUpdatedAt, [parent.localPath.path: refreshedAt])
+        let quarantined = try corruptBadgeFiles(in: directory)
+        XCTAssertEqual(quarantined.count, 1)
+        XCTAssertEqual(try Data(contentsOf: XCTUnwrap(quarantined.first)), damaged)
+
+        try await store.replaceBadgeEntries(forWorkingCopyID: child.id,
+            underWorkingCopyRoot: child.localPath.path,
+            with: ["/tmp/recovery-parent/child/a": .conflicted], updatedAt: refreshedAt)
+        let next = try await store.loadBadgeSnapshot()
+        XCTAssertEqual(next.entries["/tmp/recovery-parent/a"], .modified)
+        XCTAssertEqual(next.entries["/tmp/recovery-parent/child/a"], .conflicted)
+        XCTAssertEqual(next.entryOwners?["/tmp/recovery-parent/child/a"], child.id)
+        XCTAssertNil(next.perRootUpdatedAt?[sibling.localPath.path])
+    }
+
+    func testCorruptBadgeRecoveryAcceptsDamagedCurrentSchemaFields() async throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FinderSharedStore(directoryURL: directory)
+        let root = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-root"))
+        try await store.writeRegisteredRoots([root])
+        let damaged = Data("""
+        {"schemaVersion":1,"generatedAt":"2026-09-04T01:02:03Z","entries":{"/tmp/recovery-root/a":"invalid-badge"}}
+        """.utf8)
+        try damaged.write(to: directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName))
+        try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+            underWorkingCopyRoot: root.localPath.path, with: [root.localPath.path: .clean])
+        let recovered = try await store.loadBadgeSnapshot()
+        XCTAssertEqual(recovered.entries, [root.localPath.path: .clean])
+        XCTAssertEqual(try corruptBadgeFiles(in: directory).count, 1)
+    }
+
+    func testCorruptBadgeCleanupDoesNotRefreshAnyRegisteredRoot() async throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FinderSharedStore(directoryURL: directory)
+        let parent = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-parent"))
+        let child = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-parent/child"))
+        try await store.writeRegisteredRoots([parent, child])
+        _ = try await store.unregister(id: child.id)
+        try Data("invalid-json".utf8).write(
+            to: directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName))
+        try await store.removeBadgeEntries(forUnregisteredWorkingCopyID: child.id,
+            underWorkingCopyRoot: child.localPath.path)
+        let recovered = try await store.loadBadgeSnapshot()
+        XCTAssertEqual(recovered.entries, [:])
+        XCTAssertEqual(recovered.entryOwners, [:])
+        XCTAssertEqual(recovered.directEntries, [:])
+        XCTAssertEqual(recovered.perRootUpdatedAt, [:])
+        let roots = try await store.loadRegisteredRoots()
+        XCTAssertEqual(roots.roots.map(\.id), [parent.id])
+    }
+
+    func testBadgeRecoveryRejectsFutureSchemaBeforeDecodingUnknownFields() async throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FinderSharedStore(directoryURL: directory)
+        let root = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-root"))
+        try await store.writeRegisteredRoots([root])
+        let snapshotURL = directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName)
+        let future = Data("{\"schemaVersion\":99,\"entries\":false}".utf8)
+        try future.write(to: snapshotURL)
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+                underWorkingCopyRoot: root.localPath.path, with: [:])
+            XCTFail("Expected a future badge schema to be rejected")
+        } catch let error as FinderSharedStoreError {
+            XCTAssertEqual(error, .unsupportedSchemaVersion(99))
+        }
+        XCTAssertEqual(try Data(contentsOf: snapshotURL), future)
+        XCTAssertEqual(try corruptBadgeFiles(in: directory).count, 0)
+    }
+
+    func testBadgeRecoveryDoesNotDiscardInvalidRegisteredRootsOrPaths() async throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FinderSharedStore(directoryURL: directory)
+        let root = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-root"))
+        try await store.writeRegisteredRoots([root])
+        let snapshotURL = directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName)
+        let invalidPath = Data("""
+        {"schemaVersion":1,"generatedAt":"2026-09-04T01:02:03Z","entries":{"relative":"modified"}}
+        """.utf8)
+        try invalidPath.write(to: snapshotURL)
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+                underWorkingCopyRoot: root.localPath.path, with: [:])
+            XCTFail("Expected invalid snapshot paths to be rejected")
+        } catch let error as FinderSharedStoreError {
+            XCTAssertEqual(error, .pathIsNotAbsolute("relative"))
+        }
+        XCTAssertEqual(try Data(contentsOf: snapshotURL), invalidPath)
+
+        let damaged = Data("invalid-json".utf8)
+        try damaged.write(to: snapshotURL)
+        let registryURL = directory.appendingPathComponent(FinderSharedSchema.registeredRootsFileName)
+        try damaged.write(to: registryURL)
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+                underWorkingCopyRoot: root.localPath.path, with: [:])
+            XCTFail("Expected corrupt registration data to be rejected")
+        } catch is DecodingError {
+            // Only the badge cache is reconstructible from an SVN refresh.
+        }
+        XCTAssertEqual(try Data(contentsOf: snapshotURL), damaged)
+        XCTAssertEqual(try Data(contentsOf: registryURL), damaged)
+        XCTAssertEqual(try corruptBadgeFiles(in: directory).count, 0)
+    }
+
+    func testBadgeRecoveryDoesNotFollowSymlinksOrSwallowReadErrors() async throws {
+        let directory = makeTemporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = try FinderSharedStore(directoryURL: directory)
+        let root = WorkingCopy(localPath: URL(fileURLWithPath: "/tmp/recovery-root"))
+        try await store.writeRegisteredRoots([root])
+        let snapshotURL = directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName)
+        let target = directory.appendingPathComponent("target.json")
+        let damaged = Data("invalid-json".utf8)
+        try damaged.write(to: target)
+        try FileManager.default.createSymbolicLink(at: snapshotURL, withDestinationURL: target)
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+                underWorkingCopyRoot: root.localPath.path, with: [:])
+            XCTFail("Expected a symbolic-link cache to be rejected")
+        } catch is POSIXError {
+            // O_NOFOLLOW rejects the link before any recovery can run.
+        }
+        XCTAssertEqual(try Data(contentsOf: target), damaged)
+        XCTAssertEqual(try FileManager.default.destinationOfSymbolicLink(atPath: snapshotURL.path), target.path)
+        try FileManager.default.removeItem(at: snapshotURL)
+        try FileManager.default.createDirectory(at: snapshotURL, withIntermediateDirectories: false)
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+                underWorkingCopyRoot: root.localPath.path, with: [:])
+            XCTFail("Expected a non-regular badge cache to be rejected")
+        } catch let error as FinderSharedStoreError {
+            XCTAssertEqual(error, .unsafeBadgeSnapshotFile)
+        }
+        try FileManager.default.removeItem(at: snapshotURL)
+        try damaged.write(to: snapshotURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: snapshotURL.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshotURL.path) }
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: root.id,
+                underWorkingCopyRoot: root.localPath.path, with: [:])
+            XCTFail("Expected an unreadable badge cache to be rejected")
+        } catch is POSIXError {
+            // Permission errors are not evidence of corrupt data.
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: snapshotURL.path)
+        XCTAssertEqual(try Data(contentsOf: snapshotURL), damaged)
+        XCTAssertEqual(try corruptBadgeFiles(in: directory).count, 0)
+    }
+
+    private func corruptBadgeFiles(in directory: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+            .filter { $0.lastPathComponent.hasPrefix("badge-snapshot.corrupt-") }
     }
 
     private func makeTemporaryDirectory() -> URL {

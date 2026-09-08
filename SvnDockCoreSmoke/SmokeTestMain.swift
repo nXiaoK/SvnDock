@@ -617,6 +617,61 @@ struct SvnDockCoreSmokeTestMain {
             "stale cleanup preserves replacement UUID badge"
         )
 
+        // Corrupt badge data is disposable, but recovering one root must not
+        // invent exact states or freshness for roots which have not rescanned.
+        let snapshotURL = directory.appendingPathComponent(FinderSharedSchema.badgeSnapshotFileName)
+        let corruptBadgeData = Data("{\"schemaVersion\":1,\"entries\":".utf8)
+        try corruptBadgeData.write(to: snapshotURL, options: .atomic)
+        try await store.replaceBadgeEntries(
+            forWorkingCopyID: parentCopy.id,
+            underWorkingCopyRoot: parentCopy.localPath.path,
+            with: ["/tmp/svndock-nested/parent.txt": .conflicted],
+            directEntries: ["/tmp/svndock-nested/parent.txt": .conflicted]
+        )
+        let recoveredSnapshot = try await store.loadBadgeSnapshot()
+        try check(recoveredSnapshot.entries == ["/tmp/svndock-nested/parent.txt": .conflicted],
+                  "corrupt badge recovery publishes only the refreshed root")
+        try check(recoveredSnapshot.entryOwners?["/tmp/svndock-nested/parent.txt"] == parentCopy.id
+                  && recoveredSnapshot.directEntries?["/tmp/svndock-nested/parent.txt"] == .conflicted,
+                  "corrupt badge recovery retains authoritative ownership and direct state")
+        try check(Set(recoveredSnapshot.perRootUpdatedAt?.keys.map { $0 } ?? []) == [parentCopy.localPath.path],
+                  "corrupt badge recovery leaves other roots unknown")
+        let quarantinedBadges = try FileManager.default.contentsOfDirectory(at: directory,
+            includingPropertiesForKeys: nil).filter { $0.lastPathComponent.hasPrefix("badge-snapshot.corrupt-") }
+        try check(quarantinedBadges.count == 1, "one corrupt badge snapshot is quarantined")
+        let quarantinedData = try Data(contentsOf: quarantinedBadges[0])
+        try check(quarantinedData == corruptBadgeData,
+                  "corrupt badge data is quarantined intact")
+        try await secondStore.replaceBadgeEntries(forWorkingCopyID: secondBadgeCopy.id,
+            underWorkingCopyRoot: secondBadgeCopy.localPath.path,
+            with: ["/tmp/svndock-smoke-b/file": .added])
+        let subsequentSnapshot = try await store.loadBadgeSnapshot()
+        try check(subsequentSnapshot.entries["/tmp/svndock-nested/parent.txt"] == .conflicted
+                  && subsequentSnapshot.entries["/tmp/svndock-smoke-b/file"] == .added,
+                  "another root refresh merges after corrupt cache recovery")
+
+        // A newer schema must be rejected before decoding fields whose shape
+        // this writer does not understand, and its file must remain intact.
+        let futureBadgeData = Data("{\"schemaVersion\":99,\"entries\":false}".utf8)
+        try futureBadgeData.write(to: snapshotURL, options: .atomic)
+        do {
+            try await store.replaceBadgeEntries(forWorkingCopyID: parentCopy.id,
+                underWorkingCopyRoot: parentCopy.localPath.path, with: [:])
+            throw SmokeFailure("future badge schema was overwritten")
+        } catch FinderSharedStoreError.unsupportedSchemaVersion(99) {
+            // Expected.
+        }
+        let retainedFutureData = try Data(contentsOf: snapshotURL)
+        try check(retainedFutureData == futureBadgeData, "future badge data remains intact")
+
+        try corruptBadgeData.write(to: snapshotURL, options: .atomic)
+        try await store.removeBadgeEntries(forUnregisteredWorkingCopyID: childCopy.id,
+            underWorkingCopyRoot: childCopy.localPath.path)
+        let clearedCorruptSnapshot = try await store.loadBadgeSnapshot()
+        try check(clearedCorruptSnapshot.entries.isEmpty
+                  && clearedCorruptSnapshot.perRootUpdatedAt?.isEmpty == true,
+                  "unregister recovery never marks unscanned roots fresh")
+
         let command = FinderCommand(
             kind: .diff,
             paths: ["/tmp/svndock-smoke/a"],
