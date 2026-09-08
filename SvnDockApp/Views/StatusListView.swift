@@ -186,7 +186,12 @@ struct StatusListView: View {
                     symbol: "eye.slash", title: "没有已忽略项目",
                     message: "当前磁盘上没有匹配 SVN 忽略规则的项目。"
                 )
-            } else if store.statusFilter != .ignored && store.entries.isEmpty && !store.isBusy {
+            } else if !store.hasLoadedStatus && !store.isBusy {
+                SvnDockEmptyState(symbol: "questionmark.circle", title: "本地状态尚未读取",
+                                  message: "成功读取 SVN 状态后才能确认本地变更。", actionTitle: "读取状态") {
+                    Task { await store.reloadSelectedWorkingCopy() }
+                }
+            } else if store.statusFilter != .ignored && store.hasLoadedStatus && store.entries.isEmpty && !store.isBusy {
                 SvnDockEmptyState(
                     symbol: "checkmark.circle",
                     title: "工作副本是干净的",
@@ -295,6 +300,7 @@ struct StatusListView: View {
     private func workspaceSummary(counts: [SvnDockStatusFilter: Int]) -> String {
         guard store.selectedWorkingCopy != nil else { return "选择工作副本以查看文件状态" }
         if store.isBusy && store.entries.isEmpty { return "正在读取文件状态…" }
+        if !store.hasLoadedStatus { return "本地状态尚未确认，请重新读取状态" }
         switch store.statusFilter {
         case .conflicts:
             return "发现 \(counts[.conflicts, default: 0]) 个项目存在冲突"

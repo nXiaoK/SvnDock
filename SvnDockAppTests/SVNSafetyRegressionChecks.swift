@@ -105,6 +105,9 @@ enum SVNSafetyRegressionChecks {
             try check(await runner.revertCount == 1, "recovery never repeats the mutation")
             if mode == .failVerification {
                 try check(otherStore.statusRecoveryMessage != nil, "failed status verification remains visible after error dismissal")
+                try check(!otherStore.hasLoadedStatus && otherStore.selectedWorkingCopy?.lastRefreshedAt == nil
+                            && otherStore.selectedWorkingCopy?.counts == .zero,
+                          "unverified mutations invalidate sidebar and menu summaries too")
                 otherStore.presentedError = nil
                 await runner.allowVerification()
                 await otherStore.reloadSelectedWorkingCopy()

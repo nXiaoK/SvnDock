@@ -6,6 +6,49 @@ import SvnDockCore
 
 enum StoreRegressionChecks {
     @MainActor
+    static func failedStatusCannotAppearCleanOrRetainActions() async throws {
+        let service = ControlledStoreService()
+        let store = SvnDockStore(service: service)
+        try check(!store.hasLoadedStatus, "an unscanned store cannot claim a clean state")
+        await service.failNextStatus()
+        let loaded = await store.load()
+        store.presentedError = nil
+        try check(!loaded && !store.hasLoadedStatus && store.statusRecoveryMessage != nil,
+                  "initial status failure remains unknown after dismissing the error")
+        try check(store.entries.isEmpty && !store.hasPendingChanges && !store.isBusy,
+                  "a failed scan leaves no actionable snapshot and permits retry")
+
+        await store.reloadSelectedWorkingCopy()
+        try check(store.hasLoadedStatus && store.statusRecoveryMessage == nil,
+                  "a successful retry restores a trusted snapshot")
+        let oldEntry = try unwrap(store.entries.first { $0.nodeKind == .file })
+        await store.updateSelectedWorkingCopy()
+        store.presentedError = nil
+        try check(!store.hasLoadedStatus && store.statusRecoveryMessage != nil && store.entries.isEmpty,
+                  "an update followed by scan failure invalidates the pre-update modifications")
+        try check(store.selectedWorkingCopy?.lastRefreshedAt == nil
+                    && store.selectedWorkingCopy?.counts == .zero,
+                  "menus cannot present old counts as a current status")
+        store.selectedEntryIDs = [oldEntry.id]
+        store.requestCommit()
+        try check(!store.hasPendingChanges && !store.isPresentingCommit && store.selectedEntries.isEmpty,
+                  "stale file identifiers cannot reopen commit or selected-file actions")
+        await store.reloadSelectedWorkingCopy()
+        try check(store.hasLoadedStatus && store.statusRecoveryMessage == nil
+                    && store.entries.first { $0.id == oldEntry.id }?.status == .conflicted,
+                  "retry publishes the actual conflict created by the update")
+        try check(await service.updateCount == 1, "state recovery never repeats the mutation")
+
+        await service.failNextStatus(cancelled: true)
+        await store.reloadSelectedWorkingCopy()
+        try check(!store.hasLoadedStatus && store.statusRecoveryMessage != nil && store.entries.isEmpty,
+                  "a cancelled current scan also leaves an explicit unknown state")
+        await store.reloadSelectedWorkingCopy()
+        try check(store.hasLoadedStatus && store.statusRecoveryMessage == nil,
+                  "a cancelled scan can be retried normally")
+    }
+
+    @MainActor
     static func selectionCancelsDiff() async throws {
         let service = ControlledStoreService()
         let store = SvnDockStore(service: service)
@@ -85,10 +128,19 @@ private actor ControlledStoreService: SvnDockServicing {
     var directoryRequestCount = 0
     var finishedDirectoryCount = 0
     var directoryContinuations: [Int: CheckedContinuation<[SvnDockStatusEntry], Error>] = [:]
+    private var nextStatusFailure: Bool?
+    private var fileStatus: SvnDockStatusKind = .modified
+    private(set) var updateCount = 0
+    func failNextStatus(cancelled: Bool = false) { nextStatusFailure = cancelled }
     func loadRegisteredWorkingCopies() async throws -> [SvnDockWorkingCopy] { [copy] }
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
-        SvnDockStatusSnapshot(entries: [
-            .init(workingCopyID: copy.id, relativePath: "file.txt", nodeKind: .file, status: .modified),
+        if let cancelled = nextStatusFailure {
+            nextStatusFailure = nil
+            if cancelled { throw CancellationError() }
+            throw RegressionFailure(message: "status fixture is unavailable")
+        }
+        return SvnDockStatusSnapshot(entries: [
+            .init(workingCopyID: copy.id, relativePath: "file.txt", nodeKind: .file, status: fileStatus),
             .init(workingCopyID: copy.id, relativePath: "folder", nodeKind: .directory, status: .unversioned)
         ])
     }
@@ -118,7 +170,11 @@ private actor ControlledStoreService: SvnDockServicing {
     func history(for workingCopy: SvnDockWorkingCopy, relativePaths: [String], limit: Int) async throws -> [SvnDockLogEntry] { throw unsupported }
     func revisionDetails(revision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SVNRevisionDetails { throw unsupported }
     func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL, in workingCopy: SvnDockWorkingCopy) async throws -> String { throw unsupported }
-    func update(workingCopies: [SvnDockWorkingCopy]) async throws { throw unsupported }
+    func update(workingCopies: [SvnDockWorkingCopy]) async throws {
+        updateCount += 1
+        fileStatus = .conflicted
+        nextStatusFailure = false
+    }
     func commit(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws { throw unsupported }
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unsupported }
     func unscheduleAdd(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws { throw unsupported }

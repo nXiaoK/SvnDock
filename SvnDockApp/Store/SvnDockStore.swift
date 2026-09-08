@@ -58,6 +58,7 @@ final class SvnDockStore: ObservableObject {
         }
     }
     @Published private(set) var displayedEntries: [SvnDockStatusEntry] = []
+    @Published private(set) var hasLoadedStatus = false
     @Published private(set) var statusRecoveryMessage: String?
     @Published private(set) var filteredEntryCount = 0
     @Published private(set) var isFilteringStatusEntries = false
@@ -1347,6 +1348,7 @@ final class SvnDockStore: ObservableObject {
             apply(snapshot, to: workingCopy.id)
             return nil
         case let .failure(error):
+            invalidateStatusSummary(for: workingCopy.id)
             let message = "无法确认\(operationTitle)后的状态，旧变更列表已失效。请刷新成功后再选择项目执行操作。\n\(error.localizedDescription)"
             statusRecoveryMessage = message
             return message
@@ -2730,6 +2732,7 @@ final class SvnDockStore: ObservableObject {
         _ loadedSnapshot: SvnDockStatusSnapshot,
         to workingCopyID: UUID
     ) {
+        hasLoadedStatus = true
         statusRecoveryMessage = nil
         resetDirectoryTree()
         statusSnapshot = loadedSnapshot
@@ -2748,6 +2751,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func clearStatusEntries() {
+        hasLoadedStatus = false
         statusRecoveryMessage = nil
         clearDiff()
         finderSelectedTarget = nil
@@ -2765,6 +2769,12 @@ final class SvnDockStore: ObservableObject {
         filteredEntryCount = 0
         displayedEntries = []
         isFilteringStatusEntries = false
+    }
+
+    private func invalidateStatusSummary(for workingCopyID: UUID) {
+        guard let index = workingCopies.firstIndex(where: { $0.id == workingCopyID }) else { return }
+        workingCopies[index].counts = .zero
+        workingCopies[index].lastRefreshedAt = nil
     }
 
     private func loadStatusSnapshot(
@@ -2787,16 +2797,32 @@ final class SvnDockStore: ObservableObject {
             }
         }
 
-        let snapshot = try await withTaskCancellationHandler {
-            try await task.value
-        } onCancel: {
-            task.cancel()
+        do {
+            let snapshot = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                task.cancel()
+            }
+            try Task.checkCancellation()
+            guard statusLoadGeneration == generation else {
+                throw CancellationError()
+            }
+            return snapshot
+        } catch {
+            // A failed scan is not evidence of a clean working copy. In
+            // particular, mutations may already have changed every old row.
+            // An obsolete request must never invalidate a newer selection.
+            if statusLoadGeneration == generation, selectedWorkingCopyID == workingCopy.id {
+                clearStatusEntries()
+                selectedEntryIDs = []
+                invalidateStatusSummary(for: workingCopy.id)
+                invalidateRemoteStatus(for: workingCopy.id)
+                invalidateHistory(for: workingCopy.id)
+                let detail = error is CancellationError ? "状态读取已取消。" : error.localizedDescription
+                statusRecoveryMessage = "无法确认当前本地状态，旧变更列表已失效。请重新读取成功后再操作。\n" + detail
+            }
+            throw error
         }
-        try Task.checkCancellation()
-        guard statusLoadGeneration == generation else {
-            throw CancellationError()
-        }
-        return snapshot
     }
 
     private func rebuildStatusPresentation(resetLimit: Bool, debounce: Bool) {
