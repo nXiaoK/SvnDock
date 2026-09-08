@@ -7,11 +7,16 @@ final class SvnDockMainWindowController: ObservableObject {
     weak var window: NSWindow?
 
     func show(using openWindow: OpenWindowAction) {
+        if window == nil {
+            openWindow(id: Self.sceneID)
+        }
+        showExistingWindow()
+    }
+
+    func showExistingWindow() {
         if let window {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
-        } else {
-            openWindow(id: Self.sceneID)
         }
         NSApp.activate(ignoringOtherApps: true)
     }

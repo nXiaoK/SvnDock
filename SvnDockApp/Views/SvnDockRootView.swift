@@ -39,9 +39,6 @@ struct SvnDockRootView: View {
         .task {
             await store.startIfNeeded()
         }
-        .onOpenURL { url in
-            Task { await store.handleFinderURL(url) }
-        }
         .onChange(of: store.selectedWorkingCopyID) {
             isRemoteStatusPresented = false
             let selectedID = store.selectedWorkingCopyID

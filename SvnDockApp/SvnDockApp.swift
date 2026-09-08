@@ -20,6 +20,13 @@ struct SvnDockApplication: App {
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                 }
+                // Route repeated Finder URLs to the existing main scene. A
+                // WindowGroup otherwise creates a new window for each URL.
+                .handlesExternalEvents(preferring: ["*"], allowing: ["*"])
+                .onOpenURL { url in
+                    mainWindow.showExistingWindow()
+                    Task { await store.handleFinderURL(url) }
+                }
         }
         .defaultSize(width: 1_400, height: 860)
         .windowToolbarStyle(.unifiedCompact)
