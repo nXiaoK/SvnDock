@@ -16,6 +16,38 @@ enum DiffDisplayMode: String, CaseIterable, Identifiable {
 }
 
 struct DiffPresentation: Sendable {
+    /// Bound work before parsing and before handing raw output to NSTextView.
+    /// A directory patch or a huge single line must not trigger unbounded main
+    /// thread text layout. The view retains the original for explicit copying.
+    private static func previewText(_ text: String) -> (text: String, limited: Bool) {
+        var bytes = 0
+        var lines = 0
+        var lineBytes = 0
+        var limited = false
+        for byte in text.utf8 {
+            bytes += 1
+            lineBytes += 1
+            if byte == 10 { lines += 1; lineBytes = 0 }
+            if bytes > 1_024 * 1_024 || lines > 10_000 || lineBytes > 16 * 1_024 {
+                limited = true
+                break
+            }
+            if bytes.isMultiple(of: 4_096), Task.isCancelled { return ("", true) }
+        }
+        guard limited else { return (text, false) }
+        var excerpt = Data()
+        var excerptLines = 0
+        for byte in text.utf8.prefix(32 * 1_024) {
+            excerpt.append(byte)
+            if byte == 10 { excerptLines += 1 }
+            if excerptLines >= 200 { break }
+        }
+        // The byte bound may split a UTF-8 scalar; remove only its incomplete
+        // suffix instead of introducing a replacement character into the text.
+        while String(data: excerpt, encoding: .utf8) == nil { excerpt.removeLast() }
+        return ((String(data: excerpt, encoding: .utf8) ?? "") + "\n…（预览已截断）", true)
+    }
+
     struct Item: Identifiable, Sendable {
         enum ID: Hashable, Sendable {
             case hunk(Int)
@@ -30,13 +62,20 @@ struct DiffPresentation: Sendable {
     }
 
     let document: UnifiedDiffDocument
+    let displayText: String
+    let isPreviewLimited: Bool
     let unifiedItems: [Item]
     let sideBySideItems: [Item]
     let additions: Int
     let deletions: Int
 
     init(text: String) {
-        document = UnifiedDiffParser.parse(text)
+        let preview = Self.previewText(text)
+        displayText = preview.text
+        isPreviewLimited = preview.limited
+        document = preview.limited
+            ? UnifiedDiffDocument(oldFilePath: nil, newFilePath: nil, hunks: [], fallbackText: preview.text)
+            : UnifiedDiffParser.parse(text)
         var unified: [Item] = []
         var sideBySide: [Item] = []
         var added = 0
@@ -111,14 +150,20 @@ struct DiffStatistics: Equatable, Sendable {
 final class DiffPresentationModel: ObservableObject {
     @Published private(set) var presentation: DiffPresentation?
     private var generation = 0
+    private var worker: Task<DiffPresentation, Never>?
+
+    deinit { worker?.cancel() }
 
     var statistics: DiffStatistics? {
-        presentation.map {
-            DiffStatistics(additions: $0.additions, deletions: $0.deletions, hunks: $0.document.hunks.count)
+        presentation.flatMap {
+            guard !$0.isPreviewLimited else { return nil }
+            return DiffStatistics(additions: $0.additions, deletions: $0.deletions, hunks: $0.document.hunks.count)
         }
     }
 
     func clear() {
+        worker?.cancel()
+        worker = nil
         generation += 1
         presentation = nil
     }
@@ -130,10 +175,12 @@ final class DiffPresentationModel: ObservableObject {
         let worker = Task.detached(priority: .userInitiated) {
             DiffPresentation(text: text)
         }
+        self.worker = worker
         await withTaskCancellationHandler {
             let result = await worker.value
             guard !Task.isCancelled, generation == requestGeneration else { return }
             presentation = result
+            self.worker = nil
         } onCancel: {
             worker.cancel()
         }
@@ -193,8 +240,15 @@ struct DiffContentView: View {
             VStack(spacing: 0) {
                 controls(presentation, proxy: proxy)
                 VStack(spacing: 0) {
-                    if mode == .raw || presentation.document.hunks.isEmpty {
-                        if mode != .raw {
+                    if presentation.isPreviewLimited || mode == .raw || presentation.document.hunks.isEmpty {
+                        if presentation.isPreviewLimited {
+                            Text("差异较大，仅显示开头的部分原文，未展开全部变更。可用右上角复制按钮获取本次读取的完整差异；预览限制不影响提交范围。")
+                                .font(.caption)
+                                .foregroundStyle(SvnDockTheme.secondaryText)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(SvnDockTheme.subtleSurface, in: Rectangle())
+                        } else if mode != .raw {
                             Text("没有可展示的文本变更，以下为 SVN 输出（可能包含属性或二进制变更）。")
                                 .font(.caption)
                                 .foregroundStyle(SvnDockTheme.secondaryText)
@@ -202,7 +256,7 @@ struct DiffContentView: View {
                                 .padding(12)
                                 .background(SvnDockTheme.subtleSurface, in: Rectangle())
                         }
-                        DiffRawTextView(text: text, fontSize: fontSize)
+                        DiffRawTextView(text: presentation.displayText, fontSize: fontSize)
                     } else {
                         columnHeaders
                         Divider()

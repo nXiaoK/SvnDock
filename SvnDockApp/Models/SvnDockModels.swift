@@ -264,6 +264,14 @@ struct SvnDockStatusEntry: Identifiable, Hashable, Sendable {
         status == .missing && workingCopySchedule == "add" && conflictKinds.isEmpty
     }
 
+    var isDirectoryDeletion: Bool {
+        nodeKind == .directory && status == .deleted
+    }
+
+    var directoryDeletionSummary: String {
+        "目录：\(relativePath)\n\n提交后将从 SVN 仓库删除此目录及其全部子目录和文件。\n为避免加载整个项目的删除内容，此处仅显示目录操作范围。提交仍会处理完整目录树。"
+    }
+
     var isMissingVersioned: Bool {
         status == .missing && workingCopySchedule == "normal"
             && (workingCopyRevision ?? -1) >= 0 && conflictKinds.isEmpty

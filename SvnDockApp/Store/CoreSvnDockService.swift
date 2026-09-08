@@ -437,7 +437,13 @@ actor CoreSvnDockService: SvnDockServicing {
         in workingCopy: SvnDockWorkingCopy
     ) async throws -> String {
         let coreCopy = coreWorkingCopy(for: workingCopy)
-        let result = try await run(.diff(paths: [relativePath], depth: .empty), in: coreCopy)
+        let result: ProcessResult
+        do {
+            result = try await run(.diff(paths: [relativePath], depth: .empty), in: coreCopy,
+                                   outputByteLimit: 8 * 1_024 * 1_024)
+        } catch ProcessRunnerError.outputLimitExceeded {
+            throw SvnDockServiceError.unavailable("差异超过预览大小限制，请选择单个文件查看。此限制不影响提交范围。")
+        }
         return result.standardOutputString
     }
 
@@ -1291,11 +1297,16 @@ actor CoreSvnDockService: SvnDockServicing {
 
     private func run(
         _ operation: SVNOperationKind,
-        in workingCopy: SvnDockCore.WorkingCopy
+        in workingCopy: SvnDockCore.WorkingCopy,
+        outputByteLimit: Int? = nil
     ) async throws -> ProcessResult {
         let executableURL = try executableLocator.locate()
         let builder = try SVNCommandBuilder(executableURL: executableURL)
-        let invocation = try builder.makeInvocation(for: operation, in: workingCopy)
+        let template = try builder.makeInvocation(for: operation, in: workingCopy)
+        let invocation = ProcessInvocation(executableURL: template.executableURL, arguments: template.arguments,
+            currentDirectoryURL: template.currentDirectoryURL, environment: template.environment,
+            standardInput: template.standardInput, argumentFiles: template.argumentFiles,
+            outputByteLimit: outputByteLimit)
         let runner = processRunner
         let operationLock = crossProcessLock
 

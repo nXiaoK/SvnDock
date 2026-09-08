@@ -133,13 +133,20 @@ public struct UnifiedDiffDocument: Hashable, Sendable {
 }
 
 public enum UnifiedDiffParser {
+    /// Cancellation returns the original patch as a fallback, never a partial
+    /// document that could appear to contain all of the requested changes.
     public static func parse(_ text: String) -> UnifiedDiffDocument {
+        guard !Task.isCancelled else {
+            return UnifiedDiffDocument(oldFilePath: nil, newFilePath: nil,
+                                       hunks: [], fallbackText: text)
+        }
         var lines = LineCursor(text)
         var oldFilePath: String?
         var newFilePath: String?
         var hunks: [UnifiedDiffHunk] = []
         var propertyChanges: String?
         var hasFileSection = false
+        var inspectedLines = 0
 
         func fallback() -> UnifiedDiffDocument {
             UnifiedDiffDocument(
@@ -149,6 +156,8 @@ public enum UnifiedDiffParser {
         }
 
         while let line = lines.current {
+            if inspectedLines.isMultiple(of: 256), Task.isCancelled { return fallback() }
+            inspectedLines += 1
             if line.hasPrefix("Index: ") || line.hasPrefix("diff --git ") {
                 // This model represents one file. A directory diff must retain
                 // its file boundaries in the plain-text viewer.
@@ -200,6 +209,7 @@ public enum UnifiedDiffParser {
             }
         }
 
+        guard !Task.isCancelled else { return fallback() }
         return UnifiedDiffDocument(
             oldFilePath: oldFilePath,
             newFilePath: newFilePath,
@@ -362,11 +372,12 @@ private extension UnifiedDiffParser {
         var newConsumed = 0
         var lastParsedLine: LastParsedLine?
 
-        func flushChangeBlock() {
+        func flushChangeBlock() -> Bool {
             let rowCount = max(pendingDeletions.count, pendingAdditions.count)
-            guard rowCount > 0 else { return }
+            guard rowCount > 0 else { return !Task.isCancelled }
 
             for offset in 0..<rowCount {
+                if offset.isMultiple(of: 256), Task.isCancelled { return false }
                 let deletion = pendingDeletions.indices.contains(offset)
                     ? pendingDeletions[offset]
                     : nil
@@ -395,6 +406,7 @@ private extension UnifiedDiffParser {
 
             pendingDeletions.removeAll(keepingCapacity: true)
             pendingAdditions.removeAll(keepingCapacity: true)
+            return true
         }
 
         func markLastLineWithoutTrailingNewline() {
@@ -419,8 +431,12 @@ private extension UnifiedDiffParser {
             }
         }
 
+        var inspectedLines = 0
         parsingLines: while let line = lines.current {
-
+            if inspectedLines.isMultiple(of: 256), Task.isCancelled {
+                return HunkResult(rows: [], isComplete: false)
+            }
+            inspectedLines += 1
             if line == "\\ No newline at end of file" {
                 markLastLineWithoutTrailingNewline()
                 lines.advance()
@@ -440,7 +456,9 @@ private extension UnifiedDiffParser {
                       newConsumed < header.newCount else {
                     break parsingLines
                 }
-                flushChangeBlock()
+                guard flushChangeBlock() else {
+                    return HunkResult(rows: [], isComplete: false)
+                }
                 rows.append(UnifiedDiffRow(
                     oldLineNumber: oldLineNumber,
                     newLineNumber: newLineNumber,
@@ -477,7 +495,9 @@ private extension UnifiedDiffParser {
             }
         }
 
-        flushChangeBlock()
+        guard flushChangeBlock(), !Task.isCancelled else {
+            return HunkResult(rows: [], isComplete: false)
+        }
         return HunkResult(
             rows: rows,
             isComplete: oldConsumed == header.oldCount && newConsumed == header.newCount

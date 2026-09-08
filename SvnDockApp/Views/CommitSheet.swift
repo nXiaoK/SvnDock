@@ -511,7 +511,10 @@ struct CommitSheet: View {
                 }
             }
             Group {
-                if isLoadingPreview {
+                if let entry = previewEntry, entry.isDirectoryDeletion {
+                    previewPlaceholder(symbol: "folder.badge.minus", title: "删除整个目录",
+                                       detail: entry.directoryDeletionSummary)
+                } else if isLoadingPreview {
                     ProgressView("正在读取差异…")
                         .font(.system(size: 12))
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -521,7 +524,7 @@ struct CommitSheet: View {
                 } else if previewEntry == nil {
                     previewPlaceholder(symbol: "doc.text.magnifyingglass", title: "选择一个文件",
                                        detail: "点击左侧文件查看本次提交的修改内容。")
-                } else if previewText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                } else if previewText.isEmpty {
                     previewPlaceholder(symbol: "doc.text", title: "没有文本差异",
                                        detail: "此文件没有可显示的文本修改。")
                 } else {
@@ -815,7 +818,7 @@ struct CommitSheet: View {
     }
 
     private var previewRequest: SvnDockDiffRequest? {
-        guard showsDiffPreview, let entry = previewEntry else { return nil }
+        guard showsDiffPreview, let entry = previewEntry, !entry.isDirectoryDeletion else { return nil }
         return SvnDockDiffRequest(workingCopyID: entry.workingCopyID, relativePath: entry.relativePath)
     }
 

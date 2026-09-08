@@ -2197,7 +2197,8 @@ final class SvnDockStore: ObservableObject {
         do {
             let service = service
             let task = Task {
-                try await service.diff(relativePath: entry.relativePath, in: workingCopy)
+                if entry.isDirectoryDeletion { return entry.directoryDeletionSummary }
+                return try await service.diff(relativePath: entry.relativePath, in: workingCopy)
             }
             diffLoadTask = task
             let loadedDiff = try await withTaskCancellationHandler {
@@ -2228,12 +2229,17 @@ final class SvnDockStore: ObservableObject {
     }
 
     func diffText(for request: SvnDockDiffRequest) async throws -> String {
+        try Task.checkCancellation()
         guard let workingCopy = workingCopies.first(where: {
             $0.id == request.workingCopyID
         }) else {
             throw SvnDockServiceError.unavailable(
                 "该工作副本已不在 SvnDock 的登记列表中。"
             )
+        }
+        if let entry = statusSnapshot.entry(withID: "\(workingCopy.id.uuidString)::\(request.relativePath)"),
+           entry.isDirectoryDeletion {
+            return entry.directoryDeletionSummary
         }
         return try await service.diff(
             relativePath: request.relativePath,

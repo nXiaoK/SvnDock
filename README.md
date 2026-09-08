@@ -48,6 +48,10 @@ SvnDock does not invoke Git or intentionally modify `.git`.
 - Expand commit diffs with **放大查看** (Shift-Command-F) to read changes and
   navigate files. **返回提交** or Escape returns to the draft with its message
   and file selection preserved.
+- Deleted directories show their deletion scope immediately instead of loading
+  every descendant's removed content. Large diffs use a clearly marked bounded
+  excerpt; the copy button retains the full retrieved output. These preview
+  limits do not reduce the directory tree committed to SVN.
 - Commit drafts retain their message, included paths and preview per working
   copy across closing and restarting. Filter the checklist by path or show only
   included items; new changes do not silently join a saved selection.

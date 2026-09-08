@@ -84,14 +84,16 @@ enum ViewsRegressionChecks {
         try check(model.presentation == nil && model.statistics == nil,
                   "cleared diff releases its document and previous statistics")
 
-        // load() clears the old presentation before it awaits its worker;
-        // observing that state lets this check invalidate an in-flight parse.
+        // Observe the request starting, not its transient empty state: bounded
+        // large previews may complete before a polling task can observe nil.
         await model.load(text: patch)
         let lines = (0..<10_000).map { "-old \($0)\n+new \($0)" }.joined(separator: "\n")
+        var replacementStarted = false
         let replacement = Task {
+            replacementStarted = true
             await model.load(text: "--- old\n+++ new\n@@ -1,10000 +1,10000 @@\n" + lines)
         }
-        try await waitUntil { model.presentation == nil }
+        while !replacementStarted { await Task.yield() }
         model.clear()
         await replacement.value
         try check(model.presentation == nil && model.statistics == nil,
