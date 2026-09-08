@@ -104,6 +104,29 @@ public struct SVNCommandBuilder: Sendable {
                 escapePegRevision: true
             ))
 
+        case let .historicalInfo(url, pegRevision, revision):
+            guard revision >= 0, pegRevision >= revision else {
+                throw SVNCommandBuilderError.invalidRevision(revision)
+            }
+            arguments = ["info", "--xml", "--revision", String(revision)]
+            appendCommonOptions(to: &arguments)
+            arguments.append(contentsOf: ["--", try repositoryTarget(url, revision: pegRevision)])
+
+        case let .restoreFile(path, sourceURL, sourceRevision, targetURL, targetRevision):
+            guard targetRevision >= 0, sourceRevision >= targetRevision else {
+                throw SVNCommandBuilderError.invalidRevision(targetRevision)
+            }
+            // Two explicit sources keep the third argument a literal local
+            // target, including @ filenames. --ignore-ancestry prevents merge
+            // tracking from skipping changes or adding svn:mergeinfo.
+            arguments = ["merge", "--ignore-ancestry", "--accept", "postpone", "--depth", "empty"]
+            appendCommonOptions(to: &arguments)
+            arguments.append(contentsOf: ["--",
+                try repositoryTarget(sourceURL, revision: sourceRevision),
+                try repositoryTarget(targetURL, revision: targetRevision)])
+            arguments.append(contentsOf: try requiredSafePaths([path], root: root,
+                command: "restore file", escapePegRevision: false))
+
         case .info:
             arguments = ["info", "--xml"]
             appendCommonOptions(to: &arguments)

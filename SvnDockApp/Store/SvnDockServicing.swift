@@ -66,6 +66,8 @@ protocol SvnDockServicing: Sendable {
         in workingCopy: SvnDockWorkingCopy
     ) async throws
     func revert(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws
+    func prepareFileRestore(relativePath: String, beforeRevision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFileRestorePlan
+    func restoreFile(_ plan: SvnDockFileRestorePlan) async throws
     func resolve(
         relativePaths: [String],
         using resolution: SvnDockConflictResolution,
@@ -84,6 +86,14 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func prepareFileRestore(relativePath: String, beforeRevision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFileRestorePlan {
+        throw SvnDockServiceError.unavailable("当前服务不支持还原历史版本。")
+    }
+
+    func restoreFile(_ plan: SvnDockFileRestorePlan) async throws {
+        throw SvnDockServiceError.unavailable("当前服务不支持还原历史版本。")
+    }
+
     func update(
         workingCopies: [SvnDockWorkingCopy],
         progress: @escaping @Sendable (SVNProgressSnapshot) -> Void

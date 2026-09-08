@@ -7,6 +7,11 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Restore one versioned file to the state before a specified revision from
+  SvnDock or Finder. Preview the rN-1 target, restore content and properties as
+  local changes, and reject stale previews or uncommitted edits. Supports
+  binary files, literal special-character filenames and copy/rename ancestry.
+
 - Conflict review sheets show exact paths, conflict types, current diffs and
   strategy-specific guidance. Whole-file replacement requires explicit consent;
   mixed selections preserve their eligible conflict subset. Resolve outcomes

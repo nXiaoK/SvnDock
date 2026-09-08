@@ -132,7 +132,7 @@ public struct SvnDockCoreCommandExecutor: FinderCommandExecuting, Sendable {
                 throw AgentExecutionError.requiresMainApplication(.cleanup)
             }
             return .cleanup
-        case .openApp, .refresh, .commit, .diff, .revert, .log, .resolve,
+        case .openApp, .refresh, .commit, .diff, .revert, .restoreBeforeRevision, .log, .resolve,
              .copyRepositoryURL, .ignoreName, .ignoreExtension:
             throw AgentExecutionError.requiresMainApplication(command.kind)
         }

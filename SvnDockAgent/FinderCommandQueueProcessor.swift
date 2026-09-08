@@ -490,7 +490,7 @@ public struct FinderCommandQueueProcessor: Sendable {
             ).standardizedFileURL.path
             let selected = URL(fileURLWithPath: command.paths[0]).standardizedFileURL.path
             return selected != root
-        case .openApp, .refresh, .commit, .diff, .revert, .log, .resolve,
+        case .openApp, .refresh, .commit, .diff, .revert, .restoreBeforeRevision, .log, .resolve,
              .copyRepositoryURL, .ignoreName, .ignoreExtension:
             return true
         }

@@ -329,6 +329,7 @@ enum FinderCommandKind: String, Codable, Sendable {
     case diff
     case add
     case revert
+    case restoreBeforeRevision
     case cleanup
     case log
     case resolve

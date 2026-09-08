@@ -133,6 +133,7 @@ public enum FinderCommandKind: String, Codable, CaseIterable, Hashable, Sendable
     case diff
     case add
     case revert
+    case restoreBeforeRevision
     case cleanup
     case log
     case resolve

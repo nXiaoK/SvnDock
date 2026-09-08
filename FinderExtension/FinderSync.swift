@@ -158,6 +158,10 @@ final class FinderSync: FIFinderSync {
         if isSingleItem, isRoot || (singleStatus != .unversioned && singleStatus != .ignored) {
             let isDirectory = isRoot
                 || (try? selection.urls[0].resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+            if !isDirectory {
+                submenu.addItem(makeCommandItem("还原至指定版本前…",
+                    action: #selector(restoreBeforeRevision(_:)), payload: payload))
+            }
             submenu.addItem(makeCommandItem("查看历史…", action: #selector(log(_:)), payload: payload))
             submenu.addItem(makeCommandItem(isDirectory ? "查看目录属性差异" : "查看差异",
                                            action: #selector(diff(_:)), payload: payload))
@@ -232,6 +236,7 @@ final class FinderSync: FIFinderSync {
     @objc private func commit(_ sender: NSMenuItem) { dispatch(.commit, sender: sender) }
     @objc private func diff(_ sender: NSMenuItem) { dispatch(.diff, sender: sender) }
     @objc private func add(_ sender: NSMenuItem) { dispatch(.add, sender: sender) }
+    @objc private func restoreBeforeRevision(_ sender: NSMenuItem) { dispatch(.restoreBeforeRevision, sender: sender) }
     @objc private func revert(_ sender: NSMenuItem) { dispatch(.revert, sender: sender) }
     @objc private func cleanup(_ sender: NSMenuItem) { dispatch(.cleanup, sender: sender) }
     @objc private func log(_ sender: NSMenuItem) { dispatch(.log, sender: sender) }

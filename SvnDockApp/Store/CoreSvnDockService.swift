@@ -2001,3 +2001,117 @@ private struct SVNProcessFailure: LocalizedError, Sendable {
         return message
     }
 }
+
+extension CoreSvnDockService {
+    func prepareFileRestore(relativePath: String, beforeRevision: Int,
+                            in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFileRestorePlan {
+        let copy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let paths = try builder.normalizedLocalPaths([relativePath], in: copy, command: "restore file")
+        guard let target = paths.first, target != ".", beforeRevision > 0 else {
+            throw SvnDockServiceError.unavailable("请选择一个已纳管文件，并输入大于 0 的版本号。")
+        }
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        return try await scheduler.enqueue(for: copy.id) {
+            try await operationLock.withLock(for: copy.id) {
+                try await Self.fileRestorePlan(path: target, beforeRevision: beforeRevision,
+                    workingCopy: workingCopy, copy: copy, builder: builder, runner: runner)
+            }
+        }
+    }
+
+    func restoreFile(_ plan: SvnDockFileRestorePlan) async throws {
+        let copy = coreWorkingCopy(for: plan.workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let paths = try builder.normalizedLocalPaths([plan.relativePath], in: copy, command: "restore file")
+        guard paths == [plan.relativePath], plan.beforeRevision > 0 else {
+            throw SvnDockServiceError.unavailable("历史还原目标无效，请重新预览。")
+        }
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        try await scheduler.enqueue(for: copy.id) {
+            try await operationLock.withLock(for: copy.id) {
+                let fresh = try await Self.fileRestorePlan(path: plan.relativePath,
+                    beforeRevision: plan.beforeRevision, workingCopy: plan.workingCopy,
+                    copy: copy, builder: builder, runner: runner)
+                guard fresh == plan else {
+                    throw SvnDockServiceError.unavailable("文件的工作版本或仓库位置已变化，请重新预览。未执行还原。")
+                }
+                try Task.checkCancellation()
+                let result = try await runner.run(builder.makeInvocation(for: .restoreFile(
+                    path: plan.relativePath, sourceURL: plan.sourceURL, sourceRevision: plan.baseRevision,
+                    targetURL: plan.historicalURL, targetRevision: plan.targetRevision), in: copy))
+                guard result.succeeded else { throw SVNProcessFailure(result: result) }
+                let entries = try await Self.finderStatus(paths: [plan.relativePath], depth: .empty,
+                    includeUnchanged: true, in: copy, builder: builder, runner: runner)
+                guard let entry = Self.statusEntry(for: plan.relativePath, entries: entries, in: copy),
+                      [.normal, .modified].contains(entry.status),
+                      [.none, .normal, .modified].contains(entry.propertyStatus), !entry.isTreeConflicted else {
+                    throw SvnDockServiceError.unavailable("历史还原产生冲突或未完整应用，请检查文件状态。未自动重试。")
+                }
+            }
+        }
+    }
+
+    private static func fileRestorePlan(path: String, beforeRevision: Int,
+                                        workingCopy: SvnDockWorkingCopy, copy: SvnDockCore.WorkingCopy,
+                                        builder: SVNCommandBuilder, runner: any ProcessRunning) async throws -> SvnDockFileRestorePlan {
+        guard path != ".", beforeRevision > 0 else {
+            throw SvnDockServiceError.unavailable("请选择一个文件，并输入有效的版本号。")
+        }
+        let info = try await cleanRestoreFileInfo(path: path, copy: copy, builder: builder, runner: runner)
+        guard let revision = info.revision, let sourceURL = info.url, let uuid = info.repositoryUUID,
+              beforeRevision - 1 <= revision else {
+            throw SvnDockServiceError.unavailable("目标版本晚于文件的工作版本，请先更新工作副本。")
+        }
+        let result = try await runner.run(builder.makeInvocation(for: .historicalInfo(
+            url: sourceURL, pegRevision: revision, revision: beforeRevision - 1), in: copy))
+        guard result.succeeded else {
+            throw SvnDockServiceError.unavailable("无法读取 r\(beforeRevision - 1) 的文件；文件可能尚未存在，或仓库暂时不可访问。\n\(result.standardErrorString)")
+        }
+        let historical = try SVNXMLParser.parseInfo(result.standardOutput)
+        guard historical.kind == .file, historical.repositoryUUID == uuid,
+              let historicalURL = historical.url else {
+            throw SvnDockServiceError.unavailable("目标版本没有可还原的同仓库文件。")
+        }
+        // Repository reads can take time. Recheck local edits and node identity
+        // under the same operation lease immediately before returning the plan.
+        let current = try await cleanRestoreFileInfo(path: path, copy: copy, builder: builder, runner: runner)
+        guard current.url == sourceURL, current.revision == revision, current.repositoryUUID == uuid else {
+            throw SvnDockServiceError.unavailable("读取历史时文件的工作版本已变化，请重新预览。")
+        }
+        return SvnDockFileRestorePlan(workingCopy: workingCopy, relativePath: path,
+            beforeRevision: beforeRevision, baseRevision: revision, sourceURL: sourceURL,
+            historicalURL: historicalURL, repositoryUUID: uuid)
+    }
+
+    private static func cleanRestoreFileInfo(path: String, copy: SvnDockCore.WorkingCopy,
+                                             builder: SVNCommandBuilder, runner: any ProcessRunning) async throws -> SVNInfo {
+        try Task.checkCancellation()
+        let target = try validatedFinderPath(path, in: copy)
+        guard try target.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile == true else {
+            throw SvnDockServiceError.unavailable("历史还原仅支持本地存在的普通文件。")
+        }
+        let result = try await runner.run(builder.makeInvocation(for: .infoTargets(paths: [".", path]), in: copy))
+        guard result.succeeded else { throw SVNProcessFailure(result: result) }
+        let infos = try SVNXMLParser.parseInfos(result.standardOutput)
+        guard let root = infos.first(where: { absoluteURL(for: $0.path, in: copy) == copy.localPath.standardizedFileURL }),
+              copy.repositoryUUID == nil || root.repositoryUUID == copy.repositoryUUID,
+              copy.repositoryURL == nil || root.url == copy.repositoryURL,
+              let info = infos.first(where: { absoluteURL(for: $0.path, in: copy) == target }),
+              info.kind == .file, info.schedule == "normal", belongsToWorkingCopy(info, copy: copy),
+              info.repositoryUUID == root.repositoryUUID else {
+            throw SvnDockServiceError.unavailable("文件或仓库身份已变化，或所选文件属于外部工作副本，请重新选择。")
+        }
+        let entries = try await finderStatus(paths: [path], depth: .empty, includeUnchanged: true,
+            in: copy, builder: builder, runner: runner)
+        guard let status = statusEntry(for: path, entries: entries, in: copy),
+              status.status == .normal, [.normal, .none].contains(status.propertyStatus),
+              !status.isTreeConflicted, !status.isCopied, status.isFileExternal != true else {
+            throw SvnDockServiceError.unavailable("文件存在未提交修改、冲突或添加/删除计划。请先提交或另行保存修改，再还原历史版本。")
+        }
+        _ = try validatedFinderPath(path, in: copy)
+        return info
+    }
+}

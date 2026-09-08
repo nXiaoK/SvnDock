@@ -53,6 +53,10 @@ struct WorkingCopySidebar: View {
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
                         .contextMenu {
+                            Button("还原文件至指定版本前…") {
+                                store.requestFileRestoreImporter(for: workingCopy)
+                            }
+                            .disabled(store.isInteractionBlocked)
                             Button("查看提交历史…") {
                                 Task { await store.showHistory(for: workingCopy) }
                             }

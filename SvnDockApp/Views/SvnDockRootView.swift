@@ -157,6 +157,7 @@ struct SvnDockRootView: View {
         } message: {
             Text(store.pendingIgnoreMessage)
         }
+        .modifier(FileRestorePresentationModifier(store: store))
         .modifier(UnscheduleAddPresentationModifier(store: store))
         .modifier(IgnoreRemovalPresentationModifier(store: store))
         .modifier(IgnoreRecommendationsPresentationModifier(store: store))
@@ -199,6 +200,10 @@ struct SvnDockRootView: View {
                     Task { await store.showHistoryForSelection() }
                 }
                 Menu {
+                    Button("还原文件至指定版本前…") {
+                        if let copy = store.selectedWorkingCopy { store.requestFileRestoreImporter(for: copy) }
+                    }
+                    .disabled(store.selectedWorkingCopy == nil || store.isInteractionBlocked)
                     Button("清理工作副本…") {
                         Task { await store.cleanupSelectedWorkingCopy() }
                     }

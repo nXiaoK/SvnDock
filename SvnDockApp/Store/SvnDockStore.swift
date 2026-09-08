@@ -133,6 +133,11 @@ final class SvnDockStore: ObservableObject {
     @Published var isPresentingDirectoryImporter = false
     @Published var isPresentingUnscheduleAddConfirmation = false
     @Published var isPresentingMissingDeletionConfirmation = false
+    @Published var isPresentingFileRestoreImporter = false
+    @Published private var fileRestoreImportCopy: SvnDockWorkingCopy?
+    private var isResolvingFileRestoreImport = false
+    @Published var isPresentingFileRestore = false
+    @Published private(set) var pendingFileRestore: SvnDockFileRestoreRequest?
     @Published var isPresentingRevertConfirmation = false
     @Published var isPresentingRemovalConfirmation = false
     @Published var isPresentingResolveConfirmation = false
@@ -405,6 +410,8 @@ final class SvnDockStore: ObservableObject {
             || isPresentingDirectoryImporter
             || isPresentingUnscheduleAddConfirmation
             || isPresentingMissingDeletionConfirmation
+            || isPresentingFileRestore
+            || fileRestoreImportCopy != nil
             || isPresentingRevertConfirmation
             || isPresentingRemovalConfirmation
             || isPresentingResolveConfirmation
@@ -3278,7 +3285,7 @@ final class SvnDockStore: ObservableObject {
         _ kind: FinderCommandKind
     ) -> Bool {
         switch kind {
-        case .commit, .revert, .resolve, .ignoreName, .ignoreExtension:
+        case .commit, .revert, .restoreBeforeRevision, .resolve, .ignoreName, .ignoreExtension:
             true
         case .openApp, .refresh, .update, .diff, .add, .cleanup, .log,
              .copyRepositoryURL:
@@ -3304,7 +3311,7 @@ final class SvnDockStore: ObservableObject {
         interactiveClaim: FinderCommandClaim? = nil
     ) async throws {
         let workingCopy = try await selectWorkingCopy(forRootPath: command.workingCopyRoot)
-        if [.openApp, .commit, .diff, .log].contains(command.kind) {
+        if [.openApp, .commit, .diff, .log, .restoreBeforeRevision].contains(command.kind) {
             searchQuery = ""
             statusFilter = .all
         }
@@ -3388,6 +3395,18 @@ final class SvnDockStore: ObservableObject {
             )
             try Task.checkCancellation()
             guard succeeded else { throw FinderCommandRouteError.alreadyReported }
+        case .restoreBeforeRevision:
+            guard let interactiveClaim, command.paths.count == 1,
+                  let path = command.paths.first,
+                  let relative = Self.relativePath(for: URL(fileURLWithPath: path), under: workingCopy.rootURL),
+                  relative != "." else {
+                throw SvnDockServiceError.unavailable("一次只能还原一个文件的历史版本。")
+            }
+            let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
+            finderSelectedTarget = target
+            selectedEntryIDs = [target.entry.id]
+            requestFileRestore(for: target.entry, allowDuringFinderRouting: true, finderClaim: interactiveClaim)
+            guard isPresentingFileRestore else { throw FinderCommandRouteError.alreadyReported }
         case .revert:
             guard let interactiveClaim else {
                 throw SvnDockServiceError.unavailable("Finder 还原缺少交互式队列声明。")
@@ -3667,4 +3686,120 @@ private struct PendingIgnoreRemoval: Sendable {
 
 private enum FinderCommandRouteError: Error, Sendable {
     case alreadyReported
+}
+
+extension SvnDockStore {
+    func requestFileRestoreImporter(for copy: SvnDockWorkingCopy) {
+        guard !isInteractionBlocked, workingCopies.contains(where: { $0.id == copy.id }) else { return }
+        fileRestoreImportCopy = copy
+        isPresentingFileRestoreImporter = true
+    }
+
+    func completeFileRestoreImport(_ result: Result<[URL], Error>) async {
+        guard let copy = fileRestoreImportCopy, !isResolvingFileRestoreImport else { return }
+        isResolvingFileRestoreImport = true
+        do {
+            let urls = try result.get()
+            if let url = urls.first {
+                guard urls.count == 1, url.isFileURL,
+                      let relative = Self.relativePath(for: url, under: copy.rootURL), relative != "." else {
+                    throw SvnDockServiceError.unavailable("请选择该工作副本内的一个已纳管文件。")
+                }
+                let scoped = url.startAccessingSecurityScopedResource()
+                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+                let workingCopy = try await selectWorkingCopy(forRootPath: copy.rootURL.path)
+                let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
+                searchQuery = ""
+                statusFilter = .all
+                finderSelectedTarget = target
+                selectedEntryIDs = [target.entry.id]
+                requestFileRestore(for: target.entry, allowDuringFinderRouting: true)
+            }
+        } catch {
+            if (error as NSError).code != NSUserCancelledError, !(error is CancellationError) {
+                present(error, title: "无法选择历史还原文件")
+            }
+        }
+        isPresentingFileRestoreImporter = false
+        fileRestoreImportCopy = nil
+        isResolvingFileRestoreImport = false
+        await processPendingFinderCommands()
+    }
+
+    func requestFileRestore(for entry: SvnDockStatusEntry, allowDuringFinderRouting: Bool = false,
+                            finderClaim: FinderCommandClaim? = nil) {
+        guard allowDuringFinderRouting || !isInteractionBlocked else { return }
+        guard let copy = selectedWorkingCopy, entry.workingCopyID == copy.id,
+              entry.nodeKind == .file, entry.status == .clean else {
+            present(SvnDockServiceError.unavailable("请选择本地存在且没有未提交修改的已纳管文件。请先提交或另行保存修改。"), title: "无法还原历史版本")
+            return
+        }
+        pendingFileRestore = .init(workingCopy: copy, entry: entry, finderClaim: finderClaim)
+        isPresentingFileRestore = true
+    }
+
+    func prepareFileRestore(requestID: UUID, beforeRevision: Int) async throws -> SvnDockFileRestorePlan {
+        guard let request = pendingFileRestore, request.id == requestID, isPresentingFileRestore else {
+            throw CancellationError()
+        }
+        let plan = try await service.prepareFileRestore(relativePath: request.entry.relativePath,
+            beforeRevision: beforeRevision, in: request.workingCopy)
+        try Task.checkCancellation()
+        guard pendingFileRestore?.id == requestID, isPresentingFileRestore else { throw CancellationError() }
+        return plan
+    }
+
+    func cancelFileRestore() {
+        let claim = pendingFileRestore?.finderClaim
+        pendingFileRestore = nil
+        isPresentingFileRestore = false
+        finalizeAwaitingFinderClaim(claim, outcome: .cancelled)
+    }
+
+    func confirmFileRestore(_ plan: SvnDockFileRestorePlan, requestID: UUID) {
+        guard let request = pendingFileRestore, request.id == requestID, isPresentingFileRestore,
+              plan.workingCopy == request.workingCopy, plan.relativePath == request.entry.relativePath,
+              activeOperation == nil else { return }
+        activeOperation = .init(kind: .reverting, detail: "\(plan.relativePath) → r\(plan.targetRevision)")
+        pendingFileRestore = nil
+        isPresentingFileRestore = false
+        Task { [weak self] in
+            await self?.executeFileRestore(plan, finderClaim: request.finderClaim)
+        }
+    }
+
+    private func executeFileRestore(_ plan: SvnDockFileRestorePlan, finderClaim: FinderCommandClaim?) async {
+        let startedAt = Date()
+        let executingClaim: FinderCommandClaim?
+        do { executingClaim = try await markFinderClaimExecuting(finderClaim) }
+        catch {
+            if let finderClaim { _ = await acknowledgeFinderClaim(finderClaim, outcome: .rejected) }
+            activeOperation = nil
+            present(error, title: "无法开始历史还原")
+            await processPendingFinderCommands()
+            return
+        }
+        var failure: Error?
+        do { try await service.restoreFile(plan) }
+        catch { failure = error }
+        if let executingClaim {
+            if failure != nil || Task.isCancelled { await quarantineExecutedFinderClaim(executingClaim) }
+            else { _ = await acknowledgeFinderClaim(executingClaim, outcome: .completed) }
+        }
+        let verification = await refreshAfterMutation(in: plan.workingCopy, operationTitle: "历史还原")
+        let outcome: SvnDockOperationRecord.Outcome = verification != nil || failure is CancellationError || Task.isCancelled
+            ? .uncertain : failure == nil ? .success : .failure
+        let detail = [failure?.localizedDescription, verification].compactMap { $0 }.joined(separator: "\n")
+        recordOperation(.init(workingCopy: plan.workingCopy, actionTitle: "还原至 r\(plan.beforeRevision) 前",
+            startedAt: startedAt, outcome: outcome,
+            summary: outcome == .success ? "\(plan.relativePath) 已还原至 r\(plan.targetRevision)，请检查差异后提交"
+                : "历史还原未确认完成，请检查文件状态；未自动重试", detail: detail.isEmpty ? nil : detail))
+        if !detail.isEmpty { presentedError = .init(title: "历史还原结果需要检查", message: detail) }
+        activeOperation = nil
+        if selectedWorkingCopyID == plan.workingCopy.id {
+            inspectorTab = .diff
+            await loadDiffForSelection(allowDuringFinderRouting: true)
+        }
+        await processPendingFinderCommands()
+    }
 }

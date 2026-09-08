@@ -899,6 +899,10 @@ private struct StatusTreeEntryRowView: View {
         }
 
         if entry.status != .unversioned && entry.status != .ignored {
+            if entry.nodeKind == .file {
+                Button("还原至指定版本前…") { store.requestFileRestore(for: entry) }
+                    .disabled(store.isInteractionBlocked)
+            }
             Button("查看提交历史…") {
                 store.selectedEntryIDs = [entry.id]
                 Task { await store.showHistoryForSelection() }
