@@ -72,6 +72,10 @@ SvnDock does not invoke Git or intentionally modify `.git`.
   uncertain results without automatically retrying.
 - Run Update, Commit, Add, Revert, Resolve, Cleanup and safe `svn:ignore`
   workflows.
+- Follow live Commit and Update stages, the latest reported path, SVN notification
+  counts and elapsed time. Batch updates also show the current working copy and
+  processed-copy count. File notifications are not an upload percentage; the UI
+  keeps transfer, server confirmation and local status verification distinct.
 - Review the latest 30 Update, Commit and Resolve results from the bottom operation bar
   during the current run, including per-working-copy outcomes and redacted
   copyable details. Multi-copy updates continue after an individual failure.

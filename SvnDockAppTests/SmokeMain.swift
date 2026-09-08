@@ -9,6 +9,8 @@ struct AppRegressionSmoke {
         try await IgnoreRecommendationRegressionChecks.run()
         try await CommitDraftRegressionChecks.run()
         try await SelectedCommitRegressionChecks.run()
+        try await ServiceProgressRegressionChecks.run()
+        try await StoreProgressRegressionChecks.run()
         try await LargeAdditionRegressionChecks.run()
         try await LargeDirectoryDeletionRegressionChecks.run()
         try await LargeDiffPresentationRegressionChecks.run()

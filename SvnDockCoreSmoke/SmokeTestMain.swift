@@ -15,6 +15,7 @@ struct SvnDockCoreSmokeTestMain {
         try await MissingDeletionSmoke.run()
         try locatorCheck()
         try await processRunnerCheck()
+        try await LiveProgressSmoke.run()
         try await schedulerCheck()
         try await sharedStoreCheck()
         if let path = ProcessInfo.processInfo.environment["SVNDOCK_INTEGRATION_WC"],

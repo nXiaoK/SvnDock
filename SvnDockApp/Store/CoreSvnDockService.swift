@@ -1,6 +1,51 @@
 import Foundation
 import SvnDockCore
 
+/// Observes only the final mutation. Selected-commit preflight still uses the
+/// same runner, scheduler and lock, without interpreting its XML as progress.
+private struct SVNProgressReportingRunner: ProcessRunning {
+    let base: any ProcessRunning
+    let progress: @Sendable (SVNProgressSnapshot) -> Void
+
+    func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
+        guard invocation.arguments.first == "commit" || invocation.arguments.first == "update" else {
+            return try await base.run(invocation)
+        }
+        let observer = SVNProgressObserver(progress: progress)
+        defer { observer.finish() }
+        progress(SVNProgressSnapshot(phase: .processing))
+        return try await base.run(invocation, onOutput: { observer.consume($0) })
+    }
+}
+
+/// The process drains stdout and stderr off the service actor. Serialize parser
+/// access and close delivery when the invocation ends, including cancellation.
+private final class SVNProgressObserver: @unchecked Sendable {
+    private let lock = NSLock()
+    private var parser = SVNProgressParser()
+    private var isFinished = false
+    private let progress: @Sendable (SVNProgressSnapshot) -> Void
+
+    init(progress: @escaping @Sendable (SVNProgressSnapshot) -> Void) {
+        self.progress = progress
+    }
+
+    func consume(_ chunk: ProcessOutputChunk) {
+        lock.withLock {
+            guard !isFinished else { return }
+            if let snapshot = parser.consume(chunk) { progress(snapshot) }
+        }
+    }
+
+    func finish() {
+        lock.withLock {
+            guard !isFinished else { return }
+            isFinished = true
+            if let snapshot = parser.finish() { progress(snapshot) }
+        }
+    }
+}
+
 /// Production service that maps the Foundation-only core into UI values.
 /// SVN is invoked directly (never through a shell), and all mutations are
 /// serialized per working copy by `WorkingCopyOperationScheduler`.
@@ -630,9 +675,18 @@ actor CoreSvnDockService: SvnDockServicing {
     }
 
     func update(workingCopies: [SvnDockWorkingCopy]) async throws {
+        try await update(workingCopies: workingCopies, progress: { _ in })
+    }
+
+    func update(
+        workingCopies: [SvnDockWorkingCopy],
+        progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
+    ) async throws {
         for copy in workingCopies {
+            try Task.checkCancellation()
+            progress(SVNProgressSnapshot())
             let coreCopy = coreWorkingCopy(for: copy)
-            _ = try await run(.update(revision: nil), in: coreCopy)
+            _ = try await run(.update(revision: nil), in: coreCopy, progress: progress)
         }
     }
 
@@ -641,13 +695,25 @@ actor CoreSvnDockService: SvnDockServicing {
         relativePaths: [String],
         message: String
     ) async throws {
+        try await commit(workingCopy: workingCopy, relativePaths: relativePaths, message: message, progress: { _ in })
+    }
+
+    func commit(
+        workingCopy: SvnDockWorkingCopy,
+        relativePaths: [String],
+        message: String,
+        progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
+    ) async throws {
+        try Task.checkCancellation()
+        progress(SVNProgressSnapshot())
         guard workingCopy.repositoryURL != nil, workingCopy.repositoryUUID != nil else {
             throw SVNSelectedCommitError.repositoryIdentityChanged
         }
         let coreCopy = SvnDockCore.WorkingCopy(id: workingCopy.id, name: workingCopy.name,
             localPath: workingCopy.rootURL, repositoryURL: workingCopy.repositoryURL,
             repositoryUUID: workingCopy.repositoryUUID, revision: workingCopy.revision)
-        let commit = try SVNSelectedCommit(executableURL: executableLocator.locate(), runner: processRunner)
+        let runner = SVNProgressReportingRunner(base: processRunner, progress: progress)
+        let commit = try SVNSelectedCommit(executableURL: executableLocator.locate(), runner: runner)
         let targets = try commit.targets(for: relativePaths, in: coreCopy)
         let operationLock = crossProcessLock
         try await scheduler.enqueue(for: coreCopy.id) {
@@ -1298,7 +1364,8 @@ actor CoreSvnDockService: SvnDockServicing {
     private func run(
         _ operation: SVNOperationKind,
         in workingCopy: SvnDockCore.WorkingCopy,
-        outputByteLimit: Int? = nil
+        outputByteLimit: Int? = nil,
+        progress: (@Sendable (SVNProgressSnapshot) -> Void)? = nil
     ) async throws -> ProcessResult {
         let executableURL = try executableLocator.locate()
         let builder = try SVNCommandBuilder(executableURL: executableURL)
@@ -1307,7 +1374,12 @@ actor CoreSvnDockService: SvnDockServicing {
             currentDirectoryURL: template.currentDirectoryURL, environment: template.environment,
             standardInput: template.standardInput, argumentFiles: template.argumentFiles,
             outputByteLimit: outputByteLimit)
-        let runner = processRunner
+        let runner: any ProcessRunning
+        if let progress {
+            runner = SVNProgressReportingRunner(base: processRunner, progress: progress)
+        } else {
+            runner = processRunner
+        }
         let operationLock = crossProcessLock
 
         let result = try await scheduler.enqueue(for: workingCopy.id) {

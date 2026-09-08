@@ -142,6 +142,7 @@ final class SvnDockStore: ObservableObject {
     @Published var isPresentingIgnoreRemovalConfirmation = false
 
     private let service: any SvnDockServicing
+    let transferProgress = SvnDockTransferProgressModel()
     let commitDraftStore: SvnDockCommitDraftStore
     private let finderQueueCoordinator: FinderCommandQueueCoordinator?
     private let finderBadgeRequestStore: FinderBadgeRefreshRequestStore?
@@ -814,12 +815,17 @@ final class SvnDockStore: ObservableObject {
             detail: detail,
             allowDuringFinderRouting: allowDuringFinderRouting
         ) { [self] in
-            for copy in copies {
+            let progressID = beginTransferProgress(kind: .updating, workingCopy: copies[0], totalWorkingCopies: copies.count)
+            defer { endTransferProgress(id: progressID) }
+            for (copyIndex, copy) in copies.enumerated() {
                 try Task.checkCancellation()
+                selectTransferWorkingCopy(copy, index: copyIndex, id: progressID)
                 let startedAt = Date()
                 var mutationError: Error?
                 do {
-                    try await service.update(workingCopies: [copy])
+                    try await withReportedTransferProgress(id: progressID) { report in
+                        try await self.service.update(workingCopies: [copy], progress: report)
+                    }
                     try Task.checkCancellation()
                 } catch {
                     mutationError = error
@@ -827,7 +833,9 @@ final class SvnDockStore: ObservableObject {
                 // Every attempted update can change disk state, even on error
                 // or cancellation. Keep the operation gate until an independent
                 // read refreshes this copy's summary, not just the selected one.
+                setTransferProgressPhase("正在核验本地状态…", id: progressID)
                 let verificationError = await refreshAfterMutation(in: copy, operationTitle: "更新", refreshMetadata: true)
+                completeTransferWorkingCopy(copyIndex + 1, id: progressID)
                 let cancelled = Task.isCancelled || mutationError is CancellationError
                 let outcome: SvnDockOperationRecord.Outcome = cancelled || verificationError != nil
                     ? .uncertain : mutationError == nil ? .success : .failure
@@ -919,13 +927,16 @@ final class SvnDockStore: ObservableObject {
             kind: .committing,
             detail: workingCopy.name
         )
+        let progressID = beginTransferProgress(kind: .committing, workingCopy: workingCopy,
+                                              selectedItemCount: selectedEntries.count)
 
         Task { [weak self] in
-            await self?.executeCommit(request)
+            await self?.executeCommit(request, progressID: progressID)
         }
     }
 
-    private func executeCommit(_ request: PendingCommitExecution) async {
+    private func executeCommit(_ request: PendingCommitExecution, progressID: UUID) async {
+        defer { endTransferProgress(id: progressID) }
         let startedAt = Date()
         let executingClaim: FinderCommandClaim?
         do {
@@ -943,11 +954,14 @@ final class SvnDockStore: ObservableObject {
         var commitError: Error?
         do {
             try Task.checkCancellation()
-            try await service.commit(
-                workingCopy: request.workingCopy,
-                relativePaths: request.relativePaths,
-                message: request.message
-            )
+            try await withReportedTransferProgress(id: progressID) { report in
+                try await self.service.commit(
+                    workingCopy: request.workingCopy,
+                    relativePaths: request.relativePaths,
+                    message: request.message,
+                    progress: report
+                )
+            }
             succeeded = true
         } catch is CancellationError {
             commitError = CancellationError()
@@ -994,6 +1008,7 @@ final class SvnDockStore: ObservableObject {
                                 : commitError?.localizedDescription))
         activeOperation = nil
         if succeeded {
+            setTransferProgressPhase("提交命令已完成，正在刷新本地状态…", id: progressID)
             await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
             isPresentingCommit = false
             await processPendingFinderCommands()

@@ -49,6 +49,21 @@ public enum ProcessTermination: Hashable, Sendable {
     case uncaughtSignal
 }
 
+public enum ProcessOutputStream: Hashable, Sendable {
+    case standardOutput
+    case standardError
+}
+
+public struct ProcessOutputChunk: Hashable, Sendable {
+    public let stream: ProcessOutputStream
+    public let data: Data
+
+    public init(stream: ProcessOutputStream, data: Data) {
+        self.stream = stream
+        self.data = data
+    }
+}
+
 public struct ProcessResult: Hashable, Sendable {
     public let terminationStatus: Int32
     public let terminationReason: ProcessTermination
@@ -84,6 +99,7 @@ public enum ProcessRunnerError: Error, LocalizedError, Equatable, Sendable {
     case invalidInvocation(String)
     case launchFailed(String)
     case outputLimitExceeded(Int)
+    case outputReadFailed(Int32)
 
     public var errorDescription: String? {
         switch self {
@@ -93,12 +109,36 @@ public enum ProcessRunnerError: Error, LocalizedError, Equatable, Sendable {
             return "Unable to launch process: \(reason)"
         case let .outputLimitExceeded(limit):
             return "Process output exceeded the \(limit)-byte limit."
+        case let .outputReadFailed(code):
+            return "Unable to read process output: \(POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO).localizedDescription)"
         }
     }
 }
 
 public protocol ProcessRunning: Sendable {
     func run(_ invocation: ProcessInvocation) async throws -> ProcessResult
+    func run(
+        _ invocation: ProcessInvocation,
+        onOutput: @escaping @Sendable (ProcessOutputChunk) -> Void
+    ) async throws -> ProcessResult
+}
+
+public extension ProcessRunning {
+    /// Keeps existing runners and test doubles compatible. Real process runners
+    /// should override this overload to deliver output while the child runs.
+    func run(
+        _ invocation: ProcessInvocation,
+        onOutput: @escaping @Sendable (ProcessOutputChunk) -> Void
+    ) async throws -> ProcessResult {
+        let result = try await run(invocation)
+        if !result.standardOutput.isEmpty {
+            onOutput(ProcessOutputChunk(stream: .standardOutput, data: result.standardOutput))
+        }
+        if !result.standardError.isEmpty {
+            onOutput(ProcessOutputChunk(stream: .standardError, data: result.standardError))
+        }
+        return result
+    }
 }
 
 /// Executes commands directly with `Foundation.Process`; no shell is involved.
@@ -110,6 +150,23 @@ public struct ProcessRunner: ProcessRunning, Sendable {
     public init() {}
 
     public func run(_ invocation: ProcessInvocation) async throws -> ProcessResult {
+        try await execute(invocation, onOutput: nil)
+    }
+
+    /// Callbacks are serialized on background pipe-reader threads and finish
+    /// before this method returns. Keep handlers short; no per-chunk tasks or
+    /// unbounded event queue are created by the runner.
+    public func run(
+        _ invocation: ProcessInvocation,
+        onOutput: @escaping @Sendable (ProcessOutputChunk) -> Void
+    ) async throws -> ProcessResult {
+        try await execute(invocation, onOutput: onOutput)
+    }
+
+    private func execute(
+        _ invocation: ProcessInvocation,
+        onOutput: (@Sendable (ProcessOutputChunk) -> Void)?
+    ) async throws -> ProcessResult {
         try Self.validate(invocation)
         try Task.checkCancellation()
 
@@ -121,7 +178,7 @@ public struct ProcessRunner: ProcessRunning, Sendable {
             try await withCheckedThrowingContinuation { continuation in
                 DispatchQueue.global(qos: .utility).async {
                     continuation.resume(with: Result {
-                        try Self.runBlocking(invocation, state: state)
+                        try Self.runBlocking(invocation, state: state, onOutput: onOutput)
                     })
                 }
             }
@@ -171,7 +228,8 @@ public struct ProcessRunner: ProcessRunning, Sendable {
 
     private static func runBlocking(
         _ invocation: ProcessInvocation,
-        state: RunningProcessState
+        state: RunningProcessState,
+        onOutput: (@Sendable (ProcessOutputChunk) -> Void)?
     ) throws -> ProcessResult {
         if state.isCancelled {
             throw CancellationError()
@@ -259,16 +317,19 @@ public struct ProcessRunner: ProcessRunning, Sendable {
         let output = LockedData()
         let errors = LockedData()
         let drains = DispatchGroup()
+        let delivery = ProcessOutputDelivery(handler: onOutput)
 
         drains.enter()
         DispatchQueue.global(qos: .utility).async {
-            readOutput(from: outputPipe.fileHandleForReading, limit: invocation.outputByteLimit, into: output)
+            readOutput(from: outputPipe.fileHandleForReading, stream: .standardOutput,
+                       limit: invocation.outputByteLimit, into: output, delivery: delivery)
             drains.leave()
         }
 
         drains.enter()
         DispatchQueue.global(qos: .utility).async {
-            readOutput(from: errorPipe.fileHandleForReading, limit: invocation.outputByteLimit, into: errors)
+            readOutput(from: errorPipe.fileHandleForReading, stream: .standardError,
+                       limit: invocation.outputByteLimit, into: errors, delivery: delivery)
             drains.leave()
         }
 
@@ -291,6 +352,10 @@ public struct ProcessRunner: ProcessRunning, Sendable {
             throw CancellationError()
         }
 
+        if let code = output.readError ?? errors.readError {
+            throw ProcessRunnerError.outputReadFailed(code)
+        }
+
         if let limit = invocation.outputByteLimit, output.exceededLimit || errors.exceededLimit {
             throw ProcessRunnerError.outputLimitExceeded(limit)
         }
@@ -307,23 +372,40 @@ public struct ProcessRunner: ProcessRunning, Sendable {
         )
     }
 
-    private static func readOutput(from handle: FileHandle, limit: Int?, into output: LockedData) {
-        guard let limit else {
-            output.set(handle.readDataToEndOfFile())
-            return
-        }
+    private static func readOutput(
+        from handle: FileHandle,
+        stream: ProcessOutputStream,
+        limit: Int?,
+        into output: LockedData,
+        delivery: ProcessOutputDelivery
+    ) {
         var data = Data()
         var exceededLimit = false
+        var readError: Int32?
+        var buffer = [UInt8](repeating: 0, count: 64 * 1_024)
         while true {
-            let chunk = handle.readData(ofLength: 64 * 1_024)
-            if chunk.isEmpty { break }
-            let remaining = limit - data.count
-            if chunk.count > remaining { exceededLimit = true }
-            data.append(chunk.prefix(remaining))
+            // read(2) returns the bytes currently available. FileHandle's
+            // readData(ofLength:) can wait for a full buffer and delay small
+            // progress notifications until the command exits.
+            let count = Darwin.read(handle.fileDescriptor, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR { continue }
+                readError = errno
+                break
+            }
+            let chunk = Data(buffer.prefix(count))
+            let remaining = limit.map { $0 - data.count } ?? count
+            if count > remaining { exceededLimit = true }
+            let retained = chunk.prefix(remaining)
+            data.append(retained)
+            if !retained.isEmpty {
+                delivery.deliver(ProcessOutputChunk(stream: stream, data: Data(retained)))
+            }
             // Continue draining both pipes even after exceeding the bound, so
             // a child writing stdout and stderr cannot block waiting for us.
         }
-        output.set(data, exceededLimit: exceededLimit)
+        output.set(data, exceededLimit: exceededLimit, readError: readError)
     }
 
     private static func writeStandardInput(_ data: Data, to handle: FileHandle) throws {
@@ -352,6 +434,7 @@ private final class LockedData: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = Data()
     private var limitExceeded = false
+    private var storedReadError: Int32?
 
     var value: Data {
         lock.withLock { storage }
@@ -361,11 +444,26 @@ private final class LockedData: @unchecked Sendable {
         lock.withLock { limitExceeded }
     }
 
-    func set(_ data: Data, exceededLimit: Bool = false) {
+    var readError: Int32? { lock.withLock { storedReadError } }
+
+    func set(_ data: Data, exceededLimit: Bool = false, readError: Int32? = nil) {
         lock.withLock {
             storage = data
             limitExceeded = exceededLimit
+            storedReadError = readError
         }
+    }
+}
+
+private final class ProcessOutputDelivery: @unchecked Sendable {
+    private let lock = NSLock()
+    private let handler: (@Sendable (ProcessOutputChunk) -> Void)?
+
+    init(handler: (@Sendable (ProcessOutputChunk) -> Void)?) { self.handler = handler }
+
+    func deliver(_ chunk: ProcessOutputChunk) {
+        guard let handler else { return }
+        lock.withLock { handler(chunk) }
     }
 }
 

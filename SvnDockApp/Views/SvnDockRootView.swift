@@ -29,6 +29,7 @@ struct SvnDockRootView: View {
                 .frame(minWidth: 760, maxWidth: .infinity, maxHeight: .infinity)
             }
             Divider().overlay(SvnDockTheme.border)
+            SvnDockTransferProgressView(model: store.transferProgress)
             OperationRecordBar(store: store)
         }
         .background(SvnDockTheme.surface)

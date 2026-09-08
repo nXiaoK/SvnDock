@@ -102,6 +102,7 @@ struct CommitSheet: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .layoutPriority(1)
                 Divider().overlay(SvnDockTheme.border)
+                SvnDockTransferProgressView(model: store.transferProgress, requiredKind: .committing)
                 Group {
                     if isPreviewExpanded { expandedFooter }
                     else { footer(compact: compact) }

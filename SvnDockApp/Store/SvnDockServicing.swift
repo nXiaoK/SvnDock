@@ -37,10 +37,20 @@ protocol SvnDockServicing: Sendable {
                       in workingCopy: SvnDockWorkingCopy) async throws -> String
 
     func update(workingCopies: [SvnDockWorkingCopy]) async throws
+    func update(
+        workingCopies: [SvnDockWorkingCopy],
+        progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
+    ) async throws
     func commit(
         workingCopy: SvnDockWorkingCopy,
         relativePaths: [String],
         message: String
+    ) async throws
+    func commit(
+        workingCopy: SvnDockWorkingCopy,
+        relativePaths: [String],
+        message: String,
+        progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
     ) async throws
     func add(relativePaths: [String], in workingCopy: SvnDockWorkingCopy) async throws
     func unscheduleAdd(
@@ -74,6 +84,24 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func update(
+        workingCopies: [SvnDockWorkingCopy],
+        progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
+    ) async throws {
+        progress(SVNProgressSnapshot())
+        try await update(workingCopies: workingCopies)
+    }
+
+    func commit(
+        workingCopy: SvnDockWorkingCopy,
+        relativePaths: [String],
+        message: String,
+        progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
+    ) async throws {
+        progress(SVNProgressSnapshot())
+        try await commit(workingCopy: workingCopy, relativePaths: relativePaths, message: message)
+    }
+
     func classifyLocalDifference(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SVNLocalDifferenceKind {
         throw SvnDockServiceError.unavailable("当前服务不支持识别仅换行或空白变化。")
     }
