@@ -236,6 +236,18 @@ public struct SVNCommandBuilder: Sendable {
                 escapePegRevision: false
             ))
 
+        case let .localDifference(relativePath, ignoringWhitespace):
+            // An empty internal diff confirms that only the explicitly ignored
+            // bytes changed. Keep property diffs and binary notices visible.
+            arguments = ["diff", "--internal-diff", "--depth", "empty", "--extensions",
+                         ignoringWhitespace ? "--ignore-all-space --ignore-eol-style --context 0"
+                            : "--ignore-eol-style --context 0"]
+            appendCommonOptions(to: &arguments)
+            arguments.append("--")
+            arguments.append(contentsOf: try requiredSafePaths(
+                [relativePath], root: root, command: "diff", escapePegRevision: false
+            ))
+
         case let .revisionLog(repositoryRoot, revision):
             try validateHistoryRevision(revision)
             arguments = ["log", "--xml", "--verbose", "--revision", String(revision), "--limit", "1"]

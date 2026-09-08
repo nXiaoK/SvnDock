@@ -21,6 +21,9 @@ public struct ProcessInvocation: Hashable, Sendable {
     public let environment: [String: String]
     public let standardInput: Data?
     public let argumentFiles: [ProcessArgumentFile]
+    /// Optional per-stream memory bound. Excess output is drained and discarded,
+    /// then the invocation throws instead of returning a partial success.
+    public let outputByteLimit: Int?
 
     public init(
         executableURL: URL,
@@ -28,7 +31,8 @@ public struct ProcessInvocation: Hashable, Sendable {
         currentDirectoryURL: URL? = nil,
         environment: [String: String] = [:],
         standardInput: Data? = nil,
-        argumentFiles: [ProcessArgumentFile] = []
+        argumentFiles: [ProcessArgumentFile] = [],
+        outputByteLimit: Int? = nil
     ) {
         self.executableURL = executableURL
         self.arguments = arguments
@@ -36,6 +40,7 @@ public struct ProcessInvocation: Hashable, Sendable {
         self.environment = environment
         self.standardInput = standardInput
         self.argumentFiles = argumentFiles
+        self.outputByteLimit = outputByteLimit
     }
 }
 
@@ -78,6 +83,7 @@ public struct ProcessResult: Hashable, Sendable {
 public enum ProcessRunnerError: Error, LocalizedError, Equatable, Sendable {
     case invalidInvocation(String)
     case launchFailed(String)
+    case outputLimitExceeded(Int)
 
     public var errorDescription: String? {
         switch self {
@@ -85,6 +91,8 @@ public enum ProcessRunnerError: Error, LocalizedError, Equatable, Sendable {
             return "Invalid process invocation: \(reason)"
         case let .launchFailed(reason):
             return "Unable to launch process: \(reason)"
+        case let .outputLimitExceeded(limit):
+            return "Process output exceeded the \(limit)-byte limit."
         }
     }
 }
@@ -123,6 +131,9 @@ public struct ProcessRunner: ProcessRunning, Sendable {
     }
 
     private static func validate(_ invocation: ProcessInvocation) throws {
+        if let limit = invocation.outputByteLimit, limit <= 0 {
+            throw ProcessRunnerError.invalidInvocation("output byte limit must be positive")
+        }
         // Foundation can raise NSInvalidArgumentException here, which Swift
         // do/catch cannot catch. Leave one slot for the executable (argv[0]).
         guard invocation.arguments.count < 4_096 else {
@@ -251,13 +262,13 @@ public struct ProcessRunner: ProcessRunning, Sendable {
 
         drains.enter()
         DispatchQueue.global(qos: .utility).async {
-            output.set(outputPipe.fileHandleForReading.readDataToEndOfFile())
+            readOutput(from: outputPipe.fileHandleForReading, limit: invocation.outputByteLimit, into: output)
             drains.leave()
         }
 
         drains.enter()
         DispatchQueue.global(qos: .utility).async {
-            errors.set(errorPipe.fileHandleForReading.readDataToEndOfFile())
+            readOutput(from: errorPipe.fileHandleForReading, limit: invocation.outputByteLimit, into: errors)
             drains.leave()
         }
 
@@ -280,6 +291,10 @@ public struct ProcessRunner: ProcessRunning, Sendable {
             throw CancellationError()
         }
 
+        if let limit = invocation.outputByteLimit, output.exceededLimit || errors.exceededLimit {
+            throw ProcessRunnerError.outputLimitExceeded(limit)
+        }
+
         let reason: ProcessTermination = process.terminationReason == .exit
             ? .exit
             : .uncaughtSignal
@@ -290,6 +305,25 @@ public struct ProcessRunner: ProcessRunning, Sendable {
             standardOutput: output.value,
             standardError: errors.value
         )
+    }
+
+    private static func readOutput(from handle: FileHandle, limit: Int?, into output: LockedData) {
+        guard let limit else {
+            output.set(handle.readDataToEndOfFile())
+            return
+        }
+        var data = Data()
+        var exceededLimit = false
+        while true {
+            let chunk = handle.readData(ofLength: 64 * 1_024)
+            if chunk.isEmpty { break }
+            let remaining = limit - data.count
+            if chunk.count > remaining { exceededLimit = true }
+            data.append(chunk.prefix(remaining))
+            // Continue draining both pipes even after exceeding the bound, so
+            // a child writing stdout and stderr cannot block waiting for us.
+        }
+        output.set(data, exceededLimit: exceededLimit)
     }
 
     private static func writeStandardInput(_ data: Data, to handle: FileHandle) throws {
@@ -317,13 +351,21 @@ public struct ProcessRunner: ProcessRunning, Sendable {
 private final class LockedData: @unchecked Sendable {
     private let lock = NSLock()
     private var storage = Data()
+    private var limitExceeded = false
 
     var value: Data {
         lock.withLock { storage }
     }
 
-    func set(_ data: Data) {
-        lock.withLock { storage = data }
+    var exceededLimit: Bool {
+        lock.withLock { limitExceeded }
+    }
+
+    func set(_ data: Data, exceededLimit: Bool = false) {
+        lock.withLock {
+            storage = data
+            limitExceeded = exceededLimit
+        }
     }
 }
 

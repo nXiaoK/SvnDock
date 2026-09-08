@@ -15,7 +15,8 @@ struct SvnDockCommitDraft: Codable, Equatable, Sendable {
         entries: [SvnDockStatusEntry],
         selectedEntryIDs: Set<SvnDockStatusEntry.ID>,
         savedDraft: Self?,
-        explicitEntryIDs: Set<SvnDockStatusEntry.ID>? = nil
+        explicitEntryIDs: Set<SvnDockStatusEntry.ID>? = nil,
+        excludedEntryIDs: Set<SvnDockStatusEntry.ID> = []
     ) -> Set<SvnDockStatusEntry.ID> {
         if let explicitEntryIDs {
             // Finder freezes the current selection independently of the saved
@@ -25,10 +26,11 @@ struct SvnDockCommitDraft: Codable, Equatable, Sendable {
         if let savedDraft {
             // An explicitly empty saved selection is meaningful. Do not select
             // newly changed files just because an older draft has no matches.
-            return savedDraft.includedEntryIDs(in: entries)
+            return savedDraft.includedEntryIDs(in: entries).subtracting(excludedEntryIDs)
         }
         let availableIDs = Set(entries.map(\.id))
-        return selectedEntryIDs.isEmpty ? availableIDs : selectedEntryIDs.intersection(availableIDs)
+        let included = selectedEntryIDs.isEmpty ? availableIDs : selectedEntryIDs.intersection(availableIDs)
+        return included.subtracting(excludedEntryIDs)
     }
 }
 

@@ -20,6 +20,7 @@ protocol SvnDockServicing: Sendable {
         in workingCopy: SvnDockWorkingCopy
     ) async throws -> [SvnDockStatusEntry]
     func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String
+    func classifyLocalDifference(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SVNLocalDifferenceKind
     func history(
         for workingCopy: SvnDockWorkingCopy,
         relativePaths: [String],
@@ -73,6 +74,10 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func classifyLocalDifference(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> SVNLocalDifferenceKind {
+        throw SvnDockServiceError.unavailable("当前服务不支持识别仅换行或空白变化。")
+    }
+
     func prepareIgnoreRecommendations(in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockIgnoreRecommendationPlan {
         throw SvnDockServiceError.unavailable("当前服务不支持推荐忽略项。")
     }

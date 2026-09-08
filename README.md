@@ -29,6 +29,11 @@ SvnDock does not invoke Git or intentionally modify `.git`.
   history and quick access to Finder and Settings, even after closing the main window.
 - View local status, filter changed paths, inspect text diffs and browse
   repository history.
+- Hide files with only line-ending changes, or broaden the workspace filter to
+  spaces and tabs. Files and SVN status stay unchanged; properties, conflicts
+  and unconfirmed comparisons remain visible. Hidden files start unchecked in
+  workspace commit reviews and can be selected there again. Whitespace inside
+  strings or indentation can be meaningful; all differences are shown by default.
 - Single-click a file to update the diff inspector immediately; double-click
   to open its diff in a separate window. Command/Shift multiselection and
   keyboard navigation remain available.

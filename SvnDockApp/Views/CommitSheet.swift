@@ -34,17 +34,21 @@ struct CommitSheet: View {
             }
         }
         let explicitIDs = store.commitInitialSelectedEntryIDs
-        let includedIDs = loadError != nil && explicitIDs == nil ? [] : SvnDockCommitDraft.initialIncludedEntryIDs(
+        let excludedIDs = store.commitInitiallyExcludedEntryIDs
+        let includedIDs: Set<SvnDockStatusEntry.ID> = loadError != nil && explicitIDs == nil ? [] : SvnDockCommitDraft.initialIncludedEntryIDs(
             entries: store.committableEntries,
             selectedEntryIDs: store.selectedEntryIDs,
             savedDraft: savedDraft,
-            explicitEntryIDs: explicitIDs
+            explicitEntryIDs: explicitIDs,
+            excludedEntryIDs: excludedIDs
         )
         _draftWorkingCopy = State(initialValue: workingCopy)
         _message = State(initialValue: savedDraft?.message ?? "")
-        _draftNotice = State(initialValue: explicitIDs != nil
+        let notice = explicitIDs != nil
             ? "已按本次 Finder 选择勾选；提交说明继续使用草稿"
-            : savedDraft == nil ? "说明与勾选自动保留" : "已恢复此工作副本的草稿；新变更未自动勾选")
+            : savedDraft == nil ? "说明与勾选自动保留" : "已恢复此工作副本的草稿；新变更未自动勾选"
+        _draftNotice = State(initialValue: excludedIDs.isEmpty ? notice
+            : notice + "；工作区隐藏的 \(excludedIDs.count) 项未勾选，可在此重新勾选")
         _draftError = State(initialValue: loadError)
         _includedEntryIDs = State(initialValue: includedIDs)
         _selectionSummary = State(initialValue: SelectionSummary(

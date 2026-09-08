@@ -441,6 +441,114 @@ actor CoreSvnDockService: SvnDockServicing {
         return result.standardOutputString
     }
 
+    func classifyLocalDifference(
+        relativePath: String,
+        in workingCopy: SvnDockWorkingCopy
+    ) async throws -> SVNLocalDifferenceKind {
+        let copy = coreWorkingCopy(for: workingCopy)
+        let builder = try SVNCommandBuilder(executableURL: executableLocator.locate())
+        let target = try builder.normalizedLocalPaths([relativePath], in: copy, command: "diff")[0]
+        let runner = processRunner
+        let operationLock = crossProcessLock
+        return try await scheduler.enqueue(for: copy.id) {
+            try await operationLock.withLock(for: copy.id) {
+                try await Self.classifyLocalDifference(target: target, in: copy, builder: builder, runner: runner)
+            }
+        }
+    }
+
+    private static func classifyLocalDifference(
+        target: String, in copy: SvnDockCore.WorkingCopy,
+        builder: SVNCommandBuilder, runner: any ProcessRunning
+    ) async throws -> SVNLocalDifferenceKind {
+        // Classify one regular text file at a time. Unknown states must remain
+        // visible, including symlinks, nested WCs and files being rewritten.
+        let file = try validatedFinderPath(target, in: copy)
+        guard let before = try localDifferenceFingerprint(file) else { return .unknown }
+        let handle = try FileHandle(forReadingFrom: file)
+        defer { try? handle.close() }
+        let bytes = try handle.read(upToCount: localDifferenceFileLimit + 1) ?? Data()
+        guard bytes.count <= localDifferenceFileLimit, !bytes.contains(0),
+              String(data: bytes, encoding: .utf8) != nil else { return .unknown }
+
+        func execute(_ operation: SVNOperationKind) async throws -> ProcessResult {
+            try Task.checkCancellation()
+            let invocation = try builder.makeInvocation(for: operation, in: copy)
+            let result = try await runner.run(ProcessInvocation(
+                executableURL: invocation.executableURL, arguments: invocation.arguments,
+                currentDirectoryURL: invocation.currentDirectoryURL, environment: invocation.environment,
+                standardInput: invocation.standardInput, argumentFiles: invocation.argumentFiles,
+                outputByteLimit: 8 * 1_024 * 1_024
+            ))
+            guard result.succeeded else { throw SVNProcessFailure(result: result) }
+            return result
+        }
+        func currentStatus() async throws -> SvnDockCore.StatusEntry? {
+            let result = try await execute(.status(SVNStatusOptions(
+                includeIgnored: true, includeUnchanged: true, ignoreExternals: true,
+                depth: .empty, paths: [target]
+            )))
+            guard result.standardError.isEmpty else { return nil }
+            return statusEntry(for: target, entries: try SVNXMLParser.parseStatus(
+                result.standardOutput, workingCopyURL: copy.localPath, resolveNodeKinds: false
+            ), in: copy)
+        }
+        guard let status = try await currentStatus() else { return .unknown }
+        if case .unknown = status.status { return .unknown }
+        if case .unknown = status.propertyStatus { return .unknown }
+        guard status.status == .modified,
+              status.propertyStatus == .none || status.propertyStatus == .normal,
+              !status.isCopied, !status.isSwitched, status.isFileExternal != true,
+              !status.isTreeConflicted, (status.revision ?? -1) >= 0 else { return .substantive }
+        let infoResult = try await execute(.infoTargets(paths: [target]))
+        guard infoResult.standardError.isEmpty else { return .unknown }
+        let info = try SVNXMLParser.parseInfo(infoResult.standardOutput)
+        guard info.kind == .file, info.schedule == "normal", belongsToWorkingCopy(info, copy: copy) else {
+            return .substantive
+        }
+
+        let eolDiff = try await execute(.localDifference(relativePath: target, ignoringWhitespace: false))
+        guard eolDiff.standardError.isEmpty else { return .unknown }
+        let classification: SVNLocalDifferenceKind
+        if eolDiff.standardOutput.isEmpty {
+            // A stale or translated status can have no actual diff. Do not
+            // label that as an EOL edit without an ordinary text hunk.
+            let original = try await execute(.diff(paths: [target], depth: .empty))
+            guard original.standardError.isEmpty,
+                  original.standardOutputString.split(separator: "\n").contains(where: { $0.hasPrefix("@@ -") }) else {
+                return .unknown
+            }
+            classification = .lineEndingsOnly
+        } else {
+            let whitespaceDiff = try await execute(.localDifference(relativePath: target, ignoringWhitespace: true))
+            guard whitespaceDiff.standardError.isEmpty else { return .unknown }
+            classification = whitespaceDiff.standardOutput.isEmpty ? .whitespaceOnly : .substantive
+        }
+        guard classification != .substantive else { return classification }
+        try Task.checkCancellation()
+        guard try validatedFinderPath(target, in: copy) == file,
+              try localDifferenceFingerprint(file) == before,
+              try await currentStatus() == status else { return .unknown }
+        return classification
+    }
+
+    private static let localDifferenceFileLimit = 2 * 1_024 * 1_024
+
+    private static func localDifferenceFingerprint(_ file: URL) throws -> LocalDifferenceFingerprint? {
+        let values = try FileManager.default.attributesOfItem(atPath: file.path)
+        guard values[.type] as? FileAttributeType == .typeRegular,
+              let size = values[.size] as? NSNumber, size.int64Value <= Int64(localDifferenceFileLimit),
+              let date = values[.modificationDate] as? Date,
+              let inode = values[.systemFileNumber] as? NSNumber else { return nil }
+        return LocalDifferenceFingerprint(size: size.int64Value, modificationDate: date, inode: inode.uint64Value)
+    }
+
+    private struct LocalDifferenceFingerprint: Equatable {
+        let size: Int64
+        let modificationDate: Date
+        let inode: UInt64
+    }
+
     func history(
         for workingCopy: SvnDockWorkingCopy,
         relativePaths: [String],

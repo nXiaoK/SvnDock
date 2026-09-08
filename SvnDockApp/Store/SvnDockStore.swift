@@ -19,6 +19,7 @@ final class SvnDockStore: ObservableObject {
     @Published var selectedWorkingCopyID: UUID? {
         didSet {
             if oldValue != selectedWorkingCopyID {
+                cancelDifferenceClassification(clearResults: true)
                 clearDiff()
                 clearHistory()
                 finderSelectedTarget = nil
@@ -52,6 +53,17 @@ final class SvnDockStore: ObservableObject {
             if oldValue != searchQuery { rebuildStatusPresentation(resetLimit: true, debounce: true) }
         }
     }
+    @Published var differenceFilter: SvnDockDifferenceFilter = .all {
+        didSet {
+            guard oldValue != differenceFilter else { return }
+            if differenceFilter == .all { cancelDifferenceClassification(clearResults: false) }
+            updateDifferenceVisibility()
+            startDifferenceClassificationIfNeeded()
+        }
+    }
+    @Published private(set) var isCheckingDifferences = false
+    @Published private(set) var hiddenDifferenceCount = 0
+    @Published private(set) var uncheckedDifferenceCount = 0
     @Published var showsMissingDetails = false {
         didSet {
             if oldValue != showsMissingDetails { rebuildStatusPresentation(resetLimit: true, debounce: false) }
@@ -68,6 +80,7 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var ignoredEntriesError: String?
     @Published private(set) var finderSelectedTarget: SvnDockFinderTarget?
     @Published private(set) var commitInitialSelectedEntryIDs: Set<SvnDockStatusEntry.ID>?
+    @Published private(set) var commitInitiallyExcludedEntryIDs: Set<SvnDockStatusEntry.ID> = []
     @Published private(set) var finderBadgeRefreshError: String?
     @Published private(set) var finderBadgesLastRefreshedAt: Date?
     @Published private var expandedDirectoryIDs: Set<SvnDockStatusEntry.ID> = []
@@ -97,12 +110,26 @@ final class SvnDockStore: ObservableObject {
     @Published private(set) var isLoadingHistory = false
     @Published private(set) var historyErrorMessage: String?
 
-    @Published private(set) var activeOperation: SvnDockOperationState?
+    @Published private(set) var activeOperation: SvnDockOperationState? {
+        didSet {
+            if let activeOperation, activeOperation.kind != .checkingRemote {
+                cancelDifferenceClassification(clearResults: true)
+                rebuildStatusPresentation(resetLimit: false, debounce: false)
+            } else if activeOperation == nil {
+                startDifferenceClassificationIfNeeded()
+            }
+        }
+    }
     @Published private(set) var operationRecords: [SvnDockOperationRecord] = []
     @Published private var remoteStatusByWorkingCopyID: [UUID: SvnDockRemoteStatusState] = [:]
     private var remoteStatusGeneration: [UUID: UUID] = [:]
     @Published var presentedError: SvnDockUserFacingError?
-    @Published var isPresentingCommit = false
+    @Published var isPresentingCommit = false {
+        didSet {
+            if isPresentingCommit { cancelDifferenceClassification(clearResults: false) }
+            else { startDifferenceClassificationIfNeeded() }
+        }
+    }
     @Published var isPresentingDirectoryImporter = false
     @Published var isPresentingUnscheduleAddConfirmation = false
     @Published var isPresentingMissingDeletionConfirmation = false
@@ -126,7 +153,11 @@ final class SvnDockStore: ObservableObject {
     private var didRecoverFinderClaims = false
     private var isPreparingFinderQueue = false
     private var processingFinderCommandIDs: Set<UUID> = []
-    private var finalizingFinderCommandIDs: Set<UUID> = []
+    private var finalizingFinderCommandIDs: Set<UUID> = [] {
+        didSet {
+            if finalizingFinderCommandIDs.isEmpty { startDifferenceClassificationIfNeeded() }
+        }
+    }
     private var rejectedFinderCommandIDs: Set<UUID> = []
     private var suppressedSelectionReloadID: UUID?
     private var startupTask: Task<Void, Never>?
@@ -142,6 +173,11 @@ final class SvnDockStore: ObservableObject {
     private var ignoredLoadTask: Task<Void, Never>?
     private var ignoredLoadGeneration = UUID()
     private var statusSnapshot = SvnDockStatusSnapshot.empty
+    private var differenceSnapshotWorkingCopyID: UUID?
+    private var differenceKindsByID: [SvnDockStatusEntry.ID: SVNLocalDifferenceKind] = [:]
+    private var hiddenDifferenceEntryIDs: Set<SvnDockStatusEntry.ID> = []
+    private var differenceClassificationTask: Task<Void, Never>?
+    private var differenceClassificationGeneration = UUID()
     private var filteredStatusEntries: [SvnDockStatusEntry] = []
     private var visibleEntryLimit = SvnDockStore.initialVisibleEntryLimit
     private var statusLoadGeneration = UUID()
@@ -175,7 +211,11 @@ final class SvnDockStore: ObservableObject {
     private var isDrainingFinderQueue = false
     private var pendingCommitClaim: FinderCommandClaim?
     @Published private(set) var commitWorkingCopy: SvnDockWorkingCopy?
-    @Published private var activeFinderCommandID: UUID?
+    @Published private var activeFinderCommandID: UUID? {
+        didSet {
+            if activeFinderCommandID == nil { startDifferenceClassificationIfNeeded() }
+        }
+    }
 
     init(
         service: any SvnDockServicing,
@@ -204,6 +244,7 @@ final class SvnDockStore: ObservableObject {
     }
 
     deinit {
+        differenceClassificationTask?.cancel()
         finderBadgeRefreshTask?.cancel()
         if let finderHandoffObserver {
             DistributedNotificationCenter.default().removeObserver(finderHandoffObserver)
@@ -820,6 +861,7 @@ final class SvnDockStore: ObservableObject {
         pendingCommitClaim = finderClaim
         commitInitialSelectedEntryIDs = finderClaim == nil ? nil
             : Set(committableEntries.filter { selectedEntryIDs.contains($0.id) }.map(\.id))
+        commitInitiallyExcludedEntryIDs = finderClaim == nil ? hiddenDifferenceEntryIDs : []
         isPresentingCommit = true
     }
 
@@ -834,6 +876,7 @@ final class SvnDockStore: ObservableObject {
     func commitPresentationDidDismiss() {
         guard !isPresentingCommit else { return }
         commitInitialSelectedEntryIDs = nil
+        commitInitiallyExcludedEntryIDs = []
         commitWorkingCopy = nil
         guard let claim = pendingCommitClaim else { return }
         pendingCommitClaim = nil
@@ -2754,6 +2797,8 @@ final class SvnDockStore: ObservableObject {
         _ loadedSnapshot: SvnDockStatusSnapshot,
         to workingCopyID: UUID
     ) {
+        cancelDifferenceClassification(clearResults: true)
+        differenceSnapshotWorkingCopyID = workingCopyID
         hasLoadedStatus = true
         statusRecoveryMessage = nil
         resetDirectoryTree()
@@ -2768,6 +2813,7 @@ final class SvnDockStore: ObservableObject {
 
         applyStatusSummary(loadedSnapshot, to: workingCopyID)
         if statusFilter == .ignored { loadIgnoredEntriesIfNeeded() }
+        startDifferenceClassificationIfNeeded()
     }
 
     private func applyStatusSummary(_ loadedSnapshot: SvnDockStatusSnapshot, to workingCopyID: UUID) {
@@ -2777,6 +2823,8 @@ final class SvnDockStore: ObservableObject {
     }
 
     private func clearStatusEntries() {
+        cancelDifferenceClassification(clearResults: true)
+        differenceSnapshotWorkingCopyID = nil
         hasLoadedStatus = false
         statusRecoveryMessage = nil
         clearDiff()
@@ -2806,6 +2854,8 @@ final class SvnDockStore: ObservableObject {
     private func loadStatusSnapshot(
         for workingCopy: SvnDockWorkingCopy
     ) async throws -> SvnDockStatusSnapshot {
+        cancelDifferenceClassification(clearResults: true)
+        rebuildStatusPresentation(resetLimit: false, debounce: false)
         finderSelectedTarget = nil
         invalidateIgnoredEntries()
         activeStatusLoadTask?.cancel()
@@ -2851,6 +2901,113 @@ final class SvnDockStore: ObservableObject {
         }
     }
 
+    /// Classification belongs to a single authoritative status snapshot. Only
+    /// confirmed text-only results can hide rows; errors remain reviewable.
+    private func cancelDifferenceClassification(clearResults: Bool) {
+        differenceClassificationTask?.cancel()
+        differenceClassificationTask = nil
+        differenceClassificationGeneration = UUID()
+        isCheckingDifferences = false
+        if clearResults {
+            differenceKindsByID = [:]
+            hiddenDifferenceEntryIDs = []
+            hiddenDifferenceCount = 0
+            uncheckedDifferenceCount = 0
+        }
+    }
+
+    func retryDifferenceClassification() {
+        guard !isCheckingDifferences else { return }
+        differenceKindsByID = differenceKindsByID.filter { $0.value != .unknown }
+        updateDifferenceVisibility()
+        startDifferenceClassificationIfNeeded()
+    }
+
+    private func updateDifferenceVisibility() {
+        hiddenDifferenceEntryIDs = Set(differenceKindsByID.compactMap { id, kind in
+            switch (differenceFilter, kind) {
+            case (.hideLineEndings, .lineEndingsOnly),
+                 (.hideWhitespace, .lineEndingsOnly), (.hideWhitespace, .whitespaceOnly): id
+            default: nil
+            }
+        })
+        hiddenDifferenceCount = hiddenDifferenceEntryIDs.count
+        uncheckedDifferenceCount = differenceFilter == .all ? 0
+            : differenceKindsByID.values.filter { $0 == .unknown }.count
+        selectedEntryIDs.subtract(hiddenDifferenceEntryIDs)
+        rebuildStatusPresentation(resetLimit: false, debounce: false)
+    }
+
+    private func canContinueDifferenceClassification(generation: UUID, copy: SvnDockWorkingCopy) -> Bool {
+        differenceClassificationGeneration == generation
+            && differenceFilter != .all && hasLoadedStatus
+            && differenceSnapshotWorkingCopyID == copy.id && selectedWorkingCopyID == copy.id
+            && selectedWorkingCopy?.rootURL == copy.rootURL
+            && !isBusy && !isPresentingCommit
+    }
+
+    private func startDifferenceClassificationIfNeeded() {
+        guard differenceFilter != .all, hasLoadedStatus, !isBusy, !isPresentingCommit,
+              differenceClassificationTask == nil, let copy = selectedWorkingCopy,
+              differenceSnapshotWorkingCopyID == copy.id else { return }
+        let candidates = entries.filter {
+            $0.workingCopyID == copy.id && $0.status == .modified && $0.nodeKind == .file
+                && !$0.isSymbolicLink && $0.conflictKinds.isEmpty && $0.repositoryStatus != .conflicted
+                && differenceKindsByID[$0.id] == nil
+        }
+        guard !candidates.isEmpty else { return }
+        let generation = UUID()
+        differenceClassificationGeneration = generation
+        isCheckingDifferences = true
+        let service = service
+        differenceClassificationTask = Task.detached(priority: .utility) { [weak self] in
+            var batch: [SvnDockStatusEntry.ID: SVNLocalDifferenceKind] = [:]
+            let clock = ContinuousClock()
+            var lastPublication = clock.now
+            for entry in candidates {
+                guard !Task.isCancelled,
+                      await self?.canContinueDifferenceClassification(generation: generation, copy: copy) == true else {
+                    await self?.finishDifferenceClassification(generation: generation)
+                    return
+                }
+                let kind: SVNLocalDifferenceKind
+                do {
+                    kind = try await service.classifyLocalDifference(relativePath: entry.relativePath, in: copy)
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    kind = .unknown
+                }
+                guard !Task.isCancelled else { return }
+                batch[entry.id] = kind
+                // Bound SVN concurrency and UI updates independently. Large
+                // working copies stay navigable and display partial results.
+                if batch.count >= 16 || lastPublication.duration(to: clock.now) >= .milliseconds(150) {
+                    await self?.publishDifferenceKinds(batch, generation: generation, copy: copy)
+                    batch = [:]
+                    lastPublication = clock.now
+                }
+            }
+            await self?.publishDifferenceKinds(batch, generation: generation, copy: copy)
+            await self?.finishDifferenceClassification(generation: generation)
+        }
+    }
+
+    private func publishDifferenceKinds(_ kinds: [SvnDockStatusEntry.ID: SVNLocalDifferenceKind],
+                                        generation: UUID, copy: SvnDockWorkingCopy) {
+        guard canContinueDifferenceClassification(generation: generation, copy: copy), !kinds.isEmpty else { return }
+        differenceKindsByID.merge(kinds) { _, new in new }
+        updateDifferenceVisibility()
+    }
+
+    private func finishDifferenceClassification(generation: UUID) {
+        guard differenceClassificationGeneration == generation else { return }
+        differenceClassificationTask = nil
+        isCheckingDifferences = false
+        // A short read operation can finish between the task observing its
+        // busy gate and this cleanup. Resume any still-unchecked candidates.
+        startDifferenceClassificationIfNeeded()
+    }
+
     private func rebuildStatusPresentation(resetLimit: Bool, debounce: Bool) {
         statusPresentationTask?.cancel()
         statusPresentationTask = nil
@@ -2863,11 +3020,12 @@ final class SvnDockStore: ObservableObject {
 
         let normalizedQuery = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         let filter = statusFilter
+        let hiddenIDs: Set<SvnDockStatusEntry.ID> = filter == .ignored ? [] : hiddenDifferenceEntryIDs
         let sourceEntries = filter == .ignored ? ignoredEntries
             : (showsMissingDetails || !normalizedQuery.isEmpty
                 ? statusSnapshot.entries : statusSnapshot.groupedEntries)
 
-        if filter == .all, normalizedQuery.isEmpty {
+        if filter == .all, normalizedQuery.isEmpty, hiddenIDs.isEmpty {
             applyFilteredStatusEntries(sourceEntries, generation: generation)
             return
         }
@@ -2886,6 +3044,7 @@ final class SvnDockStore: ObservableObject {
                         try Task.checkCancellation()
                     }
                     guard filter.includes(entry) else { continue }
+                    guard !hiddenIDs.contains(entry.id) else { continue }
                     if normalizedQuery.isEmpty
                         || entry.relativePath.localizedStandardContains(normalizedQuery)
                         || entry.status.displayName.localizedStandardContains(normalizedQuery) {

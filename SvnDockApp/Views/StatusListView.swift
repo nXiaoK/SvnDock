@@ -19,6 +19,7 @@ struct StatusListView: View {
         VStack(spacing: 0) {
             workspaceHeader(counts: statusCounts)
             filterBar(counts: statusCounts)
+            differenceFilterBar
             treeToolbar
             if let warning = store.finderBadgeWarning {
                 Label(warning, systemImage: "exclamationmark.triangle")
@@ -197,6 +198,15 @@ struct StatusListView: View {
                     title: "工作副本是干净的",
                     message: "没有检测到待提交、本地新增或冲突文件。"
                 )
+            } else if allMatchingDifferencesAreHidden {
+                SvnDockEmptyState(
+                    symbol: "line.3.horizontal.decrease.circle",
+                    title: "变更已被差异筛选隐藏",
+                    message: "工作区隐藏了 \(store.hiddenDifferenceCount) 项仅\(store.differenceFilter == .hideLineEndings ? "换行符" : "空白")变化，文件内容和 SVN 状态保持原样。",
+                    actionTitle: "显示全部差异"
+                ) {
+                    store.differenceFilter = .all
+                }
             } else if store.displayedEntries.isEmpty && !store.isBusy {
                 SvnDockEmptyState(
                     symbol: "line.3.horizontal.decrease.circle",
@@ -257,6 +267,7 @@ struct StatusListView: View {
         .background(SvnDockTheme.surface)
         .onChange(of: store.selectedWorkingCopyID) { collapsedPaths = [] }
         .onChange(of: store.statusFilter) { collapsedPaths = [] }
+        .onChange(of: store.differenceFilter) { collapsedPaths = [] }
         .onChange(of: store.searchQuery) { collapsedPaths = [] }
         .onChange(of: store.selectedEntryIDs) {
             // Finder and keyboard selection should reveal a hidden descendant.
@@ -375,6 +386,69 @@ struct StatusListView: View {
             }
         }
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var differenceFilterIsActive: Bool {
+        store.selectedWorkingCopy != nil && store.statusFilter != .ignored && store.differenceFilter != .all
+    }
+
+    private var allMatchingDifferencesAreHidden: Bool {
+        differenceFilterIsActive && store.filteredEntryCount == 0 && store.hiddenDifferenceCount > 0
+            && store.searchQuery.isEmpty && (store.statusFilter == .all || store.statusFilter == .changed)
+            && !store.isBusy && !store.isCheckingDifferences && !store.isFilteringStatusEntries
+    }
+
+    private var differenceFilterBar: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Menu {
+                    Picker("差异筛选", selection: $store.differenceFilter) {
+                        ForEach(SvnDockDifferenceFilter.allCases) { filter in
+                            Text(filter.displayName).tag(filter)
+                        }
+                    }
+                } label: {
+                    Label(store.differenceFilter.displayName, systemImage: "line.3.horizontal.decrease.circle")
+                        .lineLimit(1)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(store.selectedWorkingCopy == nil || store.statusFilter == .ignored || store.isInteractionBlocked)
+                .help(store.differenceFilter.help)
+                .accessibilityLabel("差异筛选：\(store.differenceFilter.displayName)")
+                Spacer(minLength: 0)
+                if differenceFilterIsActive && store.hiddenDifferenceCount > 0 {
+                    Text("已隐藏 \(store.hiddenDifferenceCount) 项")
+                        .foregroundStyle(SvnDockTheme.secondaryText)
+                        .monospacedDigit()
+                        .help("当前工作区因差异筛选隐藏的总数；状态和搜索条件不会改变此计数。")
+                }
+            }
+            if differenceFilterIsActive {
+                if store.isCheckingDifferences {
+                    HStack(spacing: 6) {
+                        ProgressView().controlSize(.mini)
+                        Text("正在检查差异，未确认的项目保留显示…")
+                    }
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+                } else if store.uncheckedDifferenceCount > 0 {
+                    HStack(spacing: 6) {
+                        Image(systemName: "info.circle")
+                        Text("\(store.uncheckedDifferenceCount) 项未能确认，保留显示")
+                        Spacer(minLength: 0)
+                        Button("重试") { store.retryDifferenceClassification() }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(SvnDockTheme.accent)
+                            .disabled(store.isInteractionBlocked)
+                    }
+                    .foregroundStyle(SvnDockTheme.secondaryText)
+                    .help("无法可靠判断差异的文件会继续显示。可重试检查或显示全部差异。")
+                }
+            }
+        }
+        .font(.system(size: 11))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 10)
     }
 
     @ViewBuilder
