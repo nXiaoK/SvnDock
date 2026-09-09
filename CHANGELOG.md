@@ -7,6 +7,10 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Preview the final SVN commit command from the commit sheet using its checked
+  paths and current message. Show the working directory, stdin and complete
+  targets-file contents, with copy support and no SVN execution.
+
 - Check out a repository URL into a new or empty local directory, with live
   progress, cancellation, retry and automatic working-copy registration.
   Downloads are verified before publication; existing files and paths created

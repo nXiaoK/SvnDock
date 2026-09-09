@@ -42,6 +42,7 @@ protocol SvnDockServicing: Sendable {
         workingCopies: [SvnDockWorkingCopy],
         progress: @escaping @Sendable (SVNProgressSnapshot) -> Void
     ) async throws
+    func commitCommandPreview(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws -> SvnDockCommitCommandPreview
     func commit(
         workingCopy: SvnDockWorkingCopy,
         relativePaths: [String],
@@ -87,6 +88,10 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func commitCommandPreview(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws -> SvnDockCommitCommandPreview {
+        throw SvnDockServiceError.unavailable("当前服务不支持预览提交指令。")
+    }
+
     func checkout(_ request: SvnDockCheckoutRequest, progress: @escaping @Sendable (SVNProgressSnapshot) -> Void) async throws -> SvnDockWorkingCopy {
         throw SvnDockServiceError.unavailable("当前服务不支持检出 SVN 仓库。")
     }

@@ -690,6 +690,23 @@ actor CoreSvnDockService: SvnDockServicing {
         }
     }
 
+    func commitCommandPreview(workingCopy: SvnDockWorkingCopy, relativePaths: [String], message: String) async throws -> SvnDockCommitCommandPreview {
+        try Task.checkCancellation()
+        let copy = try reviewedCommitWorkingCopy(workingCopy)
+        let commit = try SVNSelectedCommit(executableURL: executableLocator.locate())
+        let invocation = try commit.previewInvocation(targets: relativePaths, message: message, in: copy)
+        return SvnDockCommitCommandPreview(invocation: invocation)
+    }
+
+    private func reviewedCommitWorkingCopy(_ workingCopy: SvnDockWorkingCopy) throws -> SvnDockCore.WorkingCopy {
+        guard workingCopy.repositoryURL != nil, workingCopy.repositoryUUID != nil else {
+            throw SVNSelectedCommitError.repositoryIdentityChanged
+        }
+        return SvnDockCore.WorkingCopy(id: workingCopy.id, name: workingCopy.name,
+            localPath: workingCopy.rootURL, repositoryURL: workingCopy.repositoryURL,
+            repositoryUUID: workingCopy.repositoryUUID, revision: workingCopy.revision)
+    }
+
     func commit(
         workingCopy: SvnDockWorkingCopy,
         relativePaths: [String],
@@ -706,12 +723,7 @@ actor CoreSvnDockService: SvnDockServicing {
     ) async throws {
         try Task.checkCancellation()
         progress(SVNProgressSnapshot())
-        guard workingCopy.repositoryURL != nil, workingCopy.repositoryUUID != nil else {
-            throw SVNSelectedCommitError.repositoryIdentityChanged
-        }
-        let coreCopy = SvnDockCore.WorkingCopy(id: workingCopy.id, name: workingCopy.name,
-            localPath: workingCopy.rootURL, repositoryURL: workingCopy.repositoryURL,
-            repositoryUUID: workingCopy.repositoryUUID, revision: workingCopy.revision)
+        let coreCopy = try reviewedCommitWorkingCopy(workingCopy)
         let runner = SVNProgressReportingRunner(base: processRunner, progress: progress)
         let commit = try SVNSelectedCommit(executableURL: executableLocator.locate(), runner: runner)
         let targets = try commit.targets(for: relativePaths, in: coreCopy)

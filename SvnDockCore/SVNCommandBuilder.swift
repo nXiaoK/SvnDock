@@ -70,6 +70,21 @@ public struct SVNCommandBuilder: Sendable {
         for operation: SVNOperationKind,
         in workingCopy: WorkingCopy
     ) throws -> ProcessInvocation {
+        try makeInvocation(for: operation, in: workingCopy, allowEmptyCommitMessage: false)
+    }
+
+    /// Build the same invocation without running SVN or materializing input
+    /// files. An empty message is allowed only for inspecting an unfinished draft.
+    public func makeCommitPreview(paths: [String], message: String, in workingCopy: WorkingCopy) throws -> ProcessInvocation {
+        try makeInvocation(for: .commit(paths: paths, message: message, keepLocks: false, depth: .empty),
+                           in: workingCopy, allowEmptyCommitMessage: true)
+    }
+
+    private func makeInvocation(
+        for operation: SVNOperationKind,
+        in workingCopy: WorkingCopy,
+        allowEmptyCommitMessage: Bool
+    ) throws -> ProcessInvocation {
         let root = workingCopy.localPath.standardizedFileURL
         guard root.isFileURL, root.path.hasPrefix("/") else {
             throw SVNCommandBuilderError.workingCopyIsNotAbsoluteFileURL
@@ -154,7 +169,7 @@ public struct SVNCommandBuilder: Sendable {
 
         case let .commit(paths, message, keepLocks, depth):
             let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalizedMessage.isEmpty else {
+            guard allowEmptyCommitMessage || !normalizedMessage.isEmpty else {
                 throw SVNCommandBuilderError.emptyCommitMessage
             }
             try validate(argument: normalizedMessage)

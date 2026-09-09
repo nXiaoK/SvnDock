@@ -42,6 +42,10 @@ public struct SVNSelectedCommit: Sendable {
         Array(Set(try builder.normalizedLocalPaths(paths, in: workingCopy, command: "commit"))).sorted()
     }
 
+    public func previewInvocation(targets: [String], message: String, in workingCopy: WorkingCopy) throws -> ProcessInvocation {
+        try builder.makeCommitPreview(paths: self.targets(for: targets, in: workingCopy), message: message, in: workingCopy)
+    }
+
     public func run(targets: [String], message: String, in workingCopy: WorkingCopy) async throws {
         let targets = try self.targets(for: targets, in: workingCopy)
         // Construct before reading so malformed messages and paths fail early.

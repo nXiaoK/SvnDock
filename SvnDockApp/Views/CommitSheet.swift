@@ -20,6 +20,8 @@ struct CommitSheet: View {
     @State private var draftError: String?
     @State private var isConfirmingDraftClear = false
     @State private var showsScopeDetails = false
+    @State private var commandPreviewRequest: SvnDockCommitCommandRequest?
+    @State private var commandPreviewError: String?
 
     init(store: SvnDockStore) {
         self.store = store
@@ -136,6 +138,14 @@ struct CommitSheet: View {
                 self.previewEntryID = entries.first?.id
             }
         }
+        .sheet(item: $commandPreviewRequest) { request in
+            CommitCommandPreviewSheet(store: store, request: request)
+        }
+        .alert("无法预览提交指令", isPresented: Binding(
+            get: { commandPreviewError != nil }, set: { if !$0 { commandPreviewError = nil } }
+        )) {
+            Button("好", role: .cancel) { commandPreviewError = nil }
+        } message: { Text(commandPreviewError ?? "") }
         .alert("清空提交草稿？", isPresented: $isConfirmingDraftClear) {
             Button("清空草稿", role: .destructive) { clearDraft() }
             Button("保留草稿", role: .cancel) {}
@@ -678,6 +688,13 @@ struct CommitSheet: View {
                 .font(.system(size: 12))
                 .foregroundStyle(SvnDockTheme.secondaryText)
             Spacer()
+            Button("预览提交指令") {
+                do { commandPreviewRequest = try store.captureCommitCommandPreview(message: message, entryIDs: includedEntryIDs) }
+                catch { commandPreviewError = error.localizedDescription }
+            }
+            .buttonStyle(SvnDockButtonStyle())
+            .disabled(store.isBusy || selectionSummary.count == 0 || !isCurrentDraftWorkingCopy)
+            .accessibilityIdentifier("commit.previewCommand")
             Button("关闭并保留草稿") {
                 closeKeepingDraft()
             }

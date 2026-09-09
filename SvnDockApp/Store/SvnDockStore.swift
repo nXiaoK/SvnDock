@@ -908,28 +908,14 @@ final class SvnDockStore: ObservableObject {
     /// which two Tasks could otherwise race the same awaiting-user claim.
     func commit(message: String, entryIDs: Set<SvnDockStatusEntry.ID>) {
         guard activeOperation == nil else { return }
-        guard let workingCopy = commitWorkingCopy ?? selectedWorkingCopy,
-              workingCopy.id == selectedWorkingCopyID else {
-            present(SvnDockServiceError.noWorkingCopySelected, title: "无法提交")
-            return
-        }
-
-        let normalizedMessage = message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !normalizedMessage.isEmpty else {
-            present(SvnDockServiceError.emptyCommitMessage, title: "无法提交")
-            return
-        }
-
-        let selectedEntries = entries.filter { entryIDs.contains($0.id) && $0.status.canCommit }
-        guard !selectedEntries.isEmpty else {
-            present(SvnDockServiceError.noCommittableFiles, title: "无法提交")
-            return
-        }
-
+        let selection: SvnDockCommitCommandRequest
+        do { selection = try commitSelection(message: message, entryIDs: entryIDs, allowEmptyMessage: false) }
+        catch { present(error, title: "无法提交"); return }
+        let workingCopy = selection.workingCopy
         let request = PendingCommitExecution(
             workingCopy: workingCopy,
-            relativePaths: selectedEntries.map(\.relativePath),
-            message: normalizedMessage,
+            relativePaths: selection.relativePaths,
+            message: selection.message,
             finderClaim: pendingCommitClaim
         )
         pendingCommitClaim = nil
@@ -940,11 +926,38 @@ final class SvnDockStore: ObservableObject {
             detail: workingCopy.name
         )
         let progressID = beginTransferProgress(kind: .committing, workingCopy: workingCopy,
-                                              selectedItemCount: selectedEntries.count)
+                                              selectedItemCount: selection.relativePaths.count)
 
         Task { [weak self] in
             await self?.executeCommit(request, progressID: progressID)
         }
+    }
+
+    func captureCommitCommandPreview(message: String, entryIDs: Set<SvnDockStatusEntry.ID>) throws -> SvnDockCommitCommandRequest {
+        guard isPresentingCommit, !isBusy else { throw CancellationError() }
+        return try commitSelection(message: message, entryIDs: entryIDs, allowEmptyMessage: true)
+    }
+
+    func loadCommitCommandPreview(_ request: SvnDockCommitCommandRequest) async throws -> SvnDockCommitCommandPreview {
+        try Task.checkCancellation()
+        let preview = try await service.commitCommandPreview(workingCopy: request.workingCopy,
+            relativePaths: request.relativePaths, message: request.message)
+        try Task.checkCancellation()
+        return preview
+    }
+
+    /// The preview and actual commit capture exactly the same eligible subset,
+    /// independent of the diff row being inspected or the current path filter.
+    private func commitSelection(message: String, entryIDs: Set<SvnDockStatusEntry.ID>,
+                                 allowEmptyMessage: Bool) throws -> SvnDockCommitCommandRequest {
+        guard let copy = commitWorkingCopy ?? selectedWorkingCopy, copy.id == selectedWorkingCopyID else {
+            throw SvnDockServiceError.noWorkingCopySelected
+        }
+        let normalized = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard allowEmptyMessage || !normalized.isEmpty else { throw SvnDockServiceError.emptyCommitMessage }
+        let selected = entries.filter { entryIDs.contains($0.id) && $0.status.canCommit }
+        guard !selected.isEmpty else { throw SvnDockServiceError.noCommittableFiles }
+        return .init(workingCopy: copy, relativePaths: selected.map(\.relativePath), message: normalized)
     }
 
     private func executeCommit(_ request: PendingCommitExecution, progressID: UUID) async {
