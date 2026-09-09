@@ -10,6 +10,7 @@ struct SvnDockRootView: View {
     @State private var isRemoteStatusPresented = false
 
     var body: some View {
+        let importRequest = store.fileImportRequest
         VStack(spacing: 0) {
             commandBar
             Divider().overlay(SvnDockTheme.border)
@@ -73,33 +74,26 @@ struct SvnDockRootView: View {
                 resumeFinderQueueAfterPresentation()
             }
         }
-        .onChange(of: store.isPresentingDirectoryImporter) {
-            if !store.isPresentingDirectoryImporter {
-                resumeFinderQueueAfterPresentation()
-            }
-        }
         .onChange(of: store.presentedError) {
             if store.presentedError == nil {
                 resumeFinderQueueAfterPresentation()
             }
         }
+        // One importer owns both purposes. Stacking fileImporter modifiers
+        // here causes macOS to suppress the earlier directory picker.
         .fileImporter(
-            isPresented: $store.isPresentingDirectoryImporter,
-            allowedContentTypes: [.folder],
-            allowsMultipleSelection: true
-        ) { result in
-            switch result {
-            case .success(let urls):
-                Task { await store.registerWorkingCopies(at: urls) }
-            case .failure(let error):
-                if (error as NSError).code != NSUserCancelledError {
-                    store.presentedError = SvnDockUserFacingError(
-                        title: "无法选择目录",
-                        message: error.localizedDescription
-                    )
-                }
+            isPresented: $store.isPresentingFileImporter,
+            allowedContentTypes: importRequest?.selectsDirectories == false ? [.item] : [.folder],
+            allowsMultipleSelection: importRequest?.selectsDirectories != false,
+            onCompletion: { result in
+                guard let requestID = importRequest?.id else { return }
+                Task { await store.completeFileImport(result, requestID: requestID) }
+            },
+            onCancellation: {
+                guard let requestID = importRequest?.id else { return }
+                Task { await store.completeFileImport(.success([]), requestID: requestID) }
             }
-        }
+        )
         .sheet(isPresented: $store.isPresentingCommit) {
             CommitSheet(store: store)
         }

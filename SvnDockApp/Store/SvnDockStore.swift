@@ -130,12 +130,11 @@ final class SvnDockStore: ObservableObject {
             else { startDifferenceClassificationIfNeeded() }
         }
     }
-    @Published var isPresentingDirectoryImporter = false
+    @Published var isPresentingFileImporter = false
+    @Published private(set) var fileImportRequest: SvnDockFileImportRequest?
+    private var isCompletingFileImport = false
     @Published var isPresentingUnscheduleAddConfirmation = false
     @Published var isPresentingMissingDeletionConfirmation = false
-    @Published var isPresentingFileRestoreImporter = false
-    @Published private var fileRestoreImportCopy: SvnDockWorkingCopy?
-    private var isResolvingFileRestoreImport = false
     @Published var isPresentingFileRestore = false
     @Published private(set) var pendingFileRestore: SvnDockFileRestoreRequest?
     @Published var isPresentingRevertConfirmation = false
@@ -407,11 +406,10 @@ final class SvnDockStore: ObservableObject {
 
     private var hasBlockingPresentation: Bool {
         isPresentingCommit
-            || isPresentingDirectoryImporter
+            || fileImportRequest != nil
             || isPresentingUnscheduleAddConfirmation
             || isPresentingMissingDeletionConfirmation
             || isPresentingFileRestore
-            || fileRestoreImportCopy != nil
             || isPresentingRevertConfirmation
             || isPresentingRemovalConfirmation
             || isPresentingResolveConfirmation
@@ -460,7 +458,8 @@ final class SvnDockStore: ObservableObject {
 
     func requestDirectoryImport() {
         guard !isBusy, !hasBlockingPresentation else { return }
-        isPresentingDirectoryImporter = true
+        fileImportRequest = .init(purpose: .workingCopies)
+        isPresentingFileImporter = true
     }
 
     func retryFinderQueueRecovery() async {
@@ -669,11 +668,11 @@ final class SvnDockStore: ObservableObject {
         }
     }
 
-    func registerWorkingCopies(at urls: [URL]) async {
+    private func registerImportedWorkingCopies(at urls: [URL]) async {
         guard !urls.isEmpty else { return }
-        guard await waitForFinderRoutingToFinish() else { return }
-
-        await perform(kind: .loading, detail: "登记工作副本") { [self] in
+        // The captured importer request owns the interaction gate until the
+        // registration and refresh finish, so no Finder request can interleave.
+        await perform(kind: .loading, detail: "登记工作副本", allowDuringFinderRouting: true) { [self] in
             var newlyRegistered: [SvnDockWorkingCopy] = []
             var registrationErrors: [String] = []
 
@@ -717,7 +716,7 @@ final class SvnDockStore: ObservableObject {
             }
         }
 
-        await reloadSelectedWorkingCopy()
+        await reloadSelectedWorkingCopy(allowDuringFinderRouting: true)
     }
 
     func requestRemoval(of workingCopy: SvnDockWorkingCopy? = nil) {
@@ -3691,39 +3690,51 @@ private enum FinderCommandRouteError: Error, Sendable {
 extension SvnDockStore {
     func requestFileRestoreImporter(for copy: SvnDockWorkingCopy) {
         guard !isInteractionBlocked, workingCopies.contains(where: { $0.id == copy.id }) else { return }
-        fileRestoreImportCopy = copy
-        isPresentingFileRestoreImporter = true
+        fileImportRequest = .init(purpose: .historicalFile(copy))
+        isPresentingFileImporter = true
     }
 
-    func completeFileRestoreImport(_ result: Result<[URL], Error>) async {
-        guard let copy = fileRestoreImportCopy, !isResolvingFileRestoreImport else { return }
-        isResolvingFileRestoreImport = true
+    /// SwiftUI dismisses its binding before delivering the result. Retain the
+    /// purpose and interaction gate independently, and reject duplicate/stale
+    /// callbacks from a previous presentation by their captured request ID.
+    func completeFileImport(_ result: Result<[URL], Error>, requestID: UUID) async {
+        guard let request = fileImportRequest, request.id == requestID, !isCompletingFileImport else { return }
+        isCompletingFileImport = true
+        isPresentingFileImporter = false
         do {
             let urls = try result.get()
-            if let url = urls.first {
-                guard urls.count == 1, url.isFileURL,
-                      let relative = Self.relativePath(for: url, under: copy.rootURL), relative != "." else {
-                    throw SvnDockServiceError.unavailable("请选择该工作副本内的一个已纳管文件。")
-                }
-                let scoped = url.startAccessingSecurityScopedResource()
-                defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-                let workingCopy = try await selectWorkingCopy(forRootPath: copy.rootURL.path)
-                let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
-                searchQuery = ""
-                statusFilter = .all
-                finderSelectedTarget = target
-                selectedEntryIDs = [target.entry.id]
-                requestFileRestore(for: target.entry, allowDuringFinderRouting: true)
+            try Task.checkCancellation()
+            switch request.purpose {
+            case .workingCopies:
+                await registerImportedWorkingCopies(at: urls)
+            case .historicalFile(let copy):
+                try await selectImportedRestoreFile(urls, in: copy)
             }
         } catch {
             if (error as NSError).code != NSUserCancelledError, !(error is CancellationError) {
-                present(error, title: "无法选择历史还原文件")
+                present(error, title: request.selectsDirectories ? "无法选择目录" : "无法选择历史还原文件")
             }
         }
-        isPresentingFileRestoreImporter = false
-        fileRestoreImportCopy = nil
-        isResolvingFileRestoreImport = false
+        fileImportRequest = nil
+        isCompletingFileImport = false
         await processPendingFinderCommands()
+    }
+
+    private func selectImportedRestoreFile(_ urls: [URL], in copy: SvnDockWorkingCopy) async throws {
+        guard let url = urls.first else { return }
+        guard urls.count == 1, url.isFileURL,
+              let relative = Self.relativePath(for: url, under: copy.rootURL), relative != "." else {
+            throw SvnDockServiceError.unavailable("请选择该工作副本内的一个已纳管文件。")
+        }
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let workingCopy = try await selectWorkingCopy(forRootPath: copy.rootURL.path)
+        let target = try await service.finderTarget(relativePath: relative, in: workingCopy)
+        searchQuery = ""
+        statusFilter = .all
+        finderSelectedTarget = target
+        selectedEntryIDs = [target.entry.id]
+        requestFileRestore(for: target.entry, allowDuringFinderRouting: true)
     }
 
     func requestFileRestore(for entry: SvnDockStatusEntry, allowDuringFinderRouting: Bool = false,

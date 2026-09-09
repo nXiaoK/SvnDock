@@ -56,6 +56,10 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Fixed
 
+- Use one system file picker for working-copy registration and historical file
+  selection, so adding a working copy opens its directory dialog again.
+  Cancellation, errors and stale callbacks cannot leave the main window locked.
+
 - Resolve checks the selected nodes again under the working-copy lock before
   reporting completion. Shallow execution leaves unselected child conflicts
   intact and rejects external or nested working copies and escaping symlinks.

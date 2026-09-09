@@ -123,12 +123,12 @@ enum FileRestoreRegressionChecks {
         try check(await store.load(), "restore store loads")
         store.requestFileRestoreImporter(for: copy)
         try check(store.isInteractionBlocked, "file picker captures and gates its working copy")
-        await store.completeFileRestoreImport(.success([copy.rootURL.appendingPathComponent("renamed.txt")]))
+        await store.completeFileImport(.success([copy.rootURL.appendingPathComponent("renamed.txt")]), requestID: store.fileImportRequest!.id)
         try check(store.pendingFileRestore?.entry.relativePath == "renamed.txt" && store.isPresentingFileRestore,
                   "in-app file selection opens history restore for a clean file absent from the status list")
         store.cancelFileRestore()
         store.requestFileRestoreImporter(for: copy)
-        await store.completeFileRestoreImport(.success([]))
+        await store.completeFileImport(.success([]), requestID: store.fileImportRequest!.id)
         try check(!store.isInteractionBlocked, "cancelling file selection releases the interaction gate")
         let command = FinderCommand(kind: .restoreBeforeRevision,
             paths: [copy.rootURL.appendingPathComponent("renamed.txt").path], workingCopyRoot: copy.rootURL.path)

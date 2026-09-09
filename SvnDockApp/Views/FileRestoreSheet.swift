@@ -1,17 +1,10 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct FileRestorePresentationModifier: ViewModifier {
     @ObservedObject var store: SvnDockStore
 
     func body(content: Content) -> some View {
         content
-            .fileImporter(isPresented: $store.isPresentingFileRestoreImporter,
-                          allowedContentTypes: [.item], allowsMultipleSelection: false, onCompletion: { result in
-                Task { await store.completeFileRestoreImport(result) }
-            }, onCancellation: {
-                Task { await store.completeFileRestoreImport(.success([])) }
-            })
             .sheet(isPresented: $store.isPresentingFileRestore) {
                 if let request = store.pendingFileRestore {
                     FileRestoreSheet(store: store, request: request).id(request.id)
