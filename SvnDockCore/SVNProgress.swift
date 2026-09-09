@@ -85,7 +85,7 @@ public struct SVNProgressParser: Sendable {
             return
         }
         if text.hasPrefix("Committing transaction") || text.hasPrefix("Committed revision ")
-            || text.hasPrefix("Updated to revision ") || text.hasPrefix("At revision ") {
+            || text.hasPrefix("Checked out revision ") || text.hasPrefix("Updated to revision ") || text.hasPrefix("At revision ") {
             // Even 'Committed revision' is only an informational notification:
             // command exit and post-mutation verification decide completion.
             setPhase(.awaitingServer)

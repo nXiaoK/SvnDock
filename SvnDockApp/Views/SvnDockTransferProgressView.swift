@@ -56,7 +56,7 @@ struct SvnDockTransferProgressView: View {
             }
             .font(.system(size: 11))
             .foregroundStyle(SvnDockTheme.secondaryText)
-            .help("项数来自 SVN 实时报告的路径通知，并不表示上传完成。目录可能只报告一项，因此它不代表整个传输的完成百分比。")
+            .help("项数来自 SVN 实时报告的路径通知，并不表示传输完成。目录可能只报告一项，因此它不代表整个传输的完成百分比。")
 
             Text(progress.currentPath.map { bounded($0, limit: 360) }
                  ?? (progress.processedItems > 0 ? "暂无新的路径通知" : "等待 SVN 路径通知…"))

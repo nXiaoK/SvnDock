@@ -7,6 +7,7 @@ import SvnDockCore
 /// in-memory implementation for previews and UI tests.
 protocol SvnDockServicing: Sendable {
     func loadRegisteredWorkingCopies() async throws -> [SvnDockWorkingCopy]
+    func checkout(_ request: SvnDockCheckoutRequest, progress: @escaping @Sendable (SVNProgressSnapshot) -> Void) async throws -> SvnDockWorkingCopy
     func registerWorkingCopy(at url: URL) async throws -> SvnDockWorkingCopy
     func unregisterWorkingCopy(id: UUID) async throws
 
@@ -86,6 +87,10 @@ protocol SvnDockServicing: Sendable {
 }
 
 extension SvnDockServicing {
+    func checkout(_ request: SvnDockCheckoutRequest, progress: @escaping @Sendable (SVNProgressSnapshot) -> Void) async throws -> SvnDockWorkingCopy {
+        throw SvnDockServiceError.unavailable("当前服务不支持检出 SVN 仓库。")
+    }
+
     func prepareFileRestore(relativePath: String, beforeRevision: Int, in workingCopy: SvnDockWorkingCopy) async throws -> SvnDockFileRestorePlan {
         throw SvnDockServiceError.unavailable("当前服务不支持还原历史版本。")
     }

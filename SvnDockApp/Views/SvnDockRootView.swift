@@ -94,6 +94,12 @@ struct SvnDockRootView: View {
                 Task { await store.completeFileImport(.success([]), requestID: requestID) }
             }
         )
+        .sheet(isPresented: $store.isPresentingCheckout) {
+            CheckoutSheet(store: store).id(store.checkoutPresentationID)
+        }
+        .onChange(of: store.isPresentingCheckout) {
+            if !store.isPresentingCheckout { store.dismissCheckout() }
+        }
         .sheet(isPresented: $store.isPresentingCommit) {
             CommitSheet(store: store)
         }
@@ -194,6 +200,8 @@ struct SvnDockRootView: View {
                     Task { await store.showHistoryForSelection() }
                 }
                 Menu {
+                    Button("从 SVN 仓库检出…") { store.requestCheckout() }
+                        .disabled(store.isInteractionBlocked)
                     Button("还原文件至指定版本前…") {
                         if let copy = store.selectedWorkingCopy { store.requestFileRestoreImporter(for: copy) }
                     }

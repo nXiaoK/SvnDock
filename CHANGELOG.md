@@ -7,6 +7,11 @@ Notable user-facing changes to SvnDock are recorded here. This project follows
 
 ### Added
 
+- Check out a repository URL into a new or empty local directory, with live
+  progress, cancellation, retry and automatic working-copy registration.
+  Downloads are verified before publication; existing files and paths created
+  during checkout are never overwritten.
+
 - Restore one versioned file to the state before a specified revision from
   SvnDock or Finder. Preview the rN-1 target, restore content and properties as
   local changes, and reject stale previews or uncommitted edits. Supports

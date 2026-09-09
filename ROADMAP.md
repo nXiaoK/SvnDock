@@ -22,7 +22,7 @@ direction, not a release commitment.
 
 ## Working-copy workflows
 
-- Add checkout and import.
+- Add repository import.
 - Add revision-to-revision diff and richer log details.
 - Improve conflict inspection and recovery guidance.
 - Add optional English UI localization and accessibility review.

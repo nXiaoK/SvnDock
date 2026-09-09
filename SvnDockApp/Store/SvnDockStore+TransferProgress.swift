@@ -6,7 +6,7 @@ extension SvnDockStore {
                                selectedItemCount: Int? = nil, totalWorkingCopies: Int = 1) -> UUID {
         let id = UUID()
         transferProgress.snapshot = SvnDockTransferProgress(operationID: id, kind: kind,
-            phase: kind == .committing ? "正在检查提交内容…" : "正在准备更新…",
+            phase: kind == .committing ? "正在检查提交内容…" : kind == .checkingOut ? "正在准备检出…" : "正在准备更新…",
             selectedItemCount: selectedItemCount, workingCopyName: workingCopy.name,
             totalWorkingCopies: totalWorkingCopies, startedAt: .now)
         return id
@@ -73,13 +73,13 @@ extension SvnDockStore {
         value.currentPath = report.currentPath
         switch report.phase {
         case .preparing:
-            value.phase = value.kind == .committing ? "正在检查提交内容…" : "正在准备更新…"
+            value.phase = value.kind == .committing ? "正在检查提交内容…" : value.kind == .checkingOut ? "正在准备检出…" : "正在准备更新…"
         case .processing:
-            value.phase = value.kind == .committing ? "正在提交文件…" : "正在应用更新…"
+            value.phase = value.kind == .committing ? "正在提交文件…" : value.kind == .checkingOut ? "正在检出文件…" : "正在应用更新…"
         case .transferring:
             value.phase = value.kind == .committing ? "正在传输文件内容…" : "正在接收文件内容…"
         case .awaitingServer:
-            value.phase = value.kind == .committing ? "等待仓库确认…" : "正在完成更新…"
+            value.phase = value.kind == .committing ? "等待仓库确认…" : value.kind == .checkingOut ? "正在校验检出结果…" : "正在完成更新…"
         }
         if value != transferProgress.snapshot { transferProgress.snapshot = value }
     }

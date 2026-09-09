@@ -130,6 +130,11 @@ final class SvnDockStore: ObservableObject {
             else { startDifferenceClassificationIfNeeded() }
         }
     }
+    @Published var isPresentingCheckout = false
+    @Published private(set) var checkoutPresentationID = UUID()
+    @Published private(set) var checkoutError: String?
+    @Published private(set) var isCancellingCheckout = false
+    private var checkoutTask: Task<Void, Never>?
     @Published var isPresentingFileImporter = false
     @Published private(set) var fileImportRequest: SvnDockFileImportRequest?
     private var isCompletingFileImport = false
@@ -356,7 +361,7 @@ final class SvnDockStore: ObservableObject {
         switch kind {
         case .refreshing, .checkingRemote:
             return false
-        case .loading, .updating, .committing, .adding, .unschedulingAdd, .deleting,
+        case .loading, .checkingOut, .updating, .committing, .adding, .unschedulingAdd, .deleting,
              .reverting, .cleaning, .resolving, .ignoring, .unignoring:
             return true
         }
@@ -406,6 +411,7 @@ final class SvnDockStore: ObservableObject {
 
     private var hasBlockingPresentation: Bool {
         isPresentingCommit
+            || isPresentingCheckout
             || fileImportRequest != nil
             || isPresentingUnscheduleAddConfirmation
             || isPresentingMissingDeletionConfirmation
@@ -3134,6 +3140,7 @@ final class SvnDockStore: ObservableObject {
         case .loading: "载入失败"
         case .refreshing: "刷新失败"
         case .checkingRemote: "检查服务器失败"
+        case .checkingOut: "检出失败"
         case .updating: "更新失败"
         case .committing: "提交失败"
         case .adding: "添加失败"
@@ -3811,6 +3818,84 @@ extension SvnDockStore {
             inspectorTab = .diff
             await loadDiffForSelection(allowDuringFinderRouting: true)
         }
+        await processPendingFinderCommands()
+    }
+}
+
+
+extension SvnDockStore {
+    var isCheckingOut: Bool { activeOperation?.kind == .checkingOut }
+
+    func requestCheckout() {
+        guard !isInteractionBlocked else { return }
+        checkoutPresentationID = UUID()
+        checkoutError = nil
+        isCancellingCheckout = false
+        isPresentingCheckout = true
+    }
+
+    func dismissCheckout() {
+        guard !isCheckingOut else { return }
+        isPresentingCheckout = false
+        checkoutError = nil
+        Task { await processPendingFinderCommands() }
+    }
+
+    func cancelCheckout() {
+        guard isCheckingOut, !isCancellingCheckout else { return }
+        isCancellingCheckout = true
+        checkoutTask?.cancel()
+    }
+
+    func beginCheckout(repositoryAddress: String, localPath: String) {
+        guard isPresentingCheckout, activeOperation == nil, checkoutTask == nil else { return }
+        let request: SvnDockCheckoutRequest
+        do { request = try .init(repositoryAddress: repositoryAddress, localPath: localPath) }
+        catch { checkoutError = error.localizedDescription; return }
+        checkoutError = nil
+        isCancellingCheckout = false
+        activeOperation = .init(kind: .checkingOut, detail: request.destinationURL.lastPathComponent)
+        checkoutTask = Task { [weak self] in await self?.executeCheckout(request) }
+    }
+
+    private func executeCheckout(_ request: SvnDockCheckoutRequest) async {
+        let started = Date()
+        let placeholder = SvnDockWorkingCopy(name: request.destinationURL.lastPathComponent, rootURL: request.destinationURL)
+        let progressID = beginTransferProgress(kind: .checkingOut, workingCopy: placeholder)
+        var registered: SvnDockWorkingCopy?
+        var failure: Error?
+        do {
+            try await withReportedTransferProgress(id: progressID) { progress in
+                registered = try await service.checkout(request, progress: progress)
+            }
+        } catch { failure = error }
+        if let copy = registered {
+            if let index = workingCopies.firstIndex(where: { $0.id == copy.id || $0.rootURL == copy.rootURL }) {
+                workingCopies[index] = copy
+            } else { workingCopies.append(copy) }
+            workingCopies.sort(by: Self.copySort)
+            suppressedSelectionReloadID = copy.id
+            selectedWorkingCopyID = copy.id
+            searchQuery = ""
+            statusFilter = .all
+            setTransferProgressPhase("正在读取检出后的本地状态…", id: progressID)
+            let verification = await refreshAfterMutation(in: copy, operationTitle: "检出")
+            recordOperation(.init(workingCopy: copy, actionTitle: "检出", startedAt: started,
+                outcome: verification == nil ? .success : .uncertain,
+                summary: "检出完成，已加入工作副本列表", detail: verification))
+            isPresentingCheckout = false
+            if let verification { presentedError = .init(title: "检出完成，状态需要刷新", message: verification) }
+        } else {
+            let cancelled = failure is CancellationError
+            checkoutError = cancelled ? "检出已取消，未自动添加工作副本。可调整信息后重试。" : failure?.localizedDescription ?? "检出未完成。"
+            recordOperation(.init(workingCopy: placeholder, actionTitle: "检出", startedAt: started,
+                outcome: cancelled ? .uncertain : .failure,
+                summary: cancelled ? "检出已取消" : "检出失败，未自动重试", detail: checkoutError))
+        }
+        endTransferProgress(id: progressID)
+        activeOperation = nil
+        checkoutTask = nil
+        isCancellingCheckout = false
         await processPendingFinderCommands()
     }
 }

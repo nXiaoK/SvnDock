@@ -216,6 +216,9 @@ private struct SvnDockCommands: Commands {
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
+            Button("从 SVN 仓库检出…") { store.requestCheckout() }
+                .keyboardShortcut("n", modifiers: [.command])
+                .disabled(store.isInteractionBlocked)
             Button("添加工作副本…") {
                 store.requestDirectoryImport()
             }

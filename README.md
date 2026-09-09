@@ -286,8 +286,8 @@ The process boundaries and command ownership model are described in
 
 ## Known limitations
 
-- Existing working copies can be registered; checkout and import flows are not
-  implemented.
+- Checkout and existing-working-copy registration are supported. Repository
+  import is not implemented. See [Checkout](Docs/Checkout.md).
 - The background Agent is built and tested as a separate executable, but is not
   embedded or registered with `SMAppService`. Finder commands are currently
   consumed by the foreground app.

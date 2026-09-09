@@ -2115,3 +2115,19 @@ extension CoreSvnDockService {
         return info
     }
 }
+
+
+extension CoreSvnDockService {
+    func checkout(_ request: SvnDockCheckoutRequest,
+                  progress: @escaping @Sendable (SVNProgressSnapshot) -> Void) async throws -> SvnDockWorkingCopy {
+        let checkout = try SVNCheckout(executableURL: executableLocator.locate(), runner: processRunner)
+        let destination = try await checkout.run(repositoryURL: request.repositoryURL,
+            destinationURL: request.destinationURL, progress: progress)
+        // Publishing is the completion boundary. Finish registration even if
+        // cancellation arrives after a complete working copy has been saved.
+        do { return try await Task.detached { try await self.registerWorkingCopy(at: destination) }.value }
+        catch {
+            throw SvnDockServiceError.unavailable("检出已保存至 \(destination.path)，但自动登记失败。请使用“添加工作副本”打开此目录。\n\(error.localizedDescription)")
+        }
+    }
+}

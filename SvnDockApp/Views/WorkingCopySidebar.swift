@@ -33,7 +33,7 @@ struct WorkingCopySidebar: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("让版本管理井井有条")
                         .font(.system(size: 14, weight: .medium))
-                    Text("添加本地 SVN 工作副本，即可在这里查看文件和变更。")
+                    Text("添加已有工作副本，或从 SVN 仓库检出项目。")
                         .font(.system(size: 12))
                         .foregroundStyle(SvnDockTheme.secondaryText)
                         .fixedSize(horizontal: false, vertical: true)
@@ -84,6 +84,11 @@ struct WorkingCopySidebar: View {
                     store.requestDirectoryImport()
                 } label: {
                     sidebarAction("添加工作副本", symbol: "plus.circle")
+                }
+                .disabled(store.isInteractionBlocked)
+
+                Button { store.requestCheckout() } label: {
+                    sidebarAction("从仓库检出…", symbol: "arrow.down.to.line")
                 }
                 .disabled(store.isInteractionBlocked)
 
