@@ -1536,12 +1536,16 @@ final class SvnDockStore: ObservableObject {
     func confirmResolve(
         using resolution: SvnDockConflictResolution,
         reviewed: Bool = false,
-        reviewID: UUID? = nil
+        reviewID: UUID? = nil,
+        selectedEntryIDs: Set<String>? = nil
     ) {
         guard reviewed, let request = pendingResolve,
               reviewID == request.review.id,
-              activeOperation == nil,
-              resolution == .working || request.allowsFileReplacement else { return }
+              activeOperation == nil else { return }
+        let selectedIDs = selectedEntryIDs ?? Set(request.review.entries.map(\.id))
+        let selectedEntries = request.review.entries.filter { selectedIDs.contains($0.id) }
+        guard !selectedEntries.isEmpty, selectedEntries.count == selectedIDs.count,
+              resolution == .working || selectedIDs.isSubset(of: request.review.replaceableEntryIDs) else { return }
         guard workingCopies.contains(where: {
             $0.id == request.workingCopy.id && $0.rootURL == request.workingCopy.rootURL
         }) else {
@@ -1550,17 +1554,24 @@ final class SvnDockStore: ObservableObject {
             return
         }
 
+        let selectedRequest = PendingResolve(
+            review: SvnDockConflictReview(
+                workingCopy: request.workingCopy, entries: selectedEntries,
+                excludedSelectionCount: request.review.excludedSelectionCount
+            ),
+            finderClaim: request.finderClaim
+        )
         pendingResolve = nil
         invalidateRemoteStatus(for: request.workingCopy.id)
         invalidateHistory(for: request.workingCopy.id)
         activeOperation = SvnDockOperationState(
             kind: .resolving,
-            detail: request.displayName
+            detail: selectedRequest.displayName
         )
         isPresentingResolveConfirmation = false
 
         Task { [weak self] in
-            await self?.executeConfirmedResolve(request, resolution: resolution)
+            await self?.executeConfirmedResolve(selectedRequest, resolution: resolution)
         }
     }
 

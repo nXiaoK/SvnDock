@@ -8,10 +8,14 @@ struct SvnDockConflictReview: Identifiable, Sendable {
     let entries: [SvnDockStatusEntry]
     let excludedSelectionCount: Int
 
-    var allowsFileReplacement: Bool {
-        !entries.isEmpty && entries.allSatisfy {
+    var replaceableEntryIDs: Set<String> {
+        Set(entries.filter {
             $0.nodeKind == .file && !$0.isSymbolicLink && $0.conflictKinds == [.text]
-        }
+        }.map(\.id))
+    }
+
+    var allowsFileReplacement: Bool {
+        !entries.isEmpty && replaceableEntryIDs.count == entries.count
     }
 
     var relativePaths: [String] { entries.map(\.relativePath) }

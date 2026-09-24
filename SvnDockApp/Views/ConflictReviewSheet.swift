@@ -13,6 +13,7 @@ struct ConflictReviewSheet: View {
     @ObservedObject var store: SvnDockStore
     let review: SvnDockConflictReview
     @State private var selectedEntryID: String?
+    @State private var selectedEntryIDs: Set<String>
     @State private var resolution = SvnDockConflictResolution.working
     @State private var hasReviewed = false
     @State private var previewText = ""
@@ -25,6 +26,7 @@ struct ConflictReviewSheet: View {
         self.store = store
         self.review = review
         _selectedEntryID = State(initialValue: review.entries.first?.id)
+        _selectedEntryIDs = State(initialValue: Set(review.entries.map(\.id)))
     }
 
     var body: some View {
@@ -58,8 +60,15 @@ struct ConflictReviewSheet: View {
             await loadPreview()
         }
         .onChange(of: resolution) { _, _ in hasReviewed = false }
+        .onChange(of: selectedEntryIDs) { _, selection in
+            hasReviewed = false
+            if resolution != .working && !selection.isSubset(of: review.replaceableEntryIDs) {
+                resolution = .working
+            }
+        }
         .onChange(of: review.id) { _, _ in
             selectedEntryID = review.entries.first?.id
+            selectedEntryIDs = Set(review.entries.map(\.id))
             resolution = .working
             hasReviewed = false
         }
@@ -89,25 +98,43 @@ struct ConflictReviewSheet: View {
 
     private var pathList: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("本次处理范围")
-                .font(.system(size: 12, weight: .semibold))
-                .padding(12)
+            HStack {
+                Text("本次处理范围 · 已选 \(selectedEntryIDs.count) 项")
+                    .font(.system(size: 12, weight: .semibold))
+                Spacer()
+                Menu("批量选择") {
+                    Button("选择全部") { selectedEntryIDs = Set(review.entries.map(\.id)) }
+                    Button("仅选可整文件替换的冲突") { selectedEntryIDs = review.replaceableEntryIDs }
+                        .disabled(review.replaceableEntryIDs.isEmpty)
+                    Button("清除选择") { selectedEntryIDs = [] }
+                }
+                .font(.system(size: 12))
+            }
+            .padding(12)
             Divider()
             List(selection: $selectedEntryID) {
                 ForEach(review.entries) { entry in
-                    VStack(alignment: .leading, spacing: 6) {
-                        Label(entry.relativePath, systemImage: entry.nodeKind == .directory ? "folder" : "doc.text")
-                            .font(.system(size: 12, design: .monospaced))
-                            .fixedSize(horizontal: false, vertical: true)
-                        Text(conflictTypes(for: entry))
-                            .font(.system(size: 11))
-                            .foregroundStyle(SvnDockTheme.red)
+                    HStack(alignment: .center, spacing: 8) {
+                        Toggle("处理 \(entry.relativePath)", isOn: Binding(
+                            get: { selectedEntryIDs.contains(entry.id) },
+                            set: { isSelected in
+                                if isSelected { selectedEntryIDs.insert(entry.id) }
+                                else { selectedEntryIDs.remove(entry.id) }
+                            }
+                        ))
+                        .labelsHidden()
+                        VStack(alignment: .leading, spacing: 6) {
+                            Label(entry.relativePath, systemImage: entry.nodeKind == .directory ? "folder" : "doc.text")
+                                .font(.system(size: 12, design: .monospaced))
+                                .fixedSize(horizontal: false, vertical: true)
+                            Text(conflictTypes(for: entry))
+                                .font(.system(size: 11))
+                                .foregroundStyle(SvnDockTheme.red)
+                        }
                     }
                     .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .tag(entry.id)
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(entry.relativePath)，\(conflictTypes(for: entry))")
                 }
             }
             .listStyle(.plain)
@@ -181,7 +208,7 @@ struct ConflictReviewSheet: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 12) {
                 Text("处理方式").font(.system(size: 12, weight: .semibold))
-                if review.allowsFileReplacement {
+                if !selectedEntryIDs.isEmpty && selectedEntryIDs.isSubset(of: review.replaceableEntryIDs) {
                     Picker("处理方式", selection: $resolution) {
                         ForEach(SvnDockConflictResolution.allCases) { strategy in
                             Text(strategyTitle(strategy)).tag(strategy)
@@ -196,8 +223,8 @@ struct ConflictReviewSheet: View {
                 Spacer()
             }
             Text(resolution == .working
-                 ? "此操作不会自动合并内容或修复路径。它仅将范围内的冲突标记为已解决；随后检查本地变更，按需提交到仓库。"
-                 : "将用所选来源替换本次范围内 \(review.entries.count) 个文件的全部内容并标记已解决，当前编辑可能丢失。此处仅预览现状，未展示替换后的内容；随后检查本地变更，按需提交到仓库。")
+                 ? "仅将勾选的 \(selectedEntryIDs.count) 项冲突标记为已解决；不会自动合并内容或修复路径。随后检查本地变更，按需提交到仓库。"
+                 : "将用所选来源替换勾选的 \(selectedEntryIDs.count) 个文件的全部内容并标记已解决，当前编辑可能丢失。此处仅预览现状，未展示替换后的内容；随后检查本地变更，按需提交到仓库。")
                 .font(.system(size: 12))
                 .foregroundStyle(resolution == .working ? SvnDockTheme.secondaryText : SvnDockTheme.red)
                 .fixedSize(horizontal: false, vertical: true)
@@ -218,12 +245,13 @@ struct ConflictReviewSheet: View {
                     .keyboardShortcut(.cancelAction)
                     .buttonStyle(SvnDockButtonStyle())
                 Button(role: resolution == .working ? nil : .destructive) {
-                    store.confirmResolve(using: resolution, reviewed: true, reviewID: review.id)
+                    store.confirmResolve(using: resolution, reviewed: true, reviewID: review.id,
+                                         selectedEntryIDs: selectedEntryIDs)
                 } label: {
-                    Text(resolution == .working ? "标记 \(review.entries.count) 项已解决" : "替换并标记 \(review.entries.count) 项已解决")
+                    Text(resolution == .working ? "标记 \(selectedEntryIDs.count) 项已解决" : "替换并标记 \(selectedEntryIDs.count) 项已解决")
                 }
                 .buttonStyle(SvnDockButtonStyle(primary: true))
-                .disabled(!hasReviewed || review.entries.isEmpty || store.activeOperation != nil)
+                .disabled(!hasReviewed || selectedEntryIDs.isEmpty || store.activeOperation != nil)
                 .accessibilityIdentifier("conflicts.confirm")
             }
         }

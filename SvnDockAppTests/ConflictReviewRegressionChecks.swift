@@ -8,8 +8,42 @@ import SvnDockCore
 enum ConflictReviewRegressionChecks {
     static func run() async throws {
         try await selectionAndConsent()
+        try await bulkReplacementSelection()
         try await frozenReviewAndPreview()
         try await operationOutcomes()
+    }
+
+    static func bulkReplacementSelection() async throws {
+        let service = ConflictReviewFixtureService(additionalTextConflict: true)
+        let store = SvnDockStore(service: service)
+        await store.load()
+        store.requestResolveAllConflicts()
+        guard let review = store.pendingConflictReview,
+              let text = review.entries.first(where: { $0.relativePath == "text.txt" }),
+              let secondText = review.entries.first(where: { $0.relativePath == "text2.txt" }),
+              let folder = review.entries.first(where: { $0.relativePath == "folder" }) else {
+            throw Failure("missing bulk review fixtures")
+        }
+        try check(review.replaceableEntryIDs == [text.id, secondText.id],
+                  "bulk selection includes only regular files with text conflicts")
+        store.confirmResolve(using: .theirsFull, reviewed: true, reviewID: review.id,
+                             selectedEntryIDs: [text.id, folder.id])
+        store.confirmResolve(using: .theirsFull, reviewed: true, reviewID: review.id,
+                             selectedEntryIDs: [])
+        store.confirmResolve(using: .theirsFull, reviewed: true, reviewID: review.id,
+                             selectedEntryIDs: ["outside-review"])
+        try check(await service.resolveCalls.isEmpty && store.isPresentingResolveConfirmation,
+                  "mixed, empty and out-of-review selections cannot start replacement")
+
+        store.confirmResolve(using: .theirsFull, reviewed: true, reviewID: review.id,
+                             selectedEntryIDs: review.replaceableEntryIDs)
+        try await waitUntil { !store.isBusy && store.operationRecords.count == 1 }
+        let calls = await service.resolveCalls
+        try check(calls.count == 1 && Set(calls[0].paths) == ["text.txt", "text2.txt"]
+                  && calls[0].resolution == .theirsFull,
+                  "bulk repository replacement targets only the selected eligible files")
+        try check(store.operationRecords[0].detail?.contains("folder") == false,
+                  "the operation record reports only paths actually resolved")
     }
 
     static func selectionAndConsent() async throws {
@@ -147,19 +181,28 @@ private actor ConflictReviewFixtureService: SvnDockServicing {
     struct Call: Sendable { let workingCopyID: UUID; let paths: [String]; let resolution: SvnDockConflictResolution }
     let copy = SvnDockWorkingCopy(name: "Conflict fixture", rootURL: URL(fileURLWithPath: "/tmp/conflict-review-fixture"))
     let result: Result
+    let additionalTextConflict: Bool
     var resolveCalls: [Call] = []
     var statusCalls = 0
     var resolvedPaths: Set<String> = []
-    init(result: Result = .success) { self.result = result }
+    init(result: Result = .success, additionalTextConflict: Bool = false) {
+        self.result = result
+        self.additionalTextConflict = additionalTextConflict
+    }
     func loadRegisteredWorkingCopies() async throws -> [SvnDockWorkingCopy] { [copy] }
     func status(for workingCopy: SvnDockWorkingCopy) async throws -> SvnDockStatusSnapshot {
         statusCalls += 1
-        return .init(entries: [
+        var entries: [SvnDockStatusEntry] = [
             .init(workingCopyID: copy.id, relativePath: "text.txt", nodeKind: .file, status: .conflicted, conflictKinds: [.text]),
             .init(workingCopyID: copy.id, relativePath: "folder", nodeKind: .directory, status: .conflicted, conflictKinds: [.property]),
             .init(workingCopyID: copy.id, relativePath: "tree", nodeKind: .directory, status: .conflicted, conflictKinds: [.tree]),
             .init(workingCopyID: copy.id, relativePath: "other.txt", nodeKind: .file, status: .modified)
-        ].filter { !resolvedPaths.contains($0.relativePath) })
+        ]
+        if additionalTextConflict {
+            entries.append(.init(workingCopyID: copy.id, relativePath: "text2.txt", nodeKind: .file,
+                                 status: .conflicted, conflictKinds: [.text]))
+        }
+        return .init(entries: entries.filter { !resolvedPaths.contains($0.relativePath) })
     }
     func diff(relativePath: String, in workingCopy: SvnDockWorkingCopy) async throws -> String { "fixture diff for \(relativePath)" }
     func resolve(relativePaths: [String], using resolution: SvnDockConflictResolution, in workingCopy: SvnDockWorkingCopy) async throws {
