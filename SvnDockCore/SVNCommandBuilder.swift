@@ -193,8 +193,8 @@ public struct SVNCommandBuilder: Sendable {
             // A single commit must remain one transaction even for tens of
             // thousands of paths. A targets file avoids both Foundation's
             // argument-count limit and the OS argument-byte limit.
-            // SVN splits targets files on CR/LF, so those unusual filenames
-            // must remain literal argv entries after the option terminator.
+            // Targets that SVN splits or trims in a targets file stay literal
+            // argv entries after the option terminator.
             appendFileTargets(targets, to: &arguments, files: &argumentFiles)
 
         case let .add(paths, parents, force, depth):
@@ -475,7 +475,12 @@ public struct SVNCommandBuilder: Sendable {
         var contents = Data()
         var literalTargets: [String] = []
         for target in targets {
-            if target.contains("\n") || target.contains("\r") {
+            // SVN splits on CR/LF and trims ASCII whitespace from each line.
+            // The ./ prefix protects leading whitespace, but trailing space,
+            // tab, vertical tab and form feed must survive as literal argv.
+            // An existing empty peg suffix (@) already protects its filename.
+            if target.contains("\n") || target.contains("\r")
+                || target.utf8.last.map({ $0 == 0x20 || (0x09...0x0d).contains($0) }) == true {
                 literalTargets.append(target)
             } else {
                 contents.append(contentsOf: [0x2e, 0x2f]) // ./

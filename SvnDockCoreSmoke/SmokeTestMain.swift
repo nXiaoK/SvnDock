@@ -10,6 +10,7 @@ struct SvnDockCoreSmokeTestMain {
         try diffRegressionChecks()
         try await DiffCancellationSmoke.run()
         try await CoreRegressionSmoke.run()
+        try await TargetsFileRegressionSmoke.run()
         try await FinderQueueRegressionSmoke.run()
         try await HistoryRevisionSmoke.run()
         try await MissingDeletionSmoke.run()

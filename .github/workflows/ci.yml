@@ -46,6 +46,8 @@ jobs:
             -Xswiftc -warnings-as-errors
 
       - name: Run core smoke checks
+        env:
+          SVNDOCK_TARGETS_INTEGRATION: "1"
         run: |
           swift run --disable-sandbox -c release \
             -Xswiftc -swift-version -Xswiftc 6 \

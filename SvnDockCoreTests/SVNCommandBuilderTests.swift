@@ -247,6 +247,38 @@ final class SVNCommandBuilderTests: XCTestCase {
         XCTAssertEqual(Array(invocation.arguments.suffix(3)), ["--", "line\nbreak.txt", "carriage\rreturn.txt"])
     }
 
+    func testTargetsFilesPreserveTrailingWhitespaceForEverySupportedOperation() throws {
+        let builder = try SVNCommandBuilder(executableURL: executableURL)
+        let copy = WorkingCopy(localPath: rootURL)
+        let ordinary = (0..<1_000).map { "file-\($0).txt" }
+        let literal = ["report ", "report\t", "report\u{0b}", "report\u{0c}", "line\nbreak", "carriage\rreturn"]
+        let fileSafe = [" leading space", "tab\tinside", "peg@ "]
+        let paths = ordinary + fileSafe + literal
+        let operations: [SVNOperationKind] = [
+            .commit(paths: paths, message: "exact targets", keepLocks: false),
+            .infoTargets(paths: paths),
+            .add(paths: paths, parents: false, force: false, depth: nil),
+            .delete(paths: paths),
+            .revert(paths: paths, depth: .empty)
+        ]
+        let expectedFile = Data(((ordinary + [" leading space", "tab\tinside", "peg@ @"])
+            .map { "./" + $0 }.joined(separator: "\n") + "\n").utf8)
+        for operation in operations {
+            let invocation = try builder.makeInvocation(for: operation, in: copy)
+            XCTAssertEqual(invocation.argumentFiles.map(\.contents), [expectedFile])
+            XCTAssertEqual(Array(invocation.arguments.suffix(literal.count + 1)), ["--"] + literal)
+        }
+    }
+
+    func testWhitespaceOnlyTargetsDoNotCreateAnEmptyTargetsFile() throws {
+        let invocation = try SVNCommandBuilder(executableURL: executableURL).makeInvocation(
+            for: .commit(paths: [" ", "\t"], message: "whitespace names", keepLocks: false),
+            in: WorkingCopy(localPath: rootURL)
+        )
+        XCTAssertTrue(invocation.argumentFiles.isEmpty)
+        XCTAssertEqual(Array(invocation.arguments.suffix(3)), ["--", " ", "\t"])
+    }
+
     func testTraversalOutsideWorkingCopyIsRejected() throws {
         let builder = try SVNCommandBuilder(executableURL: executableURL)
 
