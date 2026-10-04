@@ -11,7 +11,62 @@ enum SVNSafetyRegressionChecks {
         try await revertRecoveryUsesFreshState()
         try await externalBoundariesSurviveDuplicateStatus()
         try await nestedWorkingCopiesStayIsolated()
+        try await ordinaryAdditionsRevertWithoutDataLoss()
         print("SVN safety checks passed")
+    }
+
+    private static func ordinaryAdditionsRevertWithoutDataLoss() async throws {
+        let f = try await SafetyFixture.create()
+        defer { f.remove() }
+        let service = try f.service()
+        let copy = try await service.registerWorkingCopy(at: f.root)
+        try f.write("added child content\n", to: "ordinary/child.txt")
+        _ = try await f.svn(["add", "ordinary"])
+        try f.write("unversioned child content\n", to: "ordinary/private.txt")
+        try f.write("ignored child content\n", to: "ordinary/cache.bin")
+        _ = try await f.svn(["propset", "svn:ignore", "cache.bin", "ordinary"])
+        try f.write("selected other edit\n", to: "other.txt")
+        try f.write("unselected sibling edit\n", to: "source/b.txt")
+        try await service.revert(relativePaths: ["ordinary", "ordinary/child.txt", "other.txt"], in: copy)
+        for (path, content) in ["ordinary/child.txt": "added child content\n",
+                                "ordinary/private.txt": "unversioned child content\n",
+                                "ordinary/cache.bin": "ignored child content\n"] {
+            try check(try f.read(path) == content, "ordinary directory revert preserves \(path)")
+        }
+        try check(try f.read("other.txt") == "base other\n", "mixed ordinary edits still revert normally")
+        try check(try f.read("source/b.txt") == "unselected sibling edit\n", "unselected edits remain intact")
+        try check(try await f.status().contains { $0.path == "ordinary" && $0.status == .unversioned },
+                  "added directory and its child are fully unscheduled")
+
+        try f.write("pending missing child\n", to: "missing-add/child.txt")
+        _ = try await f.svn(["add", "missing-add"])
+        try FileManager.default.removeItem(at: f.root.appendingPathComponent("missing-add"))
+        try await service.revert(relativePaths: ["missing-add", "missing-add/child.txt"], in: copy)
+        try check(try await f.status().allSatisfy { !$0.path.hasPrefix("missing-add") },
+                  "missing ordinary additions are fully unscheduled without recreation")
+
+        try f.write("second ordinary child\n", to: "pending/child.txt")
+        _ = try await f.svn(["add", "pending"])
+        _ = try await f.svn(["copy", "source", "copied"])
+        try f.write("unique copied edit\n", to: "copied/a.txt")
+        try f.write("private copied data\n", to: "copied/private.txt")
+        _ = try await f.svn(["delete", "--force", "source"])
+        try f.write("must remain modified\n", to: "other.txt")
+        let before = try await f.status()
+        do {
+            try await service.revert(relativePaths: ["source", "other.txt", "pending", "copied"], in: copy)
+            throw SafetyFailure("ordinary revert accepted a copied addition")
+        } catch SVNAdditionUndoError.copiedAddition { }
+        try check(try await f.status() == before, "unsafe additions stop deleted and modified groups before any writes")
+        try check(try f.read("copied/a.txt") == "unique copied edit\n"
+                  && f.read("copied/private.txt") == "private copied data\n", "copied edits and private files survive")
+        _ = try await f.svn(["copy", "copied", "pending/nested-copy"])
+        let nestedBefore = try await f.status()
+        do {
+            try await service.revert(relativePaths: ["pending", "other.txt"], in: copy)
+            throw SafetyFailure("ordinary added parent hid a copied descendant")
+        } catch SVNAdditionUndoError.copiedAddition { }
+        try check(try await f.status() == nestedBefore, "copied descendants veto recursive added-parent revert")
     }
 
     private static func nestedWorkingCopiesStayIsolated() async throws {

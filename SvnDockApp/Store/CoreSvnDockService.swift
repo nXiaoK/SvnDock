@@ -905,11 +905,30 @@ actor CoreSvnDockService: SvnDockServicing {
             start = end
         }
 
+        let additionTargets = targets.filter {
+            infoByPath[absoluteURL(for: $0, in: workingCopy).path]?.schedule == "add"
+        }
+        var recursive = Set<String>()
+        if !additionTargets.isEmpty {
+            let undo = try SVNAdditionUndo(executableURL: builder.executableURL, runner: runner)
+            let roots = try undo.targets(for: additionTargets, in: workingCopy)
+            // Added directories require recursive unscheduling. Complete the
+            // existing copy/move/content safety preflight for every addition
+            // before either additions or ordinary revert groups can change.
+            for missingOnly in [false, true] {
+                let pending = roots.filter {
+                    (statuses[absoluteURL(for: $0, in: workingCopy).path]?.status == .missing) == missingOnly
+                }
+                guard !pending.isEmpty else { continue }
+                recursive.formUnion(try await undo.validatedTargets(
+                    pending, in: workingCopy, missingOnly: missingOnly
+                ))
+            }
+        }
         let candidates = targets.filter {
             let status = statuses[absoluteURL(for: $0, in: workingCopy).path]?.status
             return status == .missing || status == .deleted
         }
-        var recursive = Set<String>()
         if !candidates.isEmpty {
             for target in candidates {
                 let path = absoluteURL(for: target, in: workingCopy).path

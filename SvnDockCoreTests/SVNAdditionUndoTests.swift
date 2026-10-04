@@ -36,6 +36,17 @@ final class SVNAdditionUndoTests: XCTestCase {
         let revert = await runner.lastInvocation
         XCTAssertEqual(revert?.arguments, ["revert", "--depth", "infinity", "--non-interactive", "--", "pending"])
     }
+
+    func testAdditionPreflightDoesNotMutateBeforeOtherGroupsAreValidated() async throws {
+        let runner = AdditionUndoFixtureRunner(versioned: false)
+        let undo = try SVNAdditionUndo(executableURL: executable, runner: runner)
+        let targets = try await undo.validatedTargets(
+            ["pending", "pending/child"], in: copy, missingOnly: true
+        )
+        XCTAssertEqual(targets, ["pending"])
+        let commands = await runner.commands
+        XCTAssertEqual(commands, ["status", "info"])
+    }
 }
 
 private actor AdditionUndoFixtureRunner: ProcessRunning {

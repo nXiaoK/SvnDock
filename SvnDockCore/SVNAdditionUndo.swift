@@ -52,6 +52,19 @@ public struct SVNAdditionUndo: Sendable {
         in workingCopy: WorkingCopy,
         missingOnly: Bool
     ) async throws {
+        let targets = try await validatedTargets(targets, in: workingCopy, missingOnly: missingOnly)
+        try Task.checkCancellation()
+        try validateBoundary(targets, in: workingCopy)
+        _ = try await checkedRun(.revert(paths: targets, depth: .infinity), in: workingCopy)
+    }
+
+    /// Performs the complete addition safety preflight without changing SVN or
+    /// local files. Keep the same working-copy lease through the later mutation.
+    public func validatedTargets(
+        _ targets: [String],
+        in workingCopy: WorkingCopy,
+        missingOnly: Bool
+    ) async throws -> [String] {
         let targets = try self.targets(for: targets, in: workingCopy)
         try validateBoundary(targets, in: workingCopy)
         var statuses: [String: StatusEntry] = [:]
@@ -122,7 +135,7 @@ public struct SVNAdditionUndo: Sendable {
         }
         try Task.checkCancellation()
         try validateBoundary(targets, in: workingCopy)
-        _ = try await checkedRun(.revert(paths: targets, depth: .infinity), in: workingCopy)
+        return targets
     }
 
     private func validateBoundary(_ targets: [String], in workingCopy: WorkingCopy) throws {
