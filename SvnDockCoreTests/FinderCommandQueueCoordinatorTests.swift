@@ -472,6 +472,41 @@ final class FinderCommandQueueCoordinatorTests: XCTestCase {
         withExtendedLifetime(lease) {}
     }
 
+    func testUnreadableReceiptDoesNotBlockUnrelatedOrphanRecovery() async throws {
+        for incompatible in [false, true] {
+            let directory = try makeTemporaryDirectory()
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let coordinator = try FinderCommandQueueCoordinator(directoryURL: directory)
+            let blocked = makeCommand()
+            let available = makeCommand()
+            try await enqueue(blocked, in: directory)
+            let claimed = try await coordinator.claimCommand(id: blocked.id, as: .application)
+            let executing = try await coordinator.markExecuting(XCTUnwrap(claimed))
+            let data: Data
+            if incompatible {
+                let encoder = JSONEncoder()
+                encoder.dateEncodingStrategy = .iso8601
+                data = try encoder.encode(FinderCommandReceipt(schemaVersion: FinderSharedSchema.currentVersion + 1,
+                    command: blocked, owner: .application, claimToken: executing.token, outcome: .completed))
+            } else { data = Data("{".utf8) }
+            let receipt = directory.appendingPathComponent("command-receipts")
+                .appendingPathComponent(blocked.id.uuidString.lowercased() + ".json")
+            try data.write(to: receipt, options: .atomic)
+            try await enqueue(blocked, in: directory)
+            try await enqueue(available, in: directory)
+            _ = try await coordinator.claimCommand(id: available.id, as: .application)
+            let leaseResult = try await coordinator.acquireConsumerLease(for: .application)
+            let lease = try XCTUnwrap(leaseResult)
+            let recovered = try await coordinator.recoverOrphanedClaims(for: .application, lease: lease)
+            let ids = try await coordinator.availableCommandIDs(for: .application)
+            XCTAssertEqual(recovered, FinderCommandRecoverySummary(released: 1, quarantined: 1))
+            XCTAssertEqual(ids, [available.id])
+            XCTAssertEqual(try Data(contentsOf: receipt), data)
+            XCTAssertEqual(try fileNames(in: directory.appendingPathComponent("command-uncertain")).count, 1)
+            withExtendedLifetime(lease) {}
+        }
+    }
+
     func testAcknowledgeLeavesDurableReceiptAndRemovesProcessingClaim() async throws {
         let directory = try makeTemporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }

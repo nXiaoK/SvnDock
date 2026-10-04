@@ -763,17 +763,30 @@ public actor FinderCommandQueueCoordinator {
                 continue
             }
 
-            if let receipt = try loadReceipt(id: components.id) {
+            let claim = FinderCommandClaim(
+                command: command,
+                owner: owner,
+                token: components.token,
+                phase: components.phase,
+                fileURL: url
+            )
+            let receipt: FinderCommandReceipt?
+            do {
+                receipt = try loadReceipt(id: components.id)
+            } catch {
+                // An unreadable terminal record makes this UUID's outcome
+                // uncertain, even for an earlier claim phase. Keep the receipt
+                // as a deduplication barrier and isolate its claim without
+                // preventing unrelated requests from being recovered.
+                if (try? quarantine(claim)) != nil {
+                    summary.quarantined += 1
+                }
+                continue
+            }
+            if let receipt {
                 guard receipt.command == command,
                       receipt.owner == owner,
                       receipt.claimToken == components.token else {
-                    let claim = FinderCommandClaim(
-                        command: command,
-                        owner: owner,
-                        token: components.token,
-                        phase: components.phase,
-                        fileURL: url
-                    )
                     if (try? quarantine(claim)) != nil {
                         summary.quarantined += 1
                     }
@@ -788,13 +801,6 @@ public actor FinderCommandQueueCoordinator {
                 continue
             }
 
-            let claim = FinderCommandClaim(
-                command: command,
-                owner: owner,
-                token: components.token,
-                phase: components.phase,
-                fileURL: url
-            )
             switch components.phase {
             case .claimed, .awaitingUser:
                 do {

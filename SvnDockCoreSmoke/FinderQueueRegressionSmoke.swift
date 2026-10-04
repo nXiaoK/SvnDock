@@ -55,7 +55,69 @@ enum FinderQueueRegressionSmoke {
         )
         let availableIDs = try await coordinator.availableCommandIDs(for: .agent)
         try check(availableIDs == [available.id], "malformed receipt only blocks its own command")
-        print("Passed 4 Finder queue regression checks")
+        try await checkRecoveryWithUnreadableReceipts()
+        print("Passed Finder queue regression checks, including unreadable receipt recovery")
+    }
+
+    private static func checkRecoveryWithUnreadableReceipts() async throws {
+        for owner in [FinderCommandConsumer.application, .agent] {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("SvnDockReceiptRecovery-\(UUID().uuidString)", isDirectory: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let store = try FinderSharedStore(directoryURL: directory)
+            let coordinator = try FinderCommandQueueCoordinator(directoryURL: directory)
+            guard let lease = try await coordinator.acquireConsumerLease(for: owner) else {
+                throw Failure("Expected recovery lease")
+            }
+            var receiptFiles: [(URL, Data)] = []
+            for phase in [FinderCommandClaimPhase.claimed, .awaitingUser, .executing] {
+                for incompatible in [false, true] {
+                    let command = FinderCommand(kind: .update, paths: ["/tmp/working-copy"], workingCopyRoot: "/tmp/working-copy")
+                    _ = try await store.enqueue(command)
+                    guard var claim = try await coordinator.claimCommand(id: command.id, as: owner) else {
+                        throw Failure("Expected recovery fixture claim")
+                    }
+                    if phase == .awaitingUser { claim = try await coordinator.markAwaitingUser(claim) }
+                    if phase == .executing { claim = try await coordinator.markExecuting(claim) }
+                    let data: Data
+                    if incompatible {
+                        let encoder = JSONEncoder()
+                        encoder.dateEncodingStrategy = .iso8601
+                        data = try encoder.encode(FinderCommandReceipt(schemaVersion: FinderSharedSchema.currentVersion + 1,
+                            command: command, owner: owner, claimToken: claim.token, outcome: .completed))
+                    } else { data = Data("{".utf8) }
+                    let receipt = directory.appendingPathComponent("command-receipts")
+                        .appendingPathComponent(command.id.uuidString.lowercased() + ".json")
+                    try data.write(to: receipt, options: .atomic)
+                    receiptFiles.append((receipt, data))
+                    _ = try await store.enqueue(command)
+                }
+            }
+            let available = FinderCommand(kind: .update, paths: ["/tmp/working-copy"], workingCopyRoot: "/tmp/working-copy")
+            _ = try await store.enqueue(available)
+            guard try await coordinator.claimCommand(id: available.id, as: owner) != nil else {
+                throw Failure("Expected unrelated orphan claim")
+            }
+            let recovered = try await coordinator.recoverOrphanedClaims(for: owner, lease: lease)
+            try check(recovered == FinderCommandRecoverySummary(released: 1, quarantined: 6),
+                      "bad receipts isolate every orphan phase while unrelated claims recover")
+            let ids = try await coordinator.availableCommandIDs(for: owner)
+            try check(ids == [available.id], "same-UUID pending duplicates cannot replay after bad receipt recovery")
+            let uncertain = try FileManager.default.contentsOfDirectory(
+                at: directory.appendingPathComponent("command-uncertain"), includingPropertiesForKeys: nil)
+            try check(uncertain.count == 6, "all affected claims remain available for inspection")
+            for (url, data) in receiptFiles {
+                try check(try Data(contentsOf: url) == data, "unreadable terminal records remain intact as deduplication barriers")
+            }
+            guard let claim = try await coordinator.claimCommand(id: available.id, as: owner) else {
+                throw Failure("Unrelated recovered command must remain executable")
+            }
+            let executing = try await coordinator.markExecuting(claim)
+            try await coordinator.acknowledge(executing, outcome: .completed)
+            let repeated = try await coordinator.recoverOrphanedClaims(for: owner, lease: lease)
+            try check(repeated == FinderCommandRecoverySummary(), "recovery does not reprocess quarantined claims")
+            withExtendedLifetime(lease) {}
+        }
     }
 
     private static func check(_ condition: Bool, _ message: String) throws {
