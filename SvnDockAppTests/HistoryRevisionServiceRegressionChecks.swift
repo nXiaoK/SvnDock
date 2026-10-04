@@ -149,6 +149,23 @@ enum HistoryRevisionServiceRegressionChecks {
         try check(outputs["/replaced-dir/old-only-dir"]?.contains("-old destination directory property") == true,
                   "copied replacement deletion previews old destination directory properties")
         try check(outputs["/"]?.contains("svn:ignore") == true, "directory property-only preview preserved")
+        try write("oversized.txt", String(repeating: "large history line\n", count: 500_000))
+        _ = try await svn(["add", "oversized.txt"], in: root)
+        _ = try await run(.commit(paths: ["oversized.txt"], message: "Seed oversized history diff", keepLocks: false))
+        let largeDetails = try await service.revisionDetails(revision: 5, in: uiCopy)
+        guard let largeChange = largeDetails.changes.first(where: { $0.path == "/oversized.txt" }) else {
+            throw Failure(description: "oversized historical file remains available in revision details")
+        }
+        do {
+            _ = try await service.revisionDiff(revision: 5, change: largeChange, repositoryRoot: repository, in: uiCopy)
+            throw Failure(description: "oversized history must not return an apparently complete truncated patch")
+        } catch SvnDockServiceError.unavailable(let message) {
+            try check(message.contains("历史差异") && message.contains("8 MiB"), "oversized history reports its preview limit")
+        }
+        if let change = details.changes.first(where: { $0.path == "/moved.txt" }) {
+            let retried = try await service.revisionDiff(revision: 3, change: change, repositoryRoot: repository, in: uiCopy)
+            try check(retried == outputs[change.path], "an oversized patch releases the operation lock and preserves later complete previews")
+        }
         print("History revision service checks passed: complete copied deletions, old copy revisions, source inventories, Unicode, deleted-at-HEAD paths, properties, moves and copied replacements")
     }
 
@@ -172,6 +189,6 @@ private actor HistoryRevisionIsolatedRunner: ProcessRunning {
             standardInput: invocation.standardInput,
             argumentFiles: invocation.argumentFiles.map {
                 ProcessArgumentFile(argumentIndex: $0.argumentIndex + 3, contents: $0.contents)
-            }))
+            }, outputByteLimit: invocation.outputByteLimit))
     }
 }

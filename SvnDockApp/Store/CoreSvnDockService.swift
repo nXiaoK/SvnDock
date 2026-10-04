@@ -690,11 +690,15 @@ actor CoreSvnDockService: SvnDockServicing {
 
     func revisionDiff(revision: Int, change: SVNChangedPath, repositoryRoot: URL,
                       in workingCopy: SvnDockWorkingCopy) async throws -> String {
-        let result = try await run(
-            .revisionDiff(repositoryRoot: repositoryRoot, revision: revision, change: change),
-            in: coreWorkingCopy(for: workingCopy)
-        )
-        return result.standardOutputString
+        do {
+            let result = try await run(
+                .revisionDiff(repositoryRoot: repositoryRoot, revision: revision, change: change),
+                in: coreWorkingCopy(for: workingCopy), outputByteLimit: 8 * 1_024 * 1_024
+            )
+            return result.standardOutputString
+        } catch ProcessRunnerError.outputLimitExceeded {
+            throw SvnDockServiceError.unavailable("历史差异超过 8 MiB 预览上限，请使用 SVN 命令行查看完整差异。此限制不影响历史记录或工作副本内容。")
+        }
     }
 
     func update(workingCopies: [SvnDockWorkingCopy]) async throws {
