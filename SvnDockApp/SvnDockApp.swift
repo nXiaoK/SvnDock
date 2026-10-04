@@ -260,7 +260,7 @@ private struct SvnDockCommands: Commands {
                 store.requestResolveConfirmation()
             }
             .disabled(
-                store.primarySelectedEntry?.status != .conflicted
+                !store.selectedEntries.contains { $0.status == .conflicted }
                     || store.isInteractionBlocked
             )
 
