@@ -172,14 +172,48 @@ final class FinderBadgePresentationTests: XCTestCase {
         XCTAssertEqual((attributes[.ownerAccountID] as? NSNumber)?.uint32Value, getuid())
         let document = try JSONDecoder().decode(FinderBadgeRequestDocument.self, from: Data(contentsOf: destination))
         XCTAssertEqual(document.id, requestID)
+        XCTAssertEqual(document.publicationVersion, 1)
+        var legacyJSON = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as! [String: Any]
+        legacyJSON.removeValue(forKey: "publicationVersion")
+        let legacy = try JSONDecoder().decode(FinderBadgeRequestDocument.self, from: JSONSerialization.data(withJSONObject: legacyJSON))
+        XCTAssertNil(legacy.publicationVersion)
         XCTAssertEqual(document.directories, [FinderBadgeDirectoryRequest(
             workingCopyID: root.id, workingCopyRoot: root.path, directoryPath: root.path, itemPaths: []
         )])
         try fixture.container.writeBadgeRequest(instanceID: requestID, directories: [])
-        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path),
-                       [requestID.uuidString.lowercased() + ".json"])
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(),
+                       [".publication.lock", requestID.uuidString.lowercased() + ".json"])
+        let lockURL = directory.appendingPathComponent(".publication.lock")
+        let lockAttributes = try FileManager.default.attributesOfItem(atPath: lockURL.path)
+        XCTAssertEqual((lockAttributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: lockURL.path)
+        do {
+            try fixture.container.writeBadgeRequest(instanceID: requestID, directories: [request])
+            throw CocoaError(.fileWriteUnknown)
+        } catch SharedContainerError.invalidBadgeRequestDirectory { }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: lockURL.path)
+        let savedLock = directory.appendingPathComponent("saved.lock")
+        try FileManager.default.moveItem(at: lockURL, to: savedLock)
+        try FileManager.default.createSymbolicLink(at: lockURL, withDestinationURL: savedLock)
+        do {
+            try fixture.container.writeBadgeRequest(instanceID: requestID, directories: [request])
+            throw CocoaError(.fileWriteUnknown)
+        } catch SharedContainerError.invalidBadgeRequestDirectory { }
+        try FileManager.default.removeItem(at: lockURL)
+        try FileManager.default.moveItem(at: savedLock, to: lockURL)
         let cleared = try JSONDecoder().decode(FinderBadgeRequestDocument.self, from: Data(contentsOf: destination))
         XCTAssertTrue(cleared.directories.isEmpty)
+        let heldLock = open(lockURL.path, O_RDWR | O_CLOEXEC)
+        guard heldLock >= 0 else { throw CocoaError(.fileReadUnknown) }
+        defer { close(heldLock) }
+        XCTAssertEqual(badgePublicationFlock(heldLock, LOCK_EX | LOCK_NB), 0)
+        try fixture.container.writeBadgeRequest(instanceID: requestID, directories: [request])
+        let skipped = try JSONDecoder().decode(FinderBadgeRequestDocument.self, from: Data(contentsOf: destination))
+        XCTAssertTrue(skipped.directories.isEmpty)
+        XCTAssertEqual(badgePublicationFlock(heldLock, LOCK_UN), 0)
+        try fixture.container.writeBadgeRequest(instanceID: requestID, directories: [request])
+        let retried = try JSONDecoder().decode(FinderBadgeRequestDocument.self, from: Data(contentsOf: destination))
+        XCTAssertEqual(retried.directories, document.directories)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
         do {
             try fixture.container.writeBadgeRequest(instanceID: requestID, directories: [])

@@ -1,5 +1,9 @@
 import Foundation
+import Darwin
 import SvnDockCore
+
+@_silgen_name("flock")
+private func requestTestFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
 
 enum FinderBadgeRegressionChecks {
     static func run() async throws {
@@ -7,6 +11,7 @@ enum FinderBadgeRegressionChecks {
         try await snapshotOwnershipAndFreshness()
         try await largeSnapshotsRemainReadable()
         try await requestsRemainBoundedAndRegistered()
+        try await requestCleanupPreservesLegacyAndPublishers()
         print("Finder badge core checks passed: exact states, folder summaries, bounded clean priority, per-root freshness, private requests and registration boundaries")
     }
 
@@ -196,6 +201,58 @@ enum FinderBadgeRegressionChecks {
         let bounded = try await store.activeDirectories(registeredRoots: [root, nested, disabled], now: now)
         try check(bounded.count == FinderBadgeRefreshRequestStore.maximumActiveProcesses,
                   "at most ten live process requests contribute observation work")
+    }
+
+    private static func requestCleanupPreservesLegacyAndPublishers() async throws {
+        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("finder-request-cleanup-\(UUID())")
+        defer { try? FileManager.default.removeItem(at: temporary) }
+        let directory = temporary.appendingPathComponent(FinderBadgeRefreshRequestStore.directoryName)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let lock = open(directory.appendingPathComponent(".publication.lock").path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard lock >= 0 else { throw FinderBadgeCheckFailure(message: "request lock fixture") }
+        defer { close(lock) }
+        let store = try FinderBadgeRefreshRequestStore(baseDirectoryURL: temporary)
+        let root = RegisteredRoot(id: UUID(), path: "/tmp/cleanup-wc")
+        let hint = FinderBadgeRefreshDirectory(workingCopyID: root.id, workingCopyRoot: root.path, directoryPath: root.path)
+        let now = Date()
+        let past = now.addingTimeInterval(-120)
+        func expired(publicationVersion: Int? = 1, schemaVersion: Int = 1) throws -> URL {
+            let url = try write(FinderBadgeRefreshRequest(schemaVersion: schemaVersion, id: UUID(), updatedAt: past,
+                directories: [hint], publicationVersion: publicationVersion), in: directory)
+            try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: url.path)
+            return url
+        }
+        let pending = try expired()
+        try check(requestTestFlock(lock, LOCK_EX | LOCK_NB) == 0, "publisher fixture owns the lock")
+        _ = try await store.activeDirectories(registeredRoots: [root], now: now)
+        try check(FileManager.default.fileExists(atPath: pending.path), "a live publisher prevents expiry cleanup")
+        let pendingID = UUID(uuidString: pending.deletingPathExtension().lastPathComponent)!
+        _ = try write(FinderBadgeRefreshRequest(id: pendingID, updatedAt: now, directories: [hint], publicationVersion: 1), in: directory)
+        _ = requestTestFlock(lock, LOCK_UN)
+        let active = try await store.activeDirectories(registeredRoots: [root], now: now)
+        try check(active == [hint] && FileManager.default.fileExists(atPath: pending.path),
+                  "a concurrently replaced fresh request stays visible and survives cleanup")
+
+        let legacy = try expired(publicationVersion: nil)
+        let incompatible = try expired(schemaVersion: 2)
+        let insecure = try expired()
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: insecure.path)
+        let hardLinked = try expired()
+        try FileManager.default.linkItem(at: hardLinked, to: temporary.appendingPathComponent("retained-hard-link"))
+        let symbolicLink = directory.appendingPathComponent(UUID().uuidString.lowercased() + ".json")
+        try FileManager.default.createSymbolicLink(at: symbolicLink, withDestinationURL: insecure)
+        let freshMetadata = try expired()
+        try FileManager.default.setAttributes([.modificationDate: now], ofItemAtPath: freshMetadata.path)
+        let freshPayload = try write(FinderBadgeRefreshRequest(id: UUID(), updatedAt: now, directories: [hint], publicationVersion: 1), in: directory)
+        try FileManager.default.setAttributes([.modificationDate: past], ofItemAtPath: freshPayload.path)
+        for _ in 0..<300 { _ = try expired(publicationVersion: nil) }
+        let removable = try (0..<10).map { _ in try expired() }
+        for _ in 0..<8 { _ = try await store.activeDirectories(registeredRoots: [root], now: now) }
+        try check(removable.allSatisfy { !FileManager.default.fileExists(atPath: $0.path) },
+                  "bounded cleanup rotates past legacy files and removes opted-in stale hints")
+        try check([legacy, incompatible, insecure, hardLinked, symbolicLink, freshMetadata, freshPayload].allSatisfy {
+            FileManager.default.fileExists(atPath: $0.path)
+        }, "legacy, unknown, insecure, linked and recently published hints remain untouched")
     }
 
     @discardableResult

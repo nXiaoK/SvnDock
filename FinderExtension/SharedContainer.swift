@@ -1,6 +1,9 @@
 import Darwin
 import Foundation
 
+@_silgen_name("flock")
+func badgePublicationFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
+
 #if SVNDOCK_LOCAL_SIGNED_BUILD && SVNDOCK_PORTABLE_SIGNED_BUILD
 #error("Choose either a current-account local build or a portable ad-hoc build, not both.")
 #endif
@@ -294,6 +297,24 @@ final class SharedContainer: SharedStateLoading {
         try data.write(to: temporary, options: .withoutOverwriting)
         try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
         let destination = directory.appendingPathComponent(instanceID.uuidString.lowercased()).appendingPathExtension("json")
+        let publicationLock = open(directory.appendingPathComponent(".publication.lock").path,
+                                   O_CREAT | O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
+        guard publicationLock >= 0 else { throw SharedContainerError.invalidBadgeRequestDirectory }
+        defer { close(publicationLock) }
+        var lockInfo = stat()
+        guard fstat(publicationLock, &lockInfo) == 0,
+              lockInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), lockInfo.st_nlink == 1,
+              lockInfo.st_uid == geteuid(), lockInfo.st_mode & 0o077 == 0 else {
+            throw SharedContainerError.invalidBadgeRequestDirectory
+        }
+        while badgePublicationFlock(publicationLock, LOCK_EX | LOCK_NB) != 0 {
+            if errno == EINTR { continue }
+            // Observation hints are refreshed periodically. Skip this publish
+            // rather than block Finder while the App removes expired hints.
+            if errno == EWOULDBLOCK || errno == EAGAIN { return }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        defer { _ = badgePublicationFlock(publicationLock, LOCK_UN) }
         guard rename(temporary.path, destination.path) == 0 else {
             throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
         }

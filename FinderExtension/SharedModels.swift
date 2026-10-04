@@ -176,12 +176,14 @@ struct FinderBadgeDirectoryRequest: Codable, Equatable, Sendable {
 
 struct FinderBadgeRequestDocument: Codable, Sendable {
     let schemaVersion: Int
+    let publicationVersion: Int?
     let id: UUID
     let updatedAt: String
     let directories: [FinderBadgeDirectoryRequest]
 
     init(id: UUID, directories: [FinderBadgeDirectoryRequest]) {
         self.schemaVersion = 1
+        self.publicationVersion = 1
         self.id = id
         self.updatedAt = SVNDockTimestamp.now()
         self.directories = directories

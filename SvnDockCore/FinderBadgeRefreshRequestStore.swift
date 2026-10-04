@@ -30,12 +30,17 @@ public struct FinderBadgeRefreshRequest: Codable, Hashable, Sendable {
     public let id: UUID
     public let updatedAt: Date
     public let directories: [FinderBadgeRefreshDirectory]
+    /// Version 1 publishers hold `.publication.lock` while replacing their hint.
+    /// Missing values identify legacy writers whose files must not be pruned.
+    public let publicationVersion: Int?
 
-    public init(schemaVersion: Int = 1, id: UUID, updatedAt: Date = Date(), directories: [FinderBadgeRefreshDirectory]) {
+    public init(schemaVersion: Int = 1, id: UUID, updatedAt: Date = Date(), directories: [FinderBadgeRefreshDirectory],
+                publicationVersion: Int? = nil) {
         self.schemaVersion = schemaVersion
         self.id = id
         self.updatedAt = updatedAt
         self.directories = directories
+        self.publicationVersion = publicationVersion
     }
 }
 
@@ -48,6 +53,7 @@ public actor FinderBadgeRefreshRequestStore {
     public static let requestLifetime: TimeInterval = 30
     private static let maximumRequestBytes = 64 * 1_024
     private let directoryURL: URL
+    private var cleanupOffset = 0
 
     public init(baseDirectoryURL: URL) throws {
         guard baseDirectoryURL.isFileURL, baseDirectoryURL.path.hasPrefix("/"),
@@ -69,6 +75,18 @@ public actor FinderBadgeRefreshRequestStore {
 
         guard let directoryStream = fdopendir(dup(directoryFD)) else { return [] }
         defer { closedir(directoryStream) }
+        // Cleanup is opt-in because an older extension can replace its file
+        // without locking. A busy publisher never delays observation reads.
+        let publicationLock = openat(directoryFD, ".publication.lock", O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        defer { if publicationLock >= 0 { close(publicationLock) } }
+        var lockInfo = stat()
+        let canPrune = publicationLock >= 0 && fstat(publicationLock, &lockInfo) == 0
+            && lockInfo.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG)
+            && lockInfo.st_uid == geteuid() && lockInfo.st_mode & 0o077 == 0 && lockInfo.st_nlink == 1
+            && svnDockFlock(publicationLock, LOCK_EX | LOCK_NB) == 0
+        defer { if canPrune { _ = svnDockFlock(publicationLock, LOCK_UN) } }
+        var inspectedExpired = 0
+        var expiredCount = 0
         // Finder processes leave small hints behind after an unclean exit.
         // Select recent metadata before decoding, so old files cannot occupy a
         // fixed prefix forever. Never unlink a concurrently replaced request.
@@ -84,9 +102,35 @@ public actor FinderBadgeRefreshRequestStore {
                   metadata.st_uid == geteuid(), metadata.st_mode & 0o077 == 0,
                   metadata.st_size > 0, metadata.st_size <= Self.maximumRequestBytes else { continue }
             let modified = TimeInterval(metadata.st_mtimespec.tv_sec) + TimeInterval(metadata.st_mtimespec.tv_nsec) / 1_000_000_000
+            let expired = metadata.st_nlink == 1 && now.timeIntervalSince1970 - modified > Self.requestLifetime
+            if expired { expiredCount += 1 }
+            if canPrune, expired, expiredCount > cleanupOffset, inspectedExpired < 128 {
+                inspectedExpired += 1
+                let descriptor = openat(directoryFD, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+                if descriptor >= 0 {
+                    let data = Self.readPrivateRequest(descriptor)
+                    close(descriptor)
+                    if let data, let request = try? Self.decode(data), request.schemaVersion == 1,
+                       request.publicationVersion == 1, request.id == id,
+                       now.timeIntervalSince(request.updatedAt) > Self.requestLifetime {
+                        // Version 1 writers share this lock and atomically
+                        // replace immutable files; legacy requests stay intact.
+                        var current = stat()
+                        if fstatat(directoryFD, name, &current, AT_SYMLINK_NOFOLLOW) == 0,
+                           current.st_dev == metadata.st_dev, current.st_ino == metadata.st_ino,
+                           unlinkat(directoryFD, name, 0) == 0 { continue }
+                    }
+                }
+            }
             candidates.append((name, id, modified))
             candidates.sort { $0.modifiedAt > $1.modifiedAt }
             if candidates.count > 64 { candidates.removeLast() }
+        }
+        if canPrune {
+            // Rotate past retained legacy hints so they cannot permanently
+            // occupy the bounded cleanup window after many Finder restarts.
+            cleanupOffset += inspectedExpired
+            if cleanupOffset >= expiredCount { cleanupOffset = 0 }
         }
         var requests: [FinderBadgeRefreshRequest] = []
         for candidate in candidates {
