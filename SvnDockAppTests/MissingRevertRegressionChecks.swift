@@ -11,6 +11,7 @@ enum MissingRevertRegressionChecks {
         try await propertyChangesStayShallow()
         try await freshStatusPreventsStaleRecursion()
         try await boundaryChangesPreventMutation()
+        try await nestedWorkingCopiesPreventMutation()
         try await ambiguousAliasesDoNotRevert()
         try await statusRequestsAreBounded()
     }
@@ -50,7 +51,8 @@ enum MissingRevertRegressionChecks {
         let calls = await fixture.runner.reverts
         try check(calls.count == 1 && calls[0].depth == "empty" && calls[0].paths == ["properties"],
                   "reverting directory properties cannot discard unselected child edits")
-        try check(await fixture.runner.infoRequests.isEmpty, "ordinary directory changes do not require info scans")
+        try check(await fixture.runner.infoRequests == [["properties"]],
+                  "ordinary directory changes verify their working-copy ownership")
     }
 
     static func freshStatusPreventsStaleRecursion() async throws {
@@ -108,9 +110,31 @@ enum MissingRevertRegressionChecks {
         try check(requests.count == 2 && requests.allSatisfy { $0.count <= 256 }
                   && Set(requests.flatMap { $0 }) == Set(paths),
                   "large selections complete bounded status batches before mutation")
+        try check(await fixture.runner.infoRequests == requests,
+                  "large selections verify every target's ownership in bounded metadata batches")
         let calls = await fixture.runner.reverts
         try check(calls.count == 1 && calls[0].depth == "empty" && Set(calls[0].paths) == Set(paths),
                   "batching preflight preserves every selected file in the eventual revert")
+    }
+
+    static func nestedWorkingCopiesPreventMutation() async throws {
+        for nested in [
+            RevertTestRunner.Entry(status: "modified", foreignWorkingCopy: true),
+            RevertTestRunner.Entry(status: "normal", properties: "modified", kind: "dir", foreignWorkingCopy: true)
+        ] {
+            let fixture = try RevertServiceFixture(entries: [
+                "deleted": .init(status: "deleted", kind: "dir", schedule: "delete"),
+                "nested": nested
+            ])
+            defer { fixture.remove() }
+            var rejected = false
+            do {
+                try await fixture.service.revert(relativePaths: ["deleted", "nested"], in: fixture.copy)
+            } catch is SvnDockServiceError { rejected = true }
+            let reverts = await fixture.runner.reverts
+            try check(rejected && reverts.isEmpty,
+                      "a nested file or property-only directory blocks all groups before any mutation")
+        }
     }
 
     static func ambiguousAliasesDoNotRevert() async throws {
@@ -180,6 +204,7 @@ private actor RevertTestRunner: ProcessRunning {
         var properties = "none"
         var kind = "file"
         var schedule = "normal"
+        var foreignWorkingCopy = false
     }
     struct Revert: Sendable {
         let depth: String
@@ -235,7 +260,7 @@ private actor RevertTestRunner: ProcessRunning {
             xml = "<info>" + paths.compactMap { path in
                 entries[path].map { entry in
                     """
-                    <entry path="\(path)" kind="\(entry.kind)" revision="12"><wc-info><wcroot-abspath>\(root.path)</wcroot-abspath><schedule>\(entry.schedule)</schedule></wc-info></entry>
+                    <entry path="\(path)" kind="\(entry.kind)" revision="12"><wc-info><wcroot-abspath>\(entry.foreignWorkingCopy ? root.appendingPathComponent("nested").path : root.path)</wcroot-abspath><schedule>\(entry.schedule)</schedule></wc-info></entry>
                     """
                 }
             }.joined() + "</info>"

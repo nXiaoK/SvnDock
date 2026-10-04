@@ -21,6 +21,10 @@ final class MissingRevertRegressionTests: XCTestCase {
         try await MissingRevertRegressionChecks.statusRequestsAreBounded()
     }
 
+    func testNestedWorkingCopiesPreventMutation() async throws {
+        try await MissingRevertRegressionChecks.nestedWorkingCopiesPreventMutation()
+    }
+
     func testAmbiguousAliasesDoNotRevert() async throws {
         try await MissingRevertRegressionChecks.ambiguousAliasesDoNotRevert()
     }

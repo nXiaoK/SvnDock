@@ -440,6 +440,29 @@ actor CoreSvnDockService: SvnDockServicing {
                     for: relativePath,
                     in: coreCopy
                 )
+                // Unversioned directories remain browsable, but their nearest
+                // versioned ancestor must belong to this working copy. A nested
+                // checkout must never acquire the outer copy's entry identity.
+                var ancestor = directoryURL
+                while true {
+                    let infoResult = try await runner.run(builder.makeInvocation(
+                        for: .infoTargets(paths: [ancestor.path]), in: coreCopy
+                    ))
+                    try Task.checkCancellation()
+                    if infoResult.succeeded {
+                        let infos = try SVNXMLParser.parseInfos(infoResult.standardOutput)
+                        guard let info = infos.first(where: {
+                            Self.absoluteURL(for: $0.path, in: coreCopy) == ancestor
+                        }), Self.belongsToWorkingCopy(info, copy: coreCopy) else {
+                            throw SvnDockServiceError.unavailable("所选目录属于其它工作副本，请单独打开所属工作副本。")
+                        }
+                        break
+                    }
+                    guard ancestor != coreCopy.localPath.standardizedFileURL else {
+                        throw SVNProcessFailure(result: infoResult)
+                    }
+                    ancestor.deleteLastPathComponent()
+                }
                 let diskChildren = try Self.immediateDiskChildren(
                     of: directoryURL,
                     in: coreCopy
@@ -839,6 +862,7 @@ actor CoreSvnDockService: SvnDockServicing {
         builder: SVNCommandBuilder, runner: any ProcessRunning
     ) async throws -> [([String], SVNDepth)] {
         var statuses: [String: SvnDockCore.StatusEntry] = [:]
+        var infoByPath: [String: SVNInfo] = [:]
         var start = 0
         // Status does not support --targets. Bound both the number of arguments
         // and their bytes while checking the full selection before any revert.
@@ -862,6 +886,22 @@ actor CoreSvnDockService: SvnDockServicing {
             ) {
                 statuses[absoluteURL(for: entry.path, in: workingCopy).path] = entry
             }
+            // Files and property-only directories can also live in nested
+            // checkouts. Verify every target before any group is mutated.
+            let batch = Array(targets[start..<end])
+            let infoResult = try await runner.run(builder.makeInvocation(
+                for: .infoTargets(paths: batch), in: workingCopy
+            ))
+            guard infoResult.succeeded else { throw SVNProcessFailure(result: infoResult) }
+            for info in try SVNXMLParser.parseInfos(infoResult.standardOutput) {
+                infoByPath[absoluteURL(for: info.path, in: workingCopy).path] = info
+            }
+            for target in batch {
+                guard let info = infoByPath[absoluteURL(for: target, in: workingCopy).path],
+                      belongsToWorkingCopy(info, copy: workingCopy) else {
+                    throw SvnDockServiceError.unavailable("无法确认“\(target)”属于当前工作副本，请单独打开所属工作副本后还原。")
+                }
+            }
             start = end
         }
 
@@ -871,15 +911,6 @@ actor CoreSvnDockService: SvnDockServicing {
         }
         var recursive = Set<String>()
         if !candidates.isEmpty {
-            try Task.checkCancellation()
-            let result = try await runner.run(builder.makeInvocation(
-                for: .infoTargets(paths: candidates), in: workingCopy
-            ))
-            guard result.succeeded else { throw SVNProcessFailure(result: result) }
-            let infos = try SVNXMLParser.parseInfos(result.standardOutput)
-            let infoByPath = Dictionary(infos.map {
-                (absoluteURL(for: $0.path, in: workingCopy).path, $0)
-            }, uniquingKeysWith: { _, latest in latest })
             for target in candidates {
                 let path = absoluteURL(for: target, in: workingCopy).path
                 guard let info = infoByPath[path], info.kind == .directory else { continue }
@@ -889,10 +920,6 @@ actor CoreSvnDockService: SvnDockServicing {
                 // must remain shallow to preserve unrelated child edits.
                 if (status == .missing && info.schedule == "normal")
                     || (status == .deleted && info.schedule == "delete") {
-                    guard info.workingCopyRootURL?.resolvingSymlinksInPath().standardizedFileURL
-                        == workingCopy.localPath.resolvingSymlinksInPath().standardizedFileURL else {
-                        throw SvnDockServiceError.unavailable("无法确认“\(target)”属于当前工作副本，请刷新后重试。")
-                    }
                     recursive.insert(target)
                 }
             }

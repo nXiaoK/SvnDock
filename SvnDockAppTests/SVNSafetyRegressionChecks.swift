@@ -10,7 +10,42 @@ enum SVNSafetyRegressionChecks {
         try await switchedTargetsCannotSilentlyCommit()
         try await revertRecoveryUsesFreshState()
         try await externalBoundariesSurviveDuplicateStatus()
+        try await nestedWorkingCopiesStayIsolated()
         print("SVN safety checks passed")
+    }
+
+    private static func nestedWorkingCopiesStayIsolated() async throws {
+        let f = try await SafetyFixture.create()
+        defer { f.remove() }
+        _ = try await f.svn(["checkout", f.remote("trunk"), "nested"])
+        try f.write("nested local edit\n", to: "nested/source/a.txt")
+        try f.write("nested private data\n", to: "nested/private/file.txt")
+        try f.write("outer private data\n", to: "private/file.txt")
+        try f.write("outer local edit\n", to: "other.txt")
+        _ = try await f.svn(["delete", "source"])
+        _ = try await f.svn(["propset", "custom:local", "nested property edit", "nested/source"])
+        let service = try f.service()
+        let copy = try await service.registerWorkingCopy(at: f.root)
+        let before = try await f.status()
+        for targets in [["source", "nested/source/a.txt"], ["other.txt", "nested/source"]] {
+            do {
+                try await service.revert(relativePaths: targets, in: copy)
+                throw SafetyFailure("revert crossed into a nested working copy")
+            } catch is SvnDockServiceError { }
+            try check(try await f.status() == before, "a nested target blocks every outer revert group")
+            try check(try f.read("nested/source/a.txt") == "nested local edit\n", "nested edits remain intact")
+            try check(try f.read("other.txt") == "outer local edit\n", "unconfirmed outer edits remain intact")
+        }
+        for path in ["nested", "nested/source", "nested/private"] {
+            do {
+                _ = try await service.directoryChildren(relativePath: path, in: copy)
+                throw SafetyFailure("directory expansion assigned nested contents to the outer working copy")
+            } catch is SvnDockServiceError { }
+        }
+        let children = try await service.directoryChildren(relativePath: "private", in: copy)
+        try check(children.count == 1 && children[0].relativePath == "private/file.txt"
+                  && children[0].status == .unversioned,
+                  "ordinary unversioned directories remain browsable in their owning working copy")
     }
 
     private static func externalBoundariesSurviveDuplicateStatus() async throws {

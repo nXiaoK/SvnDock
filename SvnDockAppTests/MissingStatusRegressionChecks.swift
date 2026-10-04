@@ -136,7 +136,10 @@ private actor MissingStatusRunner: ProcessRunning {
             let requested = Set((fileTargets + Array(invocation.arguments[(separator + 1)...])).map {
                 $0.hasPrefix("./") ? String($0.dropFirst(2)) : $0
             })
-            xml = "<info>" + fixtures.filter { requested.contains($0.path) }.map { fixture in
+            let rootInfo = requested.contains(".") ? """
+                <entry path="." kind="dir"><wc-info><wcroot-abspath>\(invocation.currentDirectoryURL!.path)</wcroot-abspath><schedule>normal</schedule></wc-info></entry>
+                """ : ""
+            xml = "<info>" + rootInfo + fixtures.filter { requested.contains($0.path) }.map { fixture in
                 let schedule = fixture.schedule.map { "<schedule>\($0)</schedule>" } ?? ""
                 return """
                 <entry path="\(fixture.path)" kind="\(fixture.kind)" revision="\(fixture.revision < 0 ? 12 : fixture.revision)"><wc-info>\(schedule)</wc-info></entry>
