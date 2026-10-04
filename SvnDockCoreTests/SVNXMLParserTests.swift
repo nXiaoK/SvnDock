@@ -247,5 +247,24 @@ final class SVNXMLParserTests: XCTestCase {
                 .unsupportedPropertyEncoding("base64")
             )
         }
+        XCTAssertThrowsError(try SVNXMLParser.parseProperties(Data(xml.utf8), including: ["svn:ignore"]))
+    }
+
+    func testPropertyFilterExcludesUnrelatedBinaryValuesAndRetainsTargets() throws {
+        let xml = Data("""
+        <properties><target path="dir ">
+          <property name="custom:binary" encoding="base64">AAH/</property>
+          <property name="svn:ignore">build\n*.tmp\n</property>
+        </target><target path="other">
+          <property name="custom:binary" encoding="base64">AAH/</property>
+        </target></properties>
+        """.utf8)
+        XCTAssertThrowsError(try SVNXMLParser.parseProperties(xml))
+        let entries = try SVNXMLParser.parseProperties(xml, including: ["svn:ignore"])
+        XCTAssertEqual(entries.map(\.path), ["dir ", "other"])
+        XCTAssertEqual(entries[0].value(forProperty: "svn:ignore"), "build\n*.tmp\n")
+        XCTAssertNil(entries[0].value(forProperty: "custom:binary"))
+        XCTAssertTrue(entries[1].properties.isEmpty)
+        XCTAssertThrowsError(try SVNXMLParser.parseProperties(Data("<properties>".utf8), including: ["svn:ignore"]))
     }
 }

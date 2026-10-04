@@ -243,6 +243,24 @@ struct SvnDockCoreSmokeTestMain {
             "property value"
         )
 
+        let mixedProperties = Data("""
+        <properties><target path="dir ">
+          <property name="custom:binary" encoding="base64">AAH/</property>
+          <property name="svn:ignore">build\n*.tmp\n</property>
+        </target><target path="other">
+          <property name="custom:binary" encoding="base64">AAH/</property>
+        </target></properties>
+        """.utf8)
+        let filtered = try SVNXMLParser.parseProperties(mixedProperties, including: ["svn:ignore"])
+        try check(filtered.map(\.path) == ["dir ", "other"]
+                  && filtered[0].value(forProperty: "svn:ignore") == "build\n*.tmp\n"
+                  && filtered[0].value(forProperty: "custom:binary") == nil
+                  && filtered[1].properties.isEmpty, "property filtering preserves only requested values and exact target paths")
+        do {
+            _ = try SVNXMLParser.parseProperties(mixedProperties)
+            throw SmokeFailure("unfiltered opaque property was accepted")
+        } catch SVNXMLParserError.unsupportedPropertyEncoding("base64") { }
+
         do {
             let encodedPropertyXML = """
             <properties><target path=".">
@@ -254,6 +272,12 @@ struct SvnDockCoreSmokeTestMain {
         } catch SVNXMLParserError.unsupportedPropertyEncoding("base64") {
             // Expected. Rewriting an opaque value would risk data loss.
         }
+        do {
+            _ = try SVNXMLParser.parseProperties(Data("""
+            <properties><target path="."><property name="svn:ignore" encoding="base64">AAE=</property></target></properties>
+            """.utf8), including: ["svn:ignore"])
+            throw SmokeFailure("filtered opaque ignore property was accepted")
+        } catch SVNXMLParserError.unsupportedPropertyEncoding("base64") { }
 
         let unifiedDiff = UnifiedDiffParser.parse("""
         --- Sources/App.swift (revision 4)

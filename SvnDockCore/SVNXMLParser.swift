@@ -57,8 +57,12 @@ public enum SVNXMLParser {
         return delegate.entries
     }
 
-    public static func parseProperties(_ data: Data) throws -> [SVNPropertyListEntry] {
-        let delegate = PropertiesXMLDelegate()
+    /// An explicit name filter excludes unrelated values and encodings while
+    /// retaining target paths. By default every property must be readable.
+    public static func parseProperties(
+        _ data: Data, including propertyNames: Set<String>? = nil
+    ) throws -> [SVNPropertyListEntry] {
+        let delegate = PropertiesXMLDelegate(propertyNames: propertyNames)
         try parse(data, delegate: delegate)
         if let encoding = delegate.unsupportedEncoding {
             throw SVNXMLParserError.unsupportedPropertyEncoding(encoding)
@@ -101,6 +105,11 @@ private final class PropertiesXMLDelegate: NSObject, XMLParserDelegate {
     private var currentEntry: PendingEntry?
     private var currentPropertyName: String?
     private var text = ""
+    private let propertyNames: Set<String>?
+
+    init(propertyNames: Set<String>?) {
+        self.propertyNames = propertyNames
+    }
 
     func parser(
         _ parser: XMLParser,
@@ -117,6 +126,11 @@ private final class PropertiesXMLDelegate: NSObject, XMLParserDelegate {
             }
         case "property":
             currentPropertyName = attributeDict["name"]
+            if let propertyNames,
+               !propertyNames.contains(currentPropertyName ?? "") {
+                currentPropertyName = nil
+                return
+            }
             if let encoding = attributeDict["encoding"], encoding.lowercased() != "utf-8" {
                 unsupportedEncoding = encoding
             }
@@ -126,7 +140,7 @@ private final class PropertiesXMLDelegate: NSObject, XMLParserDelegate {
     }
 
     func parser(_ parser: XMLParser, foundCharacters string: String) {
-        text += string
+        if currentPropertyName != nil { text += string }
     }
 
     func parser(

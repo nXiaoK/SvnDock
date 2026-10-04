@@ -1189,7 +1189,7 @@ actor CoreSvnDockService: SvnDockServicing {
                     }
 
                     let propertyEntries = try SVNXMLParser.parseProperties(
-                        listResult.standardOutput
+                        listResult.standardOutput, including: ["svn:ignore"]
                     )
                     let parentProperties = Self.propertyEntry(
                         for: parentPath,
@@ -1388,7 +1388,7 @@ actor CoreSvnDockService: SvnDockServicing {
         }
         let properties = try await runner.run(builder.makeInvocation(for: .properties(paths: [parent]), in: copy))
         guard properties.succeeded else { throw SVNProcessFailure(result: properties) }
-        let entries = try SVNXMLParser.parseProperties(properties.standardOutput)
+        let entries = try SVNXMLParser.parseProperties(properties.standardOutput, including: ["svn:ignore"])
         guard let original = propertyEntry(for: parent, entries: entries, in: copy)?.value(forProperty: "svn:ignore") else {
             throw SvnDockIgnoreRemovalError.unsupportedSource
         }

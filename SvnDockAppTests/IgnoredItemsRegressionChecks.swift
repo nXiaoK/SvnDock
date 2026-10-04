@@ -20,6 +20,7 @@ enum IgnoredItemsRegressionChecks {
         defer { try? FileManager.default.removeItem(at: fixture.temporary) }
         try await fixture.create()
         try await exactRulePreservesOtherPropertiesAndContent(fixture)
+        try await binaryPropertiesDoNotBlockIgnoreRules(fixture)
         try await sharedPatternsExposeTheirWholeScope(fixture)
         try await ignoredDirectoriesRemainOpaque(fixture)
         try await unsupportedSourcesAndPartialSuccess(fixture)
@@ -110,6 +111,31 @@ enum IgnoredItemsRegressionChecks {
         try check(!(try await fixture.service.ignoredEntries(for: fixture.copy))
             .contains { $0.relativePath == "globs/item7.tmp" || $0.relativePath == "globs/item77.tmp" },
                   "preview glob matching agrees with the real SVN client")
+    }
+
+    private static func binaryPropertiesDoNotBlockIgnoreRules(_ fixture: IgnoredItemsFixture) async throws {
+        let payload = Data([0, 1, 255])
+        let propertyFile = fixture.temporary.appendingPathComponent("binary-property")
+        try payload.write(to: propertyFile)
+        _ = try await fixture.svn(["propset", "custom:binary", "-F", propertyFile.path, "binary"])
+        try await fixture.setIgnore("keep.cache\n", on: "binary")
+        try fixture.write("keep selected content\n", to: "binary/selected.cache")
+        try fixture.write("keep sibling content\n", to: "binary/keep.cache")
+        try await fixture.service.addIgnoreRules([
+            .init(targetRelativePath: "binary/selected.cache", parentRelativePath: "binary",
+                  pattern: "selected.cache", mode: .name)
+        ], in: fixture.copy)
+        let entry = try await fixture.ignored("binary/selected.cache")
+        let plan = try await fixture.service.prepareIgnoreRemoval(for: entry, in: fixture.copy)
+        try check(plan.patterns == ["selected.cache"], "binary custom properties do not block ignore addition or preview")
+        try await fixture.service.removeIgnoreRule(plan, in: fixture.copy)
+        let remaining = try await fixture.svn(["propget", "--strict", "svn:ignore", "binary"])
+        let binary = try await fixture.svn(["propget", "--strict", "custom:binary", "binary"])
+        try check(remaining.standardOutputString == "keep.cache\n" && binary.standardOutput == payload,
+                  "ignore removal preserves unrelated rules and the exact binary property bytes")
+        try check(try fixture.read("binary/selected.cache") == "keep selected content\n"
+                  && fixture.read("binary/keep.cache") == "keep sibling content\n",
+                  "binary property compatibility never changes file content")
     }
 
     private static func ignoredDirectoriesRemainOpaque(_ fixture: IgnoredItemsFixture) async throws {
@@ -308,7 +334,7 @@ private struct IgnoredItemsFixture: Sendable {
         guard result.succeeded else { throw IgnoredItemsFailure(message: "temporary SVN repository creation failed") }
         _ = try await svn(["checkout", repository.absoluteString, copy.rootURL.path], in: temporary)
         _ = try await sharedStore.register(WorkingCopy(id: copy.id, name: copy.name, localPath: copy.rootURL))
-        let directories = ["exact", "extensions", "globs", "opaque", "sources", "mixed-inherited", "mixed-client", "stale", "boundaries"]
+        let directories = ["exact", "binary", "extensions", "globs", "opaque", "sources", "mixed-inherited", "mixed-client", "stale", "boundaries"]
         for directory in directories {
             try FileManager.default.createDirectory(at: copy.rootURL.appendingPathComponent(directory), withIntermediateDirectories: false)
         }
